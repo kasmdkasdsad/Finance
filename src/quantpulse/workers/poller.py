@@ -6,7 +6,9 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
   every ``poll_quotes_off_hours_seconds`` otherwise;
 * the Treasury curve — every ``poll_rates_seconds`` (the feed is slow, so this matters);
 * NFL / college-football scoreboards — every ``poll_sports_seconds``;
-* the daily picks email — once per trading day at ``picks_send_time`` (America/New_York) when enabled.
+* the daily picks email — once per trading day at ``picks_send_time`` (America/New_York) when enabled;
+* the paper-trading sandbox — auto-trading agents rebalance once per trading day after
+  ``sandbox_trade_time`` and every account is marked to market after ``sandbox_mark_time``.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 PICKS_CHECK_SECONDS = 60.0
+SANDBOX_CHECK_SECONDS = 60.0
 
 
 @dataclass
@@ -76,6 +79,7 @@ class Poller:
             asyncio.create_task(
                 self._loop("picks_email", lambda: PICKS_CHECK_SECONDS, self.maybe_send_picks)
             ),
+            asyncio.create_task(self._loop("sandbox", lambda: SANDBOX_CHECK_SECONDS, self.run_sandbox)),
         ]
         logger.info("poller started (%d jobs)", len(self._tasks))
 
@@ -162,6 +166,9 @@ class Poller:
             await repo.record_ingestion(session, "picks_email", key, "smtp", len(result.sent_to))
         self._picks_sent_on = key
         return f"sent for {key} to {len(result.sent_to)} recipient(s)"
+
+    async def run_sandbox(self) -> str:
+        return await self._c.sandbox.run_scheduled()
 
     async def _already_sent(self, key: str) -> bool:
         async with self._c.db.session() as session:

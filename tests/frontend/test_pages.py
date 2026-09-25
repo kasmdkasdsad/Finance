@@ -3,7 +3,7 @@
 import pytest
 from streamlit.testing.v1 import AppTest
 
-PAGES = ["overview", "options", "picks", "valuation", "portfolio", "vehicle", "sports", "system"]
+PAGES = ["overview", "options", "picks", "sandbox", "valuation", "portfolio", "vehicle", "sports", "system"]
 
 
 def page(module: str, api_url: str, state: dict | None = None) -> AppTest:
@@ -96,3 +96,36 @@ def test_picks_email_refuses_synthetic(api_server):
     next(b for b in at.button if b.label == "Send email").click().run()
     assert not at.exception
     assert any("synthetic" in w.value.lower() for w in at.warning)
+
+
+def test_sandbox_account_agent_and_training_flow(api_server):
+    at = page("sandbox", api_server)
+    at.run()
+    assert_clean(at)
+    name = next(t for t in at.text_input if t.label == "Account name")
+    name.set_value("UI agent")
+    next(c for c in at.checkbox if c.label == "Allow synthetic prices").check()
+    next(b for b in at.button if b.label == "Open account").click().run()
+    assert_clean(at)
+    assert any(m.label == "Equity" and m.value == "$100,000.00" for m in at.metric)
+    assert any("SYNTHETIC" in w.value for w in at.warning)  # the account is flagged as not-real
+
+    at.toggle(key="sandbox_force").set_value(True)
+    next(b for b in at.button if b.label == "Run agent now").click().run()
+    assert_clean(at)
+    assert any("Agent ran for" in s.value for s in at.success)
+    assert len(at.get("plotly_chart")) == 1  # equity vs benchmark (created + first run)
+
+    for view in ("Learning", "Positions", "Trades", "Journal", "Manual order", "Settings"):
+        at.segmented_control(key="sandbox_view").set_value(view).run()
+        assert_clean(at)
+    at.segmented_control(key="sandbox_view").set_value("Manual order").run()
+    next(b for b in at.button if b.label == "Place paper order").click().run()
+    assert_clean(at)
+    assert any(s.value.startswith("Filled: buy") for s in at.success)
+
+    next(b for b in at.button if b.label == "Train").click().run()
+    assert_clean(at)
+    assert at.session_state["sandbox_view"] == "Learning"
+    assert any(m.label == "Weights applied" and m.value == "Yes" for m in at.metric)  # synthetic allowed
+    assert len(at.get("plotly_chart")) == 3  # learned weights, replay equity, replay weights

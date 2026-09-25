@@ -20,6 +20,7 @@ from quantpulse.api.routers import (
     picks,
     portfolio,
     rates,
+    sandbox,
     sports,
     system,
     vehicle,
@@ -69,6 +70,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
                 "vehicle",
                 "sports",
                 "picks",
+                "sandbox",
             )
         ],
     )
@@ -76,7 +78,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["*"],
     )
     app.add_middleware(RequestContextMiddleware)
@@ -84,7 +86,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
     app.include_router(system.public)
     auth = [Depends(require_api_key)]
-    for module in (system, market, rates, options, fundamentals, portfolio, vehicle, sports, picks):
+    for module in (system, market, rates, options, fundamentals, portfolio, vehicle, sports, picks, sandbox):
         app.include_router(module.router, prefix=API_PREFIX, dependencies=auth)
     return app
 

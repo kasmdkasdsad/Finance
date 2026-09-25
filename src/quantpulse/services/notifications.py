@@ -24,7 +24,7 @@ class NotConfiguredError(QuantPulseError):
 
 
 class SyntheticDataRefused(QuantPulseError):
-    """Refused to email picks computed from synthetic prices (maps to HTTP 409)."""
+    """Refused to act on synthetic prices, e.g. email picks or fill a paper trade (maps to HTTP 409)."""
 
 
 def _pct(v: float | None) -> str:

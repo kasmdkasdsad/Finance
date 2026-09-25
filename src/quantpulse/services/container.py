@@ -35,6 +35,7 @@ from quantpulse.services.options import OptionsService
 from quantpulse.services.picks import PicksService
 from quantpulse.services.portfolio import PortfolioService
 from quantpulse.services.rates import RatesService
+from quantpulse.services.sandbox import SandboxService
 from quantpulse.services.sports import SportsService
 from quantpulse.services.valuation import ValuationService
 from quantpulse.services.vehicle import VehicleService
@@ -137,6 +138,7 @@ class Container:
         self.vehicle = VehicleService(settings, self.gateway, self.db, self.clock, self.eia, self.fueleconomy)
         self.sports = SportsService(settings, self.gateway, self.db, self.clock, self.espn, self.odds)
         self.picks = PicksService(settings, self.clock, self.market)
+        self.sandbox = SandboxService(settings, self.db, self.clock, self.market, self.rates)
         self.notifier = EmailNotifier(settings)
 
         from quantpulse.workers.poller import Poller  # local import avoids a cycle

@@ -6,7 +6,7 @@ data gateway's archive fallback expects — or ``None`` when nothing is stored.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any, cast
 
@@ -29,6 +29,11 @@ from quantpulse.db.models import (
     PortfolioRow,
     PriceBarRow,
     QuoteSnapshotRow,
+    SandboxAccountRow,
+    SandboxEquityRow,
+    SandboxJournalRow,
+    SandboxPositionRow,
+    SandboxTradeRow,
     SecFilingRow,
     SportsGameRow,
     TeamRatingRow,
@@ -652,3 +657,156 @@ async def save_ratings(
     )
     await session.execute(stmt, rows)
     return len(rows)
+
+
+# ----------------------------------------------------------------------------- trading sandbox
+async def list_sandbox_accounts(session: AsyncSession) -> list[SandboxAccountRow]:
+    return list((await session.execute(select(SandboxAccountRow).order_by(SandboxAccountRow.id))).scalars())
+
+
+async def get_sandbox_account(session: AsyncSession, account_id: int) -> SandboxAccountRow:
+    row = await session.get(SandboxAccountRow, account_id)
+    if row is None:
+        raise NotFoundError(f"sandbox account {account_id} not found")
+    return row
+
+
+async def sandbox_name_exists(session: AsyncSession, name: str, exclude_id: int | None = None) -> bool:
+    query = select(SandboxAccountRow.id).where(func.lower(SandboxAccountRow.name) == name.lower())
+    if exclude_id is not None:
+        query = query.where(SandboxAccountRow.id != exclude_id)
+    return (await session.execute(query)).first() is not None
+
+
+async def sandbox_positions(session: AsyncSession, account_id: int) -> list[SandboxPositionRow]:
+    return list(
+        (
+            await session.execute(
+                select(SandboxPositionRow)
+                .where(SandboxPositionRow.account_id == account_id)
+                .order_by(SandboxPositionRow.symbol)
+            )
+        ).scalars()
+    )
+
+
+async def replace_sandbox_positions(
+    session: AsyncSession, account_id: int, positions: Mapping[str, tuple[float, float]]
+) -> None:
+    """Replace an account's holdings with ``{symbol: (quantity, avg_cost)}``."""
+    await session.execute(delete(SandboxPositionRow).where(SandboxPositionRow.account_id == account_id))
+    session.add_all(
+        SandboxPositionRow(account_id=account_id, symbol=s, quantity=q, avg_cost=c)
+        for s, (q, c) in sorted(positions.items())
+    )
+    await session.flush()
+
+
+async def sandbox_trades(session: AsyncSession, account_id: int, limit: int = 200) -> list[SandboxTradeRow]:
+    """Most recent trades first."""
+    return list(
+        (
+            await session.execute(
+                select(SandboxTradeRow)
+                .where(SandboxTradeRow.account_id == account_id)
+                .order_by(SandboxTradeRow.executed_at.desc(), SandboxTradeRow.id.desc())
+                .limit(limit)
+            )
+        ).scalars()
+    )
+
+
+async def sandbox_trade_totals(session: AsyncSession, account_id: int) -> tuple[int, float, float]:
+    """``(number of trades, realised P&L, commissions paid)``."""
+    row = (
+        await session.execute(
+            select(
+                func.count(SandboxTradeRow.id),
+                func.coalesce(func.sum(SandboxTradeRow.realized_pnl), 0.0),
+                func.coalesce(func.sum(SandboxTradeRow.commission), 0.0),
+            ).where(SandboxTradeRow.account_id == account_id)
+        )
+    ).one()
+    return int(row[0]), float(row[1]), float(row[2])
+
+
+async def sandbox_equity(session: AsyncSession, account_id: int, limit: int = 2000) -> list[SandboxEquityRow]:
+    """The latest ``limit`` equity snapshots, oldest first."""
+    rows = list(
+        (
+            await session.execute(
+                select(SandboxEquityRow)
+                .where(SandboxEquityRow.account_id == account_id)
+                .order_by(SandboxEquityRow.recorded_at.desc(), SandboxEquityRow.id.desc())
+                .limit(limit)
+            )
+        ).scalars()
+    )
+    return rows[::-1]
+
+
+async def first_sandbox_benchmark(session: AsyncSession, account_id: int) -> SandboxEquityRow | None:
+    """The earliest snapshot that recorded a benchmark price (the base for benchmark returns)."""
+    return (
+        await session.execute(
+            select(SandboxEquityRow)
+            .where(SandboxEquityRow.account_id == account_id, SandboxEquityRow.benchmark_price.is_not(None))
+            .order_by(SandboxEquityRow.recorded_at, SandboxEquityRow.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def latest_sandbox_equity(session: AsyncSession, account_id: int) -> SandboxEquityRow | None:
+    return (
+        await session.execute(
+            select(SandboxEquityRow)
+            .where(SandboxEquityRow.account_id == account_id)
+            .order_by(SandboxEquityRow.recorded_at.desc(), SandboxEquityRow.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def sandbox_journal(
+    session: AsyncSession, account_id: int, limit: int = 100
+) -> list[SandboxJournalRow]:
+    """Most recent entries first."""
+    return list(
+        (
+            await session.execute(
+                select(SandboxJournalRow)
+                .where(SandboxJournalRow.account_id == account_id)
+                .order_by(SandboxJournalRow.created_at.desc(), SandboxJournalRow.id.desc())
+                .limit(limit)
+            )
+        ).scalars()
+    )
+
+
+async def add_sandbox_journal(
+    session: AsyncSession,
+    account_id: int,
+    kind: str,
+    summary: str,
+    details: Mapping[str, Any],
+    created_at: datetime,
+) -> SandboxJournalRow:
+    row = SandboxJournalRow(
+        account_id=account_id, kind=kind, summary=summary, details=dict(details), created_at=created_at
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def clear_sandbox_history(session: AsyncSession, account_id: int) -> None:
+    """Delete positions, trades, equity snapshots and journal entries (the account row itself stays)."""
+    for model in (SandboxPositionRow, SandboxTradeRow, SandboxEquityRow, SandboxJournalRow):
+        await session.execute(delete(model).where(model.account_id == account_id))
+
+
+async def delete_sandbox_account(session: AsyncSession, account_id: int) -> None:
+    row = await get_sandbox_account(session, account_id)
+    await clear_sandbox_history(session, account_id)  # explicit: do not depend on SQLite FK enforcement
+    await session.delete(row)

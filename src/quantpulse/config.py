@@ -165,6 +165,18 @@ class Settings(BaseSettings):
     smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
     email_from: str | None = None
 
+    # --- Paper-trading sandbox -------------------------------------------------------------------
+    sandbox_scheduler_enabled: bool = Field(
+        default=True, description="Let the poller run auto-trading agents and record daily equity marks."
+    )
+    sandbox_trade_time: str = Field(
+        default="10:00",
+        description="HH:MM, America/New_York: when auto-trading agents rebalance each trading day.",
+    )
+    sandbox_mark_time: str = Field(
+        default="16:05", description="HH:MM, America/New_York: when every account is marked to market."
+    )
+
     # --- Provider quotas ------------------------------------------------------------------------
     polygon_requests_per_minute: float = Field(default=5.0, gt=0, description="Free tier: 5/min.")
 
@@ -193,7 +205,7 @@ class Settings(BaseSettings):
         adapter = TypeAdapter(EmailStr)
         return [adapter.validate_python(v) for v in value]
 
-    @field_validator("picks_send_time")
+    @field_validator("picks_send_time", "sandbox_trade_time", "sandbox_mark_time")
     @classmethod
     def _validate_time(cls, value: str) -> str:
         from datetime import datetime as _dt

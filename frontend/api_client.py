@@ -60,11 +60,15 @@ class ApiClient:
     def get(self, path: str, **params: Any) -> Any:
         return self.request("GET", path, params={k: v for k, v in params.items() if v is not None})
 
-    def post(self, path: str, payload: Any) -> Any:
-        return self.request("POST", path, json=payload)
+    def post(self, path: str, payload: Any = None, **params: Any) -> Any:
+        query = {k: v for k, v in params.items() if v is not None}
+        return self.request("POST", path, json=payload, params=query or None)
 
     def put(self, path: str, payload: Any) -> Any:
         return self.request("PUT", path, json=payload)
+
+    def patch(self, path: str, payload: Any) -> Any:
+        return self.request("PATCH", path, json=payload)
 
     def delete(self, path: str) -> Any:
         return self.request("DELETE", path)

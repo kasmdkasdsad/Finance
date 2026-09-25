@@ -15,9 +15,11 @@ synthetic data with a visible status badge.
 | **Asset lifecycle** | 2025 Hyundai Elantra Limited: regional fuel prices, telemetry and fill-up logs, realised MPG, depreciation curve, maintenance schedule, cost per mile | EIA · fueleconomy.gov |
 | **Sports analytics** | Live NFL / FBS scoreboards and lines, Elo power ratings, pre-game and in-game win probability | ESPN · The Odds API |
 | **Daily picks** | Factor screen over a stock universe with a **1-10 rating**, plus an email digest | Market providers · SMTP |
+| **Trading sandbox** | Paper-trading accounts with simulated money, run by a **self-learning agent** that re-weights its factors from its own results; walk-forward training on history | Market providers · Treasury |
 
-> **Disclaimer.** Analytics, valuations, win probabilities and daily picks are model outputs for
-> research and education. They are not investment, betting or mechanical advice.
+> **Disclaimer.** Analytics, valuations, win probabilities, daily picks and the sandbox agent are model
+> outputs for research and education. They are not investment, betting or mechanical advice. The trading
+> sandbox is paper trading only: it has no brokerage connection and cannot place a real order.
 
 ---
 
@@ -31,12 +33,13 @@ synthetic data with a visible status badge.
 6. [API reference](#api-reference)
 7. [Methodology](#methodology)
 8. [Daily picks and the email digest](#daily-picks-and-the-email-digest)
-9. [Vehicle module reference data](#vehicle-module-reference-data)
-10. [Database and migrations](#database-and-migrations)
-11. [Testing and quality gates](#testing-and-quality-gates)
-12. [Project layout](#project-layout)
-13. [Security and operations](#security-and-operations)
-14. [Known limitations](#known-limitations)
+9. [Trading sandbox (paper trading)](#trading-sandbox-paper-trading)
+10. [Vehicle module reference data](#vehicle-module-reference-data)
+11. [Database and migrations](#database-and-migrations)
+12. [Testing and quality gates](#testing-and-quality-gates)
+13. [Project layout](#project-layout)
+14. [Security and operations](#security-and-operations)
+15. [Known limitations](#known-limitations)
 
 ---
 
@@ -93,7 +96,7 @@ flowchart LR
     CB --> PR[providers<br/>strict wire schemas]
     PR --> HTTP[HttpClient<br/>token buckets · retries · concurrency caps]
     HTTP --> EXT[(Yahoo · Polygon · Alpaca · Treasury · SEC · FMP · EIA · fueleconomy.gov · ESPN · Odds API)]
-    G --> WH[(SQLite warehouse<br/>Alembic 0001-0006)]
+    G --> WH[(SQLite warehouse<br/>Alembic 0001-0007)]
     G --> SYN[synthetic generators]
 ```
 
@@ -149,6 +152,7 @@ jittered exponential back-off.
 | Treasury curve | `QP_POLL_RATES_SECONDS` |
 | NFL and FBS scoreboards | `QP_POLL_SPORTS_SECONDS` |
 | Daily picks email | Checked every minute; sent once per trading day |
+| Trading sandbox | Checked every minute; auto-trading agents run once per trading day after `QP_SANDBOX_TRADE_TIME`, and every account is marked to market after `QP_SANDBOX_MARK_TIME` |
 
 Trading hours come from a full NYSE calendar (`core/market_calendar.py`). It covers holidays and
 their Saturday/Sunday observance, including the New Year's exception, Good Friday via the Gregorian
@@ -191,6 +195,7 @@ which would include query-string API keys, is suppressed.
 | Vehicle | `QP_FUEL_REGION`, `QP_FUEL_GRADE` |
 | Sports | `QP_SPORTS_INCLUDE_PRIOR_SEASON`, `QP_ODDS_BOOKMAKER_REGIONS` |
 | Picks / email | `QP_PICKS_UNIVERSE`, `QP_PICKS_TOP_N`, `QP_PICKS_EMAIL_ENABLED`, `QP_PICKS_RECIPIENTS`, `QP_PICKS_SEND_TIME`, `QP_PICKS_ALLOW_SYNTHETIC_EMAIL`, `QP_SMTP_*`, `QP_EMAIL_FROM` |
+| Trading sandbox | `QP_SANDBOX_SCHEDULER_ENABLED`, `QP_SANDBOX_TRADE_TIME` (default 10:00 ET), `QP_SANDBOX_MARK_TIME` (default 16:05 ET); per-account strategy settings are set through the API or UI |
 
 The Streamlit app reads `QP_API_URL` (default `http://127.0.0.1:8000`) and `QP_API_TOKEN`. Both can
 also be changed in the sidebar.
@@ -202,7 +207,8 @@ also be changed in the sidebar.
 Every route is under `/api/v1` except `/health`. When `QP_API_TOKEN` is set, every request must send
 `X-API-Key`. WebSocket clients may pass `?api_key=` instead. Errors always use the same shape:
 `{"error": "...", "detail": ..., "request_id": "..."}`. Validation errors return 422, unknown entities
-404, a refusal to email synthetic picks 409, missing SMTP settings 503, and SMTP delivery failures 502.
+404, a refusal to act on synthetic prices (emailing picks, filling a paper order) 409, missing SMTP
+settings 503, and SMTP delivery failures 502.
 Every response carries `X-Request-ID` and `X-Response-Time-ms` headers.
 
 | Method & path | Purpose |
@@ -228,6 +234,9 @@ Every response carries `X-Request-ID` and `X-Response-Time-ms` headers.
 | `GET/POST /vehicles/{id}/telemetry` · `…/fuel-logs` · `…/maintenance` · `DELETE /vehicles/{id}/{kind}/{record_id}` | Telemetry and logs |
 | `GET /sports/{nfl|college-football}/scoreboard` · `…/ratings` | Scores with win probability · Elo ratings |
 | `GET /picks/daily?top_n=10` · `POST /picks/email` | Daily picks with 1-10 ratings · email digest |
+| `GET/POST /sandbox/accounts` · `GET/PATCH/DELETE /sandbox/accounts/{id}` | Paper accounts · summary marked to live prices |
+| `POST /sandbox/accounts/{id}/step?force=` · `…/train` · `…/orders` · `…/reset?keep_learning=` | Run the agent · walk-forward training · manual paper order · start over |
+| `GET /sandbox/accounts/{id}/trades` · `…/equity` · `…/journal` | Fills · equity snapshots · what the agent did and learned |
 
 Examples:
 
@@ -381,6 +390,85 @@ failures in a day.
 
 ---
 
+## Trading sandbox (paper trading)
+
+The sandbox is a place for a trading agent to practise with **simulated money**. There is no brokerage
+integration anywhere in the code base, so nothing in it can place a real order. Each account keeps its
+cash, positions, fills, equity snapshots and a plain-English journal in the warehouse (migration
+`0007`), so its track record and what it has learned survive restarts. In the UI it is under
+**Markets → Trading Sandbox**.
+
+**Accounts.** `POST /api/v1/sandbox/accounts` opens an account (default $100,000). In `agent` mode the
+learning agent trades it; in `manual` mode you place the orders yourself.
+
+**Simulated fills.** Market orders fill at the live quote adjusted by `slippage_bps` against you (buys
+higher, sells lower), plus an optional `commission_per_trade` and `commission_bps`. Trading is long-only
+with no margin, and fractional shares are kept to 6 decimals. Cost basis is the average fill price.
+Realised P&L is `(fill − avg cost) · qty − commission`.
+
+**The agent's daily loop.** It runs once per trading day at `QP_SANDBOX_TRADE_TIME`, or on demand
+with `POST …/step`:
+
+1. **Learn.** For every factor, measure the *information coefficient* (IC): the Spearman rank
+   correlation between the z-scores recorded at the previous decision and the returns realised since.
+   Update `w_f ← w_f · exp(η · IC_f)`, shrink the weights by `prior_shrink` towards the defaults, floor
+   them at `weight_floor` so noise never switches a factor off, and renormalise. Factors that ranked
+   future winners gain weight; factors that ranked losers lose it.
+2. **Decide.** Re-rank the universe with the six [Daily Picks](#daily-picks-and-the-email-digest)
+   factors, using the *learned* weights. Hold the top `top_k` names that have a positive composite, in
+   equal weight capped at `max_position`, and keep `cash_buffer` in cash.
+3. **Trade.** Sell first, fully exiting names that left the target list, then buy. Rebalancing trades
+   smaller than `min_trade_value` are skipped.
+4. **Explain.** Write journal entries: a *lesson* (IC per factor and weights before → after) and a
+   *decision* (targets, the top-ranked names and the trades).
+
+| Strategy setting | Default | Meaning |
+|---|---|---|
+| `universe` | `QP_PICKS_UNIVERSE` | Tickers the agent may trade (at least 3) |
+| `top_k` · `max_position` · `cash_buffer` | 5 · 25% · 2% | Portfolio construction |
+| `learning_rate` (η) · `prior_shrink` · `weight_floor` | 0.5 · 5% · 2% | Learning speed and guard rails (η = 0 disables learning) |
+| `slippage_bps` · `commission_per_trade` · `commission_bps` · `min_trade_value` | 5 · $0 · 0 · $50 | Execution model |
+
+**Walk-forward training.** `POST …/train` replays up to 10 years of daily closes one day at a time,
+with no look-ahead. Signals use closes up to day *t*. Orders fill at day *t+1*'s close with the account's
+slippage and fees. Learning uses only returns that were observable at the time. The first 253 trading
+days warm up the 12-month factors, and symbols with less than 90% of the benchmark's history are left
+out. The report compares the agent with the benchmark on total and annualised return, volatility,
+Sharpe (against the 3-month Treasury), maximum drawdown, turnover and fees. It also includes the equity
+curve, the path of the weights, and the mean IC per factor. With `apply=true` the learned weights replace
+the account's. Every run starts from the default weights, so retraining never compounds on itself.
+
+**Synthetic-data policy.** By default an account never trades on synthetic prices:
+
+* Symbols without live data are left out of the ranking.
+* The agent sits out if a holding has no live price or if fewer than 3 names can be ranked. It
+  journals this once per day, and the scheduler retries 15 minutes later.
+* Manual orders return 409.
+* Training on synthetic history still runs, so the mechanics can be shown offline, but its weights are
+  not applied.
+
+Setting `allow_synthetic` on an account overrides all of this, and the UI flags such accounts.
+
+**Scheduler.** The poller checks every minute. Auto-trading agent accounts run once per trading day
+after `QP_SANDBOX_TRADE_TIME` (10:00 ET). Every account is marked to market once after
+`QP_SANDBOX_MARK_TIME` (16:05 ET). `QP_SANDBOX_SCHEDULER_ENABLED=false` turns both off.
+
+```bash
+# Open an agent account, train it on 3 years of history, then let it trade today.
+curl -s -X POST localhost:8000/api/v1/sandbox/accounts -H 'content-type: application/json' \
+  -d '{"name": "Learner", "strategy": {"top_k": 5}}' | jq .id
+curl -s -X POST localhost:8000/api/v1/sandbox/accounts/1/train -H 'content-type: application/json' \
+  -d '{"lookback_days": 1095}' | jq '.data | {applied, strategy, benchmark_metrics, learned_weights}'
+curl -s -X POST localhost:8000/api/v1/sandbox/accounts/1/step | jq '{executed, skipped_reason, targets}'
+```
+
+**What "learning" means here.** The agent is a deliberately simple, transparent online learner. It
+adapts how much it trusts each of six known factors. It does not discover new strategies. ICs measured
+over a few days are noisy. Learned weights describe what worked in the recent window, and a good replay
+does not predict future returns.
+
+---
+
 ## Vehicle module reference data
 
 The packaged profile (`src/quantpulse/data/elantra_2025_limited.json`) was verified when it was built:
@@ -411,6 +499,7 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0004_portfolio` | `portfolios`, `holdings` |
 | `0005_vehicle_lifecycle` | `vehicles`, `telemetry_readings`, `fuel_logs`, `maintenance_records`, `fuel_price_observations` |
 | `0006_sports` | `sports_games`, `team_ratings` |
+| `0007_trading_sandbox` | `sandbox_accounts`, `sandbox_positions`, `sandbox_trades`, `sandbox_equity`, `sandbox_journal` |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)
@@ -434,14 +523,14 @@ The test suite checks four things:
 make check     # ruff lint + format check, mypy, pytest
 ```
 
-**206 tests.** No test touches the network. Every outbound request is mocked with `respx`, and
+**241 tests.** No test touches the network. Every outbound request is mocked with `respx`, and
 unmocked requests fail.
 
 | Suite | Covers |
 |---|---|
-| `tests/unit` | BSM against Hull's textbook values, put-call parity, every Greek vs finite differences, IV round trips, rates; DCF by hand; Monte Carlo reproducibility; VaR/CVaR closed forms; Ledoit-Wolf; frontier optimality vs the analytic tangency portfolio; vol-surface recovery; vehicle and sports models; cache, single-flight, token bucket, circuit breaker; the gateway fallback chain; the NYSE calendar |
+| `tests/unit` | BSM against Hull's textbook values, put-call parity, every Greek vs finite differences, IV round trips, rates; DCF by hand; Monte Carlo reproducibility; VaR/CVaR closed forms; Ledoit-Wolf; frontier optimality vs the analytic tangency portfolio; vol-surface recovery; vehicle and sports models; the daily-picks screener; the paper broker (fills, slippage, no shorting or margin) and the learning agent (IC direction, walk-forward without look-ahead); cache, single-flight, token bucket, circuit breaker; the gateway fallback chain; the NYSE calendar |
 | `tests/providers` | Parsers validated against **real captured payloads** (SEC EDGAR for Apple and Alphabet, Treasury CSV, fueleconomy.gov, ESPN scoreboards) and documented vendor shapes (Yahoo crumb flow and chart adjustment, Polygon pagination and plan errors, Alpaca and OCC symbols, FMP field variants, EIA, Odds API); HTTP retries, 429 back-off, concurrency caps |
-| `tests/integration` | Every API endpoint through ASGI: provenance transitions (live → cached → warehouse-stale → synthetic), validation errors, auth, SSE, WebSocket, portfolio, vehicle and picks flows, the email policy, poller scheduling, migrations, repositories |
+| `tests/integration` | Every API endpoint through ASGI: provenance transitions (live → cached → warehouse-stale → synthetic), validation errors, auth, SSE, WebSocket, portfolio, vehicle, picks and trading-sandbox flows (orders, the agent learning across days, training, the synthetic-data refusals), the email policy, poller scheduling, migrations, repositories |
 | `tests/frontend` | API client error handling, and **every Streamlit page** plus its interactive forms run with `AppTest` against a real in-process API server |
 
 CI (`.github/workflows/ci.yml`) runs lint, format, mypy, the migration round trip and tests on
@@ -456,12 +545,12 @@ src/quantpulse/
   config.py              settings (pydantic-settings, SecretStr)
   core/                  cache · rate limiter · circuit breaker · HTTP client · gateway · NYSE calendar
   quant/                 black_scholes · rates · vol_surface · dcf · monte_carlo · risk · optimization
-  domain/                vehicle · sports (Elo, win probability) · screener (daily picks)
+  domain/                vehicle · sports (Elo, win probability) · screener (daily picks) · paper_broker · trading_agent
   providers/             yahoo · polygon · alpaca · treasury · sec_edgar · fmp · eia · fueleconomy · espn · odds_api · synthetic
   schemas/               Pydantic v2 request/response/ingestion models
-  db/                    models · repositories · session · migrate · migrations/versions/0001-0006
-  services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · notifications · container
-  workers/poller.py      market-hours-aware background refresh + scheduled email
+  db/                    models · repositories · session · migrate · migrations/versions/0001-0007
+  services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · notifications · container
+  workers/poller.py      market-hours-aware background refresh, scheduled email, sandbox scheduler
   api/                   app factory · middleware · error handlers · routers/*
   data/                  packaged vehicle profile
 frontend/                Streamlit app (app.py, api_client.py, components.py, charts.py, views/*)
@@ -501,3 +590,10 @@ tests/                   unit · providers · integration · frontend · fixture
   * When no telemetry exists, a simulated odometer is used and labelled.
 * **Picks:** a backward-looking factor screen. Ratings are relative to the universe and are **not** a
   forecast or investment advice.
+* **Trading sandbox:**
+  * Fills are simulated at the quote ± slippage. There is no order book, partial fills, market impact
+    beyond the slippage setting, dividends, or corporate actions on paper positions.
+  * Scheduled runs need the API process to be running. A day the server was down is simply not traded,
+    and the next run learns from the longer interval.
+  * An agent-mode account rebalances to its own targets, so its next run sells manual positions that
+    fall outside them.

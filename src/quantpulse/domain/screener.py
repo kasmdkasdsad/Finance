@@ -25,6 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.stats import norm
 
 WEIGHTS: dict[str, float] = {
@@ -44,6 +45,7 @@ LABELS: dict[str, str] = {
     "reversal": "short-term pullback",
 }
 MIN_BARS = 64
+RSI_WINDOW = 300
 WINSOR = 3.0
 
 
@@ -80,7 +82,7 @@ class ScreenResult:
 
 
 def rsi(closes: np.ndarray, period: int = 14) -> float | None:
-    """Wilder's RSI using the full history for smoothing."""
+    """Wilder's RSI over ``closes`` (seeded with a simple average of the first ``period`` changes)."""
     if closes.size < period + 1:
         return None
     deltas = np.diff(closes)
@@ -97,7 +99,7 @@ def rsi(closes: np.ndarray, period: int = 14) -> float | None:
     return float(100.0 - 100.0 / (1.0 + rs))
 
 
-def compute_factors(closes: Sequence[float]) -> RawFactors:
+def compute_factors(closes: Sequence[float] | NDArray[np.float64]) -> RawFactors:
     c = np.asarray(closes, dtype=float)
     n = c.size
     if n < MIN_BARS or np.any(c <= 0):
@@ -118,7 +120,9 @@ def compute_factors(closes: Sequence[float]) -> RawFactors:
         sd = float(window.std(ddof=1))
         risk_adj = float(window.mean() / sd * math.sqrt(252)) if sd > 0 else None
     vol = float(rets[-63:].std(ddof=1) * math.sqrt(252))
-    return RawFactors(mom_12_1, mom_3m, trend, risk_adj, vol, rsi(c))
+    # Wilder smoothing forgets its seed geometrically ((13/14)^n); 300 bars is exact to ~1e-8 and keeps
+    # walk-forward training fast.
+    return RawFactors(mom_12_1, mom_3m, trend, risk_adj, vol, rsi(c[-RSI_WINDOW:]))
 
 
 def _zscores(values: Mapping[str, float]) -> dict[str, float]:
@@ -136,17 +140,25 @@ def rating_from_z(z: float) -> int:
     return int(min(10, max(1, math.floor(1 + 9 * float(norm.cdf(z)) + 0.5))))
 
 
-def screen(universe: Mapping[str, RawFactors]) -> list[ScreenResult]:
-    """Score and rank a universe; returns results sorted best-first."""
+def screen(
+    universe: Mapping[str, RawFactors], weights: Mapping[str, float] | None = None
+) -> list[ScreenResult]:
+    """Score and rank a universe; returns results sorted best-first.
+
+    ``weights`` overrides the default factor weights (the trading agent passes its learned weights).
+    """
+    w = dict(weights) if weights is not None else WEIGHTS
+    if set(w) != set(WEIGHTS) or any(v < 0 for v in w.values()) or sum(w.values()) <= 0:
+        raise ValueError(f"weights must be non-negative, not all zero, and cover exactly {sorted(WEIGHTS)}")
     results = {s: ScreenResult(symbol=s, factors=f) for s, f in universe.items()}
     for factor in WEIGHTS:
         available = {s: v for s, r in results.items() if (v := r.factors.scored()[factor]) is not None}
         for s, z in _zscores(available).items():
             results[s].z[factor] = z
     for r in results.values():
-        weight = sum(WEIGHTS[f] for f in r.z)
-        r.composite = sum(WEIGHTS[f] * z for f, z in r.z.items()) / weight if weight else 0.0
-        contributions = sorted(((WEIGHTS[f] * z, f) for f, z in r.z.items()), reverse=True)
+        weight = sum(w[f] for f in r.z)
+        r.composite = sum(w[f] * z for f, z in r.z.items()) / weight if weight else 0.0
+        contributions = sorted(((w[f] * z, f) for f, z in r.z.items()), reverse=True)
         r.drivers = [LABELS[f] for c, f in contributions if c > 0][:2]
     standardized = _zscores({s: r.composite for s, r in results.items()})
     for s, r in results.items():

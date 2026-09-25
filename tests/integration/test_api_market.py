@@ -267,7 +267,7 @@ async def test_system_status_hides_secrets(tmp_path, clock):
     body = r.json()
     assert r.status_code == 200
     assert body["credentials"]["polygon"] is True and body["credentials"]["alpaca"] is False
-    assert body["database"]["revision"] == body["database"]["head"] == "0006"
+    assert body["database"]["revision"] == body["database"]["head"] == "0007"
     assert "SECRET-POLYGON-KEY" not in r.text and "SMTP-PASS" not in r.text
     assert session["session"] == "regular" and session["is_trading_day"] is True
 

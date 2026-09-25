@@ -20,6 +20,7 @@ from frontend.views import (  # noqa: E402
     overview,
     picks,
     portfolio,
+    sandbox,
     sports,
     system,
     valuation,
@@ -63,6 +64,7 @@ pages = {
         st.Page(overview.render, title="Command Center", icon=":material/dashboard:", default=True),
         st.Page(options.render, title="Options Lab", icon=":material/candlestick_chart:", url_path="options"),
         st.Page(picks.render, title="Daily Picks", icon=":material/star:", url_path="picks"),
+        st.Page(sandbox.render, title="Trading Sandbox", icon=":material/smart_toy:", url_path="sandbox"),
     ],
     "Corporate & Risk": [
         st.Page(

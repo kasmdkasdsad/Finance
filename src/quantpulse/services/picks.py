@@ -9,6 +9,7 @@ from quantpulse.core.clock import Clock
 from quantpulse.core.market_calendar import NEW_YORK, is_trading_day, next_trading_day, regular_close
 from quantpulse.domain import screener
 from quantpulse.schemas.common import CompositeEnvelope, CompositeMeta, DataStatus
+from quantpulse.schemas.market import PriceHistory, Quote
 from quantpulse.schemas.picks import DailyPicks, FactorScores, PicksEmailResult, StockPick
 from quantpulse.services.market import MarketService
 from quantpulse.services.notifications import EmailNotifier, SyntheticDataRefused, render_picks_email
@@ -20,6 +21,23 @@ METHODOLOGY = (
     "short-term RSI pullback (10%). Factors are z-scored across the universe; the composite is mapped to "
     "a 1-10 rating via round(1 + 9·Φ(z)). Ratings are relative to the screened universe."
 )
+
+
+def closes_with_quote(history: PriceHistory, quote: Quote) -> list[float]:
+    """Daily closes with the live price as today's close.
+
+    A quote from a later New York session than the last bar is appended; a newer quote from the same
+    session (a provider that already publishes today's partial bar) replaces that bar's close.
+    """
+    closes = list(history.closes)
+    if not history.bars or quote.timestamp <= history.bars[-1].timestamp:
+        return closes
+    last_day = history.bars[-1].timestamp.astimezone(NEW_YORK).date()
+    if quote.timestamp.astimezone(NEW_YORK).date() > last_day:
+        closes.append(quote.price)
+    else:
+        closes[-1] = quote.price
+    return closes
 
 
 class PicksService:
@@ -51,12 +69,8 @@ class PicksService:
             sources[symbol] = (
                 hist_r.provenance if hist_r.status.rank >= quote_r.status.rank else quote_r.provenance
             )
-            closes = list(hist_r.value.closes)
-            # Use the live price as today's close when it is newer than the last daily bar.
-            if hist_r.value.bars and quote_r.value.timestamp > hist_r.value.bars[-1].timestamp:
-                closes.append(quote_r.value.price)
             try:
-                raw[symbol] = screener.compute_factors(closes)
+                raw[symbol] = screener.compute_factors(closes_with_quote(hist_r.value, quote_r.value))
             except ValueError as exc:
                 skipped[symbol] = str(exc)
                 continue

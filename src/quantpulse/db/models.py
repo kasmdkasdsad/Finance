@@ -320,3 +320,77 @@ class TeamRatingRow(Base):
     losses: Mapped[int] = mapped_column(Integer, default=0)
     ties: Mapped[int] = mapped_column(Integer, default=0)
     computed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+# ----------------------------------------------------------------------------- 0007 trading sandbox
+
+
+class SandboxAccountRow(Base):
+    __tablename__ = "sandbox_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    mode: Mapped[str] = mapped_column(String(10))
+    starting_cash: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    auto_trade: Mapped[bool] = mapped_column(Boolean, default=True)
+    allow_synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
+    strategy: Mapped[dict[str, Any]] = mapped_column(JSON)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class SandboxPositionRow(Base):
+    __tablename__ = "sandbox_positions"
+    __table_args__ = (UniqueConstraint("account_id", "symbol"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("sandbox_accounts.id", ondelete="CASCADE"), index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    quantity: Mapped[float] = mapped_column(Float)
+    avg_cost: Mapped[float] = mapped_column(Float)
+
+
+class SandboxTradeRow(Base):
+    __tablename__ = "sandbox_trades"
+    __table_args__ = (Index("ix_sandbox_trades_account_id_executed_at", "account_id", "executed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("sandbox_accounts.id", ondelete="CASCADE"))
+    executed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    symbol: Mapped[str] = mapped_column(String(16))
+    side: Mapped[str] = mapped_column(String(4))
+    quantity: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    reference_price: Mapped[float] = mapped_column(Float)
+    commission: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    data_status: Mapped[str] = mapped_column(String(10))
+    source: Mapped[str] = mapped_column(String(10))
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SandboxEquityRow(Base):
+    __tablename__ = "sandbox_equity"
+    __table_args__ = (Index("ix_sandbox_equity_account_id_recorded_at", "account_id", "recorded_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("sandbox_accounts.id", ondelete="CASCADE"))
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    equity: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    benchmark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    data_status: Mapped[str] = mapped_column(String(10))
+
+
+class SandboxJournalRow(Base):
+    __tablename__ = "sandbox_journal"
+    __table_args__ = (Index("ix_sandbox_journal_account_id_created_at", "account_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("sandbox_accounts.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    kind: Mapped[str] = mapped_column(String(16))
+    summary: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON)
