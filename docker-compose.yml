@@ -1,0 +1,36 @@
+services:
+  api:
+    build: .
+    image: quantpulse-terminal:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      QP_DATABASE_URL: sqlite+aiosqlite:////app/data/quantpulse.db
+      QP_CORS_ORIGINS: http://localhost:8501
+    ports:
+      - "8000:8000"
+    volumes:
+      - quantpulse-data:/app/data
+    restart: unless-stopped
+
+  ui:
+    image: quantpulse-terminal:latest
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      QP_API_URL: http://api:8000
+      QP_API_TOKEN: ${QP_API_TOKEN:-}
+    command: ["streamlit", "run", "frontend/app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+volumes:
+  quantpulse-data:

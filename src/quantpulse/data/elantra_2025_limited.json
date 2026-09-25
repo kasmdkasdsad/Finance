@@ -1,0 +1,46 @@
+{
+  "profile_id": "hyundai-elantra-2025-limited",
+  "year": 2025,
+  "make": "Hyundai",
+  "model": "Elantra",
+  "trim": "Limited",
+  "engine": "2.0L 4-cylinder",
+  "transmission": "Intelligent Variable Transmission (IVT)",
+  "horsepower": 147,
+  "torque_lb_ft": 132,
+  "fuel_grade": "regular",
+  "tank_gallons": 12.4,
+  "epa": {
+    "vehicle_id": 48019,
+    "city_mpg": 30,
+    "highway_mpg": 39,
+    "combined_mpg": 34,
+    "source": "fueleconomy.gov vehicle 48019: 2025 Hyundai Elantra, 2.0 L, Automatic (AV-S1), without stop-start (SEL / Limited trims)"
+  },
+  "pricing": {
+    "base_msrp": 26525,
+    "destination": 1150,
+    "source": "Hyundai Motor America 2025 Elantra pricing release; MSRP excludes the $1,150 delivery charge"
+  },
+  "depreciation": {
+    "first_year_rate": 0.16,
+    "annual_rate": 0.11,
+    "annual_miles_baseline": 12000,
+    "mileage_adjustment_per_1000": 0.0035,
+    "max_mileage_adjustment": 0.25,
+    "floor_fraction": 0.10,
+    "source": "Model assumption (declining-balance with mileage adjustment). Calibrate to local used-car comparables."
+  },
+  "maintenance_source": "Conservative normal-condition template. Verify every interval against the Maintenance section of your 2025 Elantra Owner's Manual and edit this file or pass overrides.",
+  "maintenance": [
+    {"code": "engine_oil", "name": "Engine oil & filter", "interval_miles": 7500, "interval_months": 12, "estimated_cost": 85},
+    {"code": "tire_rotation", "name": "Tire rotation", "interval_miles": 7500, "interval_months": null, "estimated_cost": 30},
+    {"code": "brake_inspection", "name": "Brake pads, rotors & lines inspection", "interval_miles": 15000, "interval_months": 12, "estimated_cost": 40},
+    {"code": "cabin_air_filter", "name": "Cabin (climate control) air filter", "interval_miles": 15000, "interval_months": 12, "estimated_cost": 45},
+    {"code": "engine_air_filter", "name": "Engine air cleaner filter", "interval_miles": 30000, "interval_months": null, "estimated_cost": 45},
+    {"code": "brake_fluid", "name": "Brake fluid replacement", "interval_miles": 30000, "interval_months": 24, "estimated_cost": 120},
+    {"code": "coolant", "name": "Engine coolant replacement", "interval_miles": 60000, "interval_months": 60, "estimated_cost": 160},
+    {"code": "spark_plugs", "name": "Spark plugs", "interval_miles": 60000, "interval_months": null, "estimated_cost": 250},
+    {"code": "wiper_blades", "name": "Wiper blades", "interval_miles": null, "interval_months": 12, "estimated_cost": 40}
+  ]
+}

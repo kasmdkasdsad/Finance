@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantpulse-terminal"
+version = "1.0.0"
+description = "QuantPulse Terminal: quantitative finance & executive intelligence platform (FastAPI + SQLAlchemy + Streamlit)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.7",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "pandas>=2.2",
+    "tzdata>=2024.1",
+    "email-validator>=2.0",
+]
+
+[project.optional-dependencies]
+frontend = [
+    "streamlit>=1.40",
+    "plotly>=5.24",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+quantpulse-api = "quantpulse.cli:run_api"
+quantpulse-migrate = "quantpulse.cli:run_migrations"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+quantpulse = ["data/*.json", "db/migrations/*.py", "db/migrations/*.mako", "db/migrations/versions/*.py", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    "error::DeprecationWarning:quantpulse.*",
+    # Starlette 1.x nudges TestClient users towards a different HTTP client; harmless for our WebSocket test.
+    "ignore:Using `httpx` with `starlette.testclient`",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "frontend", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC", "C4", "PT"]
+# E501: `ruff format` owns code layout; long user-facing string literals are allowed.
+# RUF001-003: typographic characters (σ, ×, –, …) in UI text and docstrings are intentional.
+# ASYNC109: `timeout` parameters are forwarded to httpx per request, not used for asyncio waits.
+ignore = ["B008", "RUF012", "PT011", "E501", "RUF001", "RUF002", "RUF003", "ASYNC109"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["quantpulse", "frontend"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PT018", "C408", "E731"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+files = ["src/quantpulse"]

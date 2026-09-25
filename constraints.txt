@@ -1,0 +1,23 @@
+# Versions the full test suite was verified against (Python 3.11 and 3.12).
+# Install reproducibly with:  pip install -e ".[frontend,dev]" -c constraints.txt
+aiosqlite==0.22.1
+alembic==1.20.0
+email-validator==2.3.0
+fastapi==0.141.1
+httpx==0.28.1
+mypy==2.3.1
+numpy==2.4.6
+pandas==3.0.6
+plotly==7.1.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+respx==0.23.1
+ruff==0.16.9
+scipy==1.17.1
+SQLAlchemy==2.1.0
+starlette==1.7.0
+streamlit==1.64.0
+tzdata==2026.4
+uvicorn==0.53.0
