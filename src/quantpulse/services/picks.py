@@ -3,24 +3,44 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
+from quantpulse.core.errors import DomainError
+from quantpulse.core.gateway import Resolved
 from quantpulse.core.market_calendar import NEW_YORK, is_trading_day, next_trading_day, regular_close
 from quantpulse.domain import screener
-from quantpulse.schemas.common import CompositeEnvelope, CompositeMeta, DataStatus
+from quantpulse.schemas.common import CompositeEnvelope, CompositeMeta, DataStatus, Provenance
 from quantpulse.schemas.market import PriceHistory, Quote
-from quantpulse.schemas.picks import DailyPicks, FactorScores, PicksEmailResult, StockPick
-from quantpulse.services.market import MarketService
+from quantpulse.schemas.model import LiveScore
+from quantpulse.schemas.picks import DailyPicks, FactorScores, PicksEmailResult, PicksMethod, StockPick
+from quantpulse.services.market import STANDARD_HISTORY_DAYS, MarketService
 from quantpulse.services.notifications import EmailNotifier, SyntheticDataRefused, render_picks_email
 
-HISTORY_DAYS = 400  # > 252 trading days for 12-1 momentum and the 200-day SMA
-METHODOLOGY = (
+if TYPE_CHECKING:
+    from quantpulse.services.forecast import ForecastService
+    from quantpulse.services.model import ModelService
+
+HISTORY_DAYS = STANDARD_HISTORY_DAYS  # > 252 trading days for 12-1 momentum and the 200-day SMA
+FACTOR_RULE = (
     "Cross-sectional factor screen on daily closes: 12-1 month momentum (20%), 3-month momentum (10%), "
     "trend vs 50/200-day averages (25%), 6-month return/volatility (25%), low 3-month volatility (10%) and "
-    "short-term RSI pullback (10%). Factors are z-scored across the universe; the composite is mapped to "
-    "a 1-10 rating via round(1 + 9·Φ(z)). Ratings are relative to the screened universe."
+    "short-term RSI pullback (10%). Factors are z-scored across the universe."
 )
+MODEL_RULE = (
+    "A ridge-regression stock model on 18 price, volatility and volume features, retrained monthly "
+    "walk-forward and scored only on data it never saw, predicts each stock's 21-day return relative to the "
+    "others; probabilities are calibrated from its out-of-sample record."
+)
+RATING_RULE = (
+    "The score is mapped to a 1-10 rating via round(1 + 9·Φ(z)); ratings are relative to the universe."
+)
+METHODOLOGY = {
+    "factors": f"{FACTOR_RULE} {RATING_RULE}",
+    "model": f"{MODEL_RULE} {RATING_RULE}",
+    "blend": f"Average of two standardised scores. (1) {FACTOR_RULE} (2) {MODEL_RULE} {RATING_RULE}",
+}
 
 
 def closes_with_quote(history: PriceHistory, quote: Quote) -> list[float]:
@@ -45,15 +65,26 @@ class PicksService:
         self._settings = settings
         self._clock = clock
         self._market = market
+        # Optional collaborators wired by the container (the picks work without them).
+        self.model: ModelService | None = None
+        self.forecast: ForecastService | None = None
 
     async def daily(
-        self, top_n: int | None = None, *, force_refresh: bool = False
+        self,
+        top_n: int | None = None,
+        *,
+        force_refresh: bool = False,
+        method: PicksMethod = "auto",
+        with_forecast: bool = True,
     ) -> CompositeEnvelope[DailyPicks]:
+        """Rank the universe. ``method``: ``factors`` (the hand-set rule), ``model`` (the walk-forward stock
+        model), ``blend`` (average of both z-scores) or ``auto`` (blend only if the model has shown
+        out-of-sample skill, otherwise factors)."""
         universe = list(self._settings.picks_universe)
         top_n = top_n or self._settings.picks_top_n
         sem = asyncio.Semaphore(4)
 
-        async def load(symbol: str):
+        async def load(symbol: str) -> tuple[Resolved[PriceHistory], Resolved[Quote]]:
             async with sem:
                 hist = await self._market.history(symbol, "1d", HISTORY_DAYS, force_refresh=force_refresh)
                 quote = await self._market.quote(symbol, force_refresh=force_refresh)
@@ -62,8 +93,8 @@ class PicksService:
         loaded = await asyncio.gather(*(load(s) for s in universe))
         raw: dict[str, screener.RawFactors] = {}
         skipped: dict[str, str] = {}
-        info = {}
-        sources = {}
+        info: dict[str, tuple[Resolved[Quote], DataStatus]] = {}
+        sources: dict[str, Provenance] = {}
         for symbol, (hist_r, quote_r) in zip(universe, loaded, strict=True):
             status = DataStatus.worst([hist_r.status, quote_r.status])
             sources[symbol] = (
@@ -76,21 +107,59 @@ class PicksService:
                 continue
             info[symbol] = (quote_r, status)
 
-        results = screener.screen(raw)
+        results = {r.symbol: r for r in screener.screen(raw)}
+        notes: list[str] = []
+        live: dict[str, LiveScore] = {}
+        report = None
+        if method != "factors" and self.model is not None:
+            try:
+                live, report = await self.model.live_scores()
+            except DomainError as exc:
+                notes.append(f"Stock model unavailable ({exc}); ranked by the factor rule.")
+        used: str = "factors"
+        if report is not None:
+            if method == "auto":
+                used = "blend" if report.has_skill else "factors"
+                if not report.has_skill:
+                    notes.append(
+                        "The stock model has not shown reliable out-of-sample skill, so picks are ranked by the "
+                        "factor rule; the model's probabilities are shown for reference."
+                    )
+            else:
+                used = method
+        elif method in ("model", "blend"):
+            notes.append("No stock model is available; ranked by the factor rule.")
+
+        def combined(symbol: str) -> float:
+            factor = results[symbol].standardized
+            score = live.get(symbol)
+            if used == "model" and score is not None:
+                return score.z
+            if used == "blend" and score is not None:
+                return 0.5 * factor + 0.5 * score.z
+            return factor
+
+        scores = {s: combined(s) for s in results}
+        mean = sum(scores.values()) / len(scores) if scores else 0.0
+        sd = (sum((v - mean) ** 2 for v in scores.values()) / len(scores)) ** 0.5 if scores else 0.0
+        order = sorted(scores, key=lambda s: (-scores[s], s))
         picks: list[StockPick] = []
-        for rank, r in enumerate(results, start=1):
-            quote_r, status = info[r.symbol]
+        for rank, symbol in enumerate(order, start=1):
+            r = results[symbol]
+            quote_r, status = info[symbol]
             q = quote_r.value
             f = r.factors
+            score = live.get(symbol)
+            z = (scores[symbol] - mean) / sd if sd > 0 else 0.0
             picks.append(
                 StockPick(
                     rank=rank,
-                    symbol=r.symbol,
+                    symbol=symbol,
                     name=q.name,
                     price=q.price,
                     change_percent=q.change_percent,
-                    rating=r.rating,
-                    score=round(r.composite, 4),
+                    rating=screener.rating_from_z(z),
+                    score=round(scores[symbol], 4),
                     factors=FactorScores(
                         momentum_12_1=f.momentum_12_1,
                         momentum_3m=f.momentum_3m,
@@ -103,8 +172,16 @@ class PicksService:
                     drivers=r.drivers,
                     data_status=status,
                     provider=quote_r.provenance.provider,
+                    factor_rating=r.rating,
+                    model_rank=score.rank if score else None,
+                    prob_outperform=score.prob_outperform if score else None,
+                    expected_excess_return=score.expected_excess_return if score else None,
                 )
             )
+        top = picks[:top_n]
+        if with_forecast and self.forecast is not None and top:
+            top = await self._with_forecasts(top, notes)
+
         now = self._clock.now()
         local = now.astimezone(NEW_YORK)
         # Picks are for the session that has not closed yet: today before the close, else the next session.
@@ -112,7 +189,6 @@ class PicksService:
             trading_day = local.date()
         else:
             trading_day = next_trading_day(local.date())
-        top = picks[:top_n]
         overall = DataStatus.worst([p.data_status for p in top]) if top else DataStatus.SYNTHETIC
         data = DailyPicks(
             as_of=now,
@@ -122,10 +198,37 @@ class PicksService:
             picks=top,
             top_pick=top[0] if top else None,
             data_status=overall,
-            methodology=METHODOLOGY,
+            methodology=METHODOLOGY[used],
             skipped=skipped,
+            method=used,
+            requested_method=method,
+            benchmark=self._settings.benchmark_symbol,
+            model_verdict=report.verdict if report else None,
+            model_has_skill=report.has_skill if report else None,
+            notes=notes,
         )
         return CompositeEnvelope(data=data, meta=CompositeMeta.from_sources(sources, now))
+
+    async def _with_forecasts(self, picks: list[StockPick], notes: list[str]) -> list[StockPick]:
+        assert self.forecast is not None
+        forecast = self.forecast
+        sem = asyncio.Semaphore(4)
+
+        async def one(p: StockPick) -> StockPick:
+            async with sem:
+                try:
+                    env = await forecast.forecast(p.symbol, (21,), include_options=False)
+                except DomainError:
+                    return p
+            h = env.data.horizons[0]
+            return p.model_copy(
+                update={"prob_up_21d": h.prob_up, "low_21d": h.band.p05, "high_21d": h.band.p95}
+            )
+
+        out = await asyncio.gather(*(one(p) for p in picks))
+        if any(p.low_21d is None for p in out):
+            notes.append("Some 21-day price ranges could not be computed.")
+        return list(out)
 
     async def email_digest(
         self,

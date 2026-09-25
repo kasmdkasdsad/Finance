@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import AwareDatetime, EmailStr, Field
 
 from quantpulse.schemas.common import DataStatus, StrictModel
+
+PicksMethod = Literal["auto", "factors", "model", "blend"]
 
 DISCLAIMER = (
     "QuantPulse daily picks are a systematic, backward-looking factor screen (momentum, trend, risk-adjusted "
@@ -35,6 +39,17 @@ class StockPick(StrictModel):
     drivers: list[str] = Field(description="Factors contributing most to the score")
     data_status: DataStatus
     provider: str
+    factor_rating: int = Field(ge=1, le=10, description="Rating from the hand-set factor rule alone")
+    model_rank: int | None = Field(default=None, description="Rank from the walk-forward stock model")
+    prob_outperform: float | None = Field(
+        default=None, description="Model's calibrated probability of beating the benchmark over the horizon"
+    )
+    expected_excess_return: float | None = None
+    prob_up_21d: float | None = Field(
+        default=None, description="Forecast probability the price is higher in 21 days"
+    )
+    low_21d: float | None = Field(default=None, description="5th percentile of the 21-day price forecast")
+    high_21d: float | None = Field(default=None, description="95th percentile of the 21-day price forecast")
 
 
 class DailyPicks(StrictModel):
@@ -48,6 +63,13 @@ class DailyPicks(StrictModel):
     methodology: str
     disclaimer: str = DISCLAIMER
     skipped: dict[str, str] = Field(default_factory=dict)
+    method: Literal["factors", "model", "blend"] = "factors"
+    requested_method: PicksMethod = "auto"
+    horizon_days: int = 21
+    benchmark: str = "SPY"
+    model_verdict: str | None = None
+    model_has_skill: bool | None = None
+    notes: list[str] = Field(default_factory=list)
 
 
 class PicksEmailRequest(StrictModel):

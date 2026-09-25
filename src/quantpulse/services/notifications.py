@@ -35,6 +35,14 @@ def _factor_pct(v: float | None) -> str:
     return "—" if v is None else f"{v * 100:+.1f}%"
 
 
+def _prob(v: float | None) -> str:
+    return "—" if v is None else f"{v * 100:.0f}%"
+
+
+def _range(lo: float | None, hi: float | None) -> str:
+    return "—" if lo is None or hi is None else f"{lo:,.2f}–{hi:,.2f}"
+
+
 def render_picks_email(picks: DailyPicks) -> tuple[str, str, str]:
     """Return ``(subject, plain_text, html)`` for a picks digest."""
     synthetic = picks.data_status is DataStatus.SYNTHETIC
@@ -50,12 +58,19 @@ def render_picks_email(picks: DailyPicks) -> tuple[str, str, str]:
     ]
     if synthetic:
         lines += ["WARNING: live market data was unavailable; these numbers are SYNTHETIC and not real.", ""]
-    lines.append(f"{'#':>2}  {'Symbol':<7} {'Rating':>6}  {'Price':>10} {'Day':>7}  Drivers")
+    beat = f"P(beat {picks.benchmark})"
+    lines.append(
+        f"{'#':>2}  {'Symbol':<7} {'Rating':>6}  {'Price':>10} {'Day':>7}  {beat:>13}  {'1-month 90% range':>21}  Drivers"
+    )
     for p in picks.picks:
         lines.append(
             f"{p.rank:>2}  {p.symbol:<7} {p.rating:>4}/10  {p.price:>10,.2f} {_pct(p.change_percent):>7}  "
-            f"{', '.join(p.drivers) or '—'}"
+            f"{_prob(p.prob_outperform):>13}  {_range(p.low_21d, p.high_21d):>21}  {', '.join(p.drivers) or '—'}"
         )
+    lines.append("")
+    lines += [f"Note: {n}" for n in picks.notes]
+    if picks.model_verdict:
+        lines.append("Stock model: " + picks.model_verdict)
     lines += ["", "Methodology: " + picks.methodology, "", picks.disclaimer]
     text = "\n".join(lines)
 
@@ -63,6 +78,8 @@ def render_picks_email(picks: DailyPicks) -> tuple[str, str, str]:
         f"<tr><td>{p.rank}</td><td><b>{html.escape(p.symbol)}</b><br><small>{html.escape(p.name or '')}</small></td>"
         f"<td style='text-align:center'><b>{p.rating}</b>/10</td><td style='text-align:right'>{p.price:,.2f}</td>"
         f"<td style='text-align:right'>{_pct(p.change_percent)}</td>"
+        f"<td style='text-align:right'>{_prob(p.prob_outperform)}</td>"
+        f"<td style='text-align:right'>{_range(p.low_21d, p.high_21d)}</td>"
         f"<td style='text-align:right'>{_factor_pct(p.factors.momentum_12_1)}</td>"
         f"<td>{html.escape(', '.join(p.drivers) or '—')}</td><td>{p.data_status.value}</td></tr>"
         for p in picks.picks
@@ -78,8 +95,10 @@ def render_picks_email(picks: DailyPicks) -> tuple[str, str, str]:
 <p style="margin-top:0;color:#57606a">Data status: <b>{picks.data_status.value.upper()}</b> · screened {picks.screened} of {picks.universe_size} symbols</p>
 {banner}
 <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:14px" border="1" bordercolor="#d0d7de">
-<thead style="background:#f6f8fa"><tr><th>#</th><th>Symbol</th><th>Rating</th><th>Price</th><th>Day</th><th>12-1 mom.</th><th>Drivers</th><th>Data</th></tr></thead>
+<thead style="background:#f6f8fa"><tr><th>#</th><th>Symbol</th><th>Rating</th><th>Price</th><th>Day</th><th>P(beat {html.escape(picks.benchmark)}, 1 mo)</th><th>1-month 90% range</th><th>12-1 mom.</th><th>Drivers</th><th>Data</th></tr></thead>
 <tbody>{rows}</tbody></table>
+{"".join(f'<p style="font-size:13px;color:#57606a">{html.escape(n)}</p>' for n in picks.notes)}
+{f'<p style="font-size:13px"><b>Stock model:</b> {html.escape(picks.model_verdict)}</p>' if picks.model_verdict else ""}
 <p style="font-size:12px;color:#57606a">{html.escape(picks.methodology)}</p>
 <p style="font-size:12px;color:#57606a"><i>{html.escape(picks.disclaimer)}</i></p>
 </body></html>"""

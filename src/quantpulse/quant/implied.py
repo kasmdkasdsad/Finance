@@ -47,8 +47,8 @@ def smile_function(log_moneyness: Sequence[float], ivs: Sequence[float]) -> Call
     v = np.asarray(ivs, dtype=float)
     if k.size == 0 or k.size != v.size or np.any(v <= 0) or not np.all(np.isfinite(v)):
         raise DomainError("smile needs matching positive implied volatilities")
-    order = np.argsort(k)
-    k, v = k[order], v[order]
+    k, inverse = np.unique(k, return_inverse=True)  # sorted; duplicated strikes are averaged
+    v = np.bincount(inverse, weights=v) / np.bincount(inverse)
 
     def fn(x: Array) -> Array:
         return np.interp(np.asarray(x, dtype=float), k, v)

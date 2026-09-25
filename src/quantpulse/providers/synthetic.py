@@ -7,6 +7,8 @@ with bars; asset returns share a market factor so portfolio correlations and bet
 
 from __future__ import annotations
 
+import bisect
+import functools
 import hashlib
 import math
 from datetime import UTC, date, datetime, time, timedelta
@@ -29,11 +31,15 @@ from quantpulse.schemas.vehicle import FuelPrice, FuelPriceSeries
 
 MARKET_VOL = 0.16
 MARKET_DRIFT = 0.07
+CACHED_SPAN_DAYS = 1900  # windows starting within ~5 years of the anchor are sliced from a memoised series
+
+
+def _digest(*parts: object) -> bytes:
+    return hashlib.sha256("|".join(str(p) for p in parts).encode()).digest()
 
 
 def _seed(*parts: object) -> int:
-    digest = hashlib.sha256("|".join(str(p) for p in parts).encode()).digest()
-    return int.from_bytes(digest[:8], "big")
+    return int.from_bytes(_digest(*parts)[:8], "big")
 
 
 def _unit(*parts: object) -> float:
@@ -42,7 +48,11 @@ def _unit(*parts: object) -> float:
 
 
 def _normal(*parts: object) -> float:
-    return float(np.random.default_rng(_seed(*parts)).standard_normal())
+    """Deterministic standard-normal draw (Box-Muller on two 64-bit uniforms taken from one hash)."""
+    d = _digest(*parts)
+    u1 = (int.from_bytes(d[:8], "big") + 1) / (2**64 + 1)  # in (0, 1): log is finite
+    u2 = int.from_bytes(d[8:16], "big") / 2**64
+    return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
 
 
 def symbol_profile(symbol: str) -> tuple[float, float, float]:
@@ -72,25 +82,46 @@ def _anchor_day(now: datetime) -> date:
     return today if is_trading_day(today) else previous_trading_day(today)
 
 
+@functools.lru_cache(maxsize=16384)
+def _market_shock(day: date) -> float:
+    return _normal("mkt", day)
+
+
 def _log_return(symbol: str, day: date) -> float:
     _, beta, idio = symbol_profile(symbol)
-    market = _normal("mkt", day) * MARKET_VOL / math.sqrt(252) + MARKET_DRIFT / 252
+    market = _market_shock(day) * MARKET_VOL / math.sqrt(252) + MARKET_DRIFT / 252
     own = _normal("ret", symbol, day) * idio / math.sqrt(252)
     return beta * market + own
+
+
+def _closes(symbol: str, days: list[date]) -> np.ndarray:
+    rets = np.array([_log_return(symbol, d) for d in days])
+    # price(d_i) = anchor_price * exp(-sum of returns after d_i)
+    suffix = np.concatenate([np.cumsum(rets[::-1])[::-1][1:], [0.0]])
+    base, _, _ = symbol_profile(symbol)
+    return base * np.exp(-suffix)
+
+
+@functools.lru_cache(maxsize=512)
+def _cached_series(symbol: str, anchor: date) -> tuple[tuple[date, ...], np.ndarray]:
+    span = _trading_days(anchor - timedelta(days=CACHED_SPAN_DAYS), anchor)
+    return tuple(span), _closes(symbol, span)
 
 
 def daily_closes(symbol: str, start: date, now: datetime) -> tuple[list[date], np.ndarray]:
     """Closing prices for every trading day in [start, anchor], anchored so the last close is the
     symbol's anchor price. Windows are mutually consistent regardless of ``start``."""
     anchor = _anchor_day(now)
+    if start > anchor:
+        return [], np.array([])
+    if start >= anchor - timedelta(days=CACHED_SPAN_DAYS):
+        cached_days, cached = _cached_series(symbol, anchor)
+        i = bisect.bisect_left(cached_days, start)
+        return list(cached_days[i:]), cached[i:].copy()
     days = _trading_days(start, anchor)
     if not days:
         return [], np.array([])
-    rets = np.array([_log_return(symbol, d) for d in days])
-    # price(d_i) = anchor_price * exp(-sum of returns after d_i)
-    suffix = np.concatenate([np.cumsum(rets[::-1])[::-1][1:], [0.0]])
-    base, _, _ = symbol_profile(symbol)
-    return days, base * np.exp(-suffix)
+    return days, _closes(symbol, days)
 
 
 def synthetic_history(

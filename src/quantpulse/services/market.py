@@ -17,6 +17,10 @@ from quantpulse.providers import synthetic
 from quantpulse.providers.yahoo import YahooFinance
 from quantpulse.schemas.market import INTRADAY_INTERVALS, Interval, PriceHistory, Quote
 
+# One daily-history window shared by picks, forecasts, the stock model and reports, so each symbol is
+# fetched (and cached) once instead of once per feature.
+STANDARD_HISTORY_DAYS = 1825
+
 
 class MarketProvider(Protocol):
     name: str

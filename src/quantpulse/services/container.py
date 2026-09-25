@@ -28,15 +28,19 @@ from quantpulse.providers.polygon import Polygon
 from quantpulse.providers.sec_edgar import SecEdgar
 from quantpulse.providers.treasury import Treasury
 from quantpulse.providers.yahoo import YahooFinance
+from quantpulse.services.forecast import ForecastService
 from quantpulse.services.fundamentals import FundamentalsService
 from quantpulse.services.market import MarketService
+from quantpulse.services.model import ModelService
 from quantpulse.services.notifications import EmailNotifier
 from quantpulse.services.options import OptionsService
 from quantpulse.services.picks import PicksService
 from quantpulse.services.portfolio import PortfolioService
+from quantpulse.services.predictions import PredictionService
 from quantpulse.services.rates import RatesService
 from quantpulse.services.sandbox import SandboxService
 from quantpulse.services.sports import SportsService
+from quantpulse.services.stocks import StockReportService
 from quantpulse.services.valuation import ValuationService
 from quantpulse.services.vehicle import VehicleService
 
@@ -139,6 +143,20 @@ class Container:
         self.sports = SportsService(settings, self.gateway, self.db, self.clock, self.espn, self.odds)
         self.picks = PicksService(settings, self.clock, self.market)
         self.sandbox = SandboxService(settings, self.db, self.clock, self.market, self.rates)
+        self.model = ModelService(settings, self.clock, self.cache, self.market, self.rates)
+        self.forecast = ForecastService(
+            settings, self.clock, self.cache, self.market, self.rates, self.options
+        )
+        self.forecast.model = self.model
+        self.sandbox.model = self.model
+        self.picks.model = self.model
+        self.picks.forecast = self.forecast
+        self.predictions = PredictionService(
+            settings, self.db, self.clock, self.market, self.forecast, self.model
+        )
+        self.stocks = StockReportService(
+            settings, self.clock, self.market, self.forecast, self.model, self.valuation, self.predictions
+        )
         self.notifier = EmailNotifier(settings)
 
         from quantpulse.workers.poller import Poller  # local import avoids a cycle

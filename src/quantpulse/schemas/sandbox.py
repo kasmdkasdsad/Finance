@@ -22,6 +22,11 @@ MAX_WEIGHT_FLOOR = 1.0 / len(screener.WEIGHTS)
 class SandboxStrategy(StrictModel):
     """How the agent picks stocks, sizes positions, learns, and how fills are simulated."""
 
+    signal: Literal["factors", "model"] = Field(
+        default="factors",
+        description="factors = the self-weighting factor rule (learns from its own results); model = the "
+        "walk-forward stock model's rankings (retrained monthly on history).",
+    )
     universe: list[Symbol] | None = Field(
         default=None, min_length=3, max_length=60, description="Defaults to QP_PICKS_UNIVERSE."
     )

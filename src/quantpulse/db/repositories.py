@@ -7,7 +7,7 @@ data gateway's archive fallback expects — or ``None`` when nothing is stored.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import Table, delete, func, select
@@ -27,6 +27,7 @@ from quantpulse.db.models import (
     MaintenanceRecordRow,
     OptionSnapshotRow,
     PortfolioRow,
+    PredictionRow,
     PriceBarRow,
     QuoteSnapshotRow,
     SandboxAccountRow,
@@ -70,11 +71,32 @@ async def recent_ingestions(session: AsyncSession, limit: int = 50) -> list[Inge
 
 
 # ----------------------------------------------------------------------------- market
+REVISION_WINDOW = timedelta(days=7)
+
+
 async def upsert_bars(session: AsyncSession, history: PriceHistory, provider: str) -> int:
+    """Store bars, writing only what is new.
+
+    Bars from ``REVISION_WINDOW`` before the latest stored bar onwards are always rewritten (vendors revise
+    recent bars). If the stored closes in that overlap no longer match the vendor's, the history has been
+    re-adjusted (a split or dividend adjustment) and every bar is rewritten."""
     if not history.bars:
         return 0
     table = cast(Table, PriceBarRow.__table__)
     now = utcnow()
+    bars = history.bars
+    key = (PriceBarRow.symbol == history.symbol, PriceBarRow.interval == history.interval)
+    latest = (await session.execute(select(func.max(PriceBarRow.ts)).where(*key))).scalar_one_or_none()
+    if latest is not None:
+        cutoff = latest - REVISION_WINDOW
+        recent = await session.execute(
+            select(PriceBarRow.ts, PriceBarRow.close).where(*key, PriceBarRow.ts >= cutoff)
+        )
+        stored: dict[datetime, float] = {row[0]: row[1] for row in recent.all()}
+        overlap = [b for b in bars if b.timestamp in stored]
+        unchanged = all(abs(b.close - stored[b.timestamp]) <= 1e-9 * max(1.0, abs(b.close)) for b in overlap)
+        if overlap and unchanged:
+            bars = [b for b in bars if b.timestamp >= cutoff]
     rows = [
         {
             "symbol": history.symbol,
@@ -88,8 +110,10 @@ async def upsert_bars(session: AsyncSession, history: PriceHistory, provider: st
             "provider": provider,
             "ingested_at": now,
         }
-        for bar in history.bars
+        for bar in bars
     ]
+    if not rows:
+        return 0
     stmt = sqlite_insert(table)
     stmt = stmt.on_conflict_do_update(
         index_elements=["symbol", "interval", "ts"],
@@ -810,3 +834,58 @@ async def delete_sandbox_account(session: AsyncSession, account_id: int) -> None
     row = await get_sandbox_account(session, account_id)
     await clear_sandbox_history(session, account_id)  # explicit: do not depend on SQLite FK enforcement
     await session.delete(row)
+
+
+# ----------------------------------------------------------------------------- prediction ledger
+async def insert_predictions(session: AsyncSession, rows: Sequence[Mapping[str, Any]]) -> int:
+    """Insert predictions, ignoring any already logged for the same (symbol, source, horizon, day)."""
+    if not rows:
+        return 0
+    table = cast(Table, PredictionRow.__table__)
+    stmt = sqlite_insert(table).on_conflict_do_nothing(
+        index_elements=["symbol", "source", "horizon_days", "made_on"]
+    )
+    inserted = 0
+    for row in rows:  # per-row so the count reflects rows actually inserted
+        result = await session.execute(stmt, [dict(row)])
+        inserted += max(0, int(result.rowcount or 0))  # type: ignore[attr-defined]
+    return inserted
+
+
+async def predictions_logged_on(session: AsyncSession, made_on: date) -> int:
+    query = select(func.count(PredictionRow.id)).where(PredictionRow.made_on == made_on)
+    return int((await session.execute(query)).scalar_one())
+
+
+async def due_predictions(session: AsyncSession, on_or_before: date) -> list[PredictionRow]:
+    query = (
+        select(PredictionRow)
+        .where(PredictionRow.status == "open", PredictionRow.target_date <= on_or_before)
+        .order_by(PredictionRow.target_date, PredictionRow.id)
+    )
+    return list((await session.execute(query)).scalars())
+
+
+async def list_predictions(
+    session: AsyncSession,
+    *,
+    symbol: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    horizon: int | None = None,
+    limit: int | None = 200,
+) -> list[PredictionRow]:
+    """Newest first."""
+    query = select(PredictionRow)
+    if symbol is not None:
+        query = query.where(PredictionRow.symbol == symbol)
+    if status is not None:
+        query = query.where(PredictionRow.status == status)
+    if source is not None:
+        query = query.where(PredictionRow.source == source)
+    if horizon is not None:
+        query = query.where(PredictionRow.horizon_days == horizon)
+    query = query.order_by(PredictionRow.made_on.desc(), PredictionRow.id.desc())
+    if limit is not None:
+        query = query.limit(limit)
+    return list((await session.execute(query)).scalars())

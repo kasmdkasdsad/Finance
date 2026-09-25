@@ -479,6 +479,7 @@ class AlphaRun:
     live_date: pd.Timestamp
     live: list[LivePrediction]
     live_lambda: float
+    live_coef: np.ndarray
     oos_start: pd.Timestamp
     oos_end: pd.Timestamp
 
@@ -537,6 +538,7 @@ def run(data: ModelData, config: ModelConfig) -> AlphaRun:
         live_date=last,
         live=live,
         live_lambda=lam,
+        live_coef=coef,
         oos_start=labelled[0],
         oos_end=labelled[-1],
     )

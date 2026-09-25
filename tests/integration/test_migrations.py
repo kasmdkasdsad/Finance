@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect
 from quantpulse.db import migrate
 from quantpulse.db.base import Base
 
-EXPECTED_CHAIN = ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
+EXPECTED_CHAIN = ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
 
 
 def _url(tmp_path):
@@ -19,13 +19,13 @@ def test_revision_chain_is_linear():
     script = ScriptDirectory.from_config(migrate.alembic_config("sqlite://"))
     revs = [r.revision for r in reversed(list(script.walk_revisions()))]
     assert revs == EXPECTED_CHAIN
-    assert migrate.head_revision() == "0007"
+    assert migrate.head_revision() == "0008"
 
 
 def test_upgrade_matches_models_and_downgrade_is_clean(tmp_path):
     url = _url(tmp_path)
     migrate.upgrade(url)
-    assert migrate.current_revision(url) == "0007"
+    assert migrate.current_revision(url) == "0008"
     engine = create_engine(migrate.sync_url(url))
     with engine.connect() as conn:
         diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)

@@ -14,14 +14,18 @@ from quantpulse.api.deps import require_api_key
 from quantpulse.api.errors import install_error_handlers
 from quantpulse.api.middleware import RequestContextMiddleware
 from quantpulse.api.routers import (
+    forecast,
     fundamentals,
     market,
+    model,
     options,
     picks,
     portfolio,
+    predictions,
     rates,
     sandbox,
     sports,
+    stocks,
     system,
     vehicle,
 )
@@ -71,6 +75,10 @@ def create_app(settings: Settings | None = None, container: Container | None = N
                 "sports",
                 "picks",
                 "sandbox",
+                "forecast",
+                "model",
+                "stocks",
+                "predictions",
             )
         ],
     )
@@ -86,7 +94,23 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
     app.include_router(system.public)
     auth = [Depends(require_api_key)]
-    for module in (system, market, rates, options, fundamentals, portfolio, vehicle, sports, picks, sandbox):
+    modules = (
+        system,
+        market,
+        model,  # before any catch-all market paths, for /market/regime
+        rates,
+        options,
+        fundamentals,
+        portfolio,
+        vehicle,
+        sports,
+        picks,
+        sandbox,
+        forecast,
+        stocks,
+        predictions,
+    )
+    for module in modules:
         app.include_router(module.router, prefix=API_PREFIX, dependencies=auth)
     return app
 

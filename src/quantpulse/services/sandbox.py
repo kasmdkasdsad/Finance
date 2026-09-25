@@ -59,6 +59,7 @@ from quantpulse.schemas.sandbox import (
     WeightSnapshot,
 )
 from quantpulse.services.market import MarketService
+from quantpulse.services.model import ModelService
 from quantpulse.services.notifications import SyntheticDataRefused
 from quantpulse.services.picks import HISTORY_DAYS, closes_with_quote
 from quantpulse.services.portfolio import closes_frame
@@ -187,6 +188,7 @@ class SandboxService:
         self._retry_at: dict[int, datetime] = {}
         self._skip_logged: dict[int, tuple[date, str]] = {}
         self._marked_on: dict[int, date] = {}
+        self.model: ModelService | None = None  # wired by the container; enables the "model" signal
 
     # ------------------------------------------------------------------ helpers
     def _lock(self, account_id: int) -> asyncio.Lock:
@@ -612,20 +614,28 @@ class SandboxService:
         weights_before = dict(state.weights)
         lessons: list[agent.Lesson] = []
         since = state.last_decision_on
-        if since is not None and since < today.isoformat():
-            lessons = agent.learn(state, config, prices)
-        decision = agent.decide(factors, state.weights, config)
+        if strategy.signal == "model":
+            picked = await self._model_targets(row, strategy, config, prices, excluded, today)
+            if isinstance(picked, StepResult):
+                return picked
+            targets, top = picked
+        else:
+            if since is not None and since < today.isoformat():
+                lessons = agent.learn(state, config, prices)
+            decision = agent.decide(factors, state.weights, config)
+            targets = decision.targets
+            top = [(r.symbol, r.composite, r.rating) for r in decision.ranked[:10]]
+            state.last_scores = decision.scores
+            state.last_prices = {s: prices[s] for s in decision.scores}
         book = self._book(row.cash, positions)
-        trade_prices = {s: prices[s] for s in set(decision.targets) | set(held)}
+        trade_prices = {s: prices[s] for s in set(targets) | set(held)}
         fills = book.rebalance(
             trade_prices,
-            decision.targets,
+            targets,
             model,
             cash_buffer=config.cash_buffer,
             min_trade_value=config.min_trade_value,
         )
-        state.last_scores = decision.scores
-        state.last_prices = {s: prices[s] for s in decision.scores}
         state.last_decision_on = today.isoformat()
         used = sorted(set(factors) | set(held))
         status = DataStatus.worst([statuses[s] for s in used])
@@ -670,12 +680,13 @@ class SandboxService:
                 s,
                 account_id,
                 "decision",
-                _decision_summary(fills, decision.targets),
+                _decision_summary(fills, targets),
                 {
-                    "targets": decision.targets,
+                    "targets": targets,
+                    "signal": strategy.signal,
                     "top": [
-                        {"symbol": r.symbol, "composite": round(r.composite, 4), "rating": r.rating}
-                        for r in decision.ranked[:10]
+                        {"symbol": sym, "composite": round(score, 4), "rating": rating}
+                        for sym, score, rating in top
                     ],
                     "trades": len(fills),
                     "equity": round(equity, 2),
@@ -707,21 +718,43 @@ class SandboxService:
             ],
             weights_before=_round_weights(weights_before),
             weights_after=_round_weights(state.weights),
-            targets=decision.targets,
+            targets=targets,
             candidates=[
                 Candidate(
-                    symbol=r.symbol,
-                    composite=round(r.composite, 4),
-                    rating=r.rating,
-                    target_weight=decision.targets.get(r.symbol, 0.0),
+                    symbol=sym, composite=round(score, 4), rating=rating, target_weight=targets.get(sym, 0.0)
                 )
-                for r in decision.ranked[:10]
+                for sym, score, rating in top
             ],
             excluded=excluded,
             equity=equity,
             cash=book.cash,
             data_status=status,
         )
+
+    async def _model_targets(
+        self,
+        row: SandboxAccountRow,
+        strategy: SandboxStrategy,
+        config: agent.AgentConfig,
+        prices: dict[str, float],
+        excluded: dict[str, str],
+        today: date,
+    ) -> tuple[dict[str, float], list[tuple[str, float, int]]] | StepResult:
+        """Targets from the walk-forward stock model: the top ``k`` names it ranks above average."""
+        if self.model is None:
+            return await self._skip(row, today, "the stock model is not available", excluded, DataStatus.LIVE)
+        try:
+            live, report = await self.model.live_scores(strategy.universe)
+        except DomainError as exc:
+            return await self._skip(row, today, f"stock model unavailable: {exc}", excluded, DataStatus.LIVE)
+        if not self._usable(report.data_status, row.allow_synthetic):
+            return await self._skip(
+                row, today, "the stock model only has synthetic prices", excluded, report.data_status
+            )
+        ranked = sorted((s for s in live if s in prices), key=lambda s: (-live[s].z, s))
+        chosen = [s for s in ranked if live[s].z > 0][: config.top_k]
+        each = min(config.max_position, 1.0 / config.top_k)
+        return dict.fromkeys(chosen, each), [(s, live[s].z, live[s].rating) for s in ranked[:10]]
 
     async def _skip(
         self, row: SandboxAccountRow, today: date, reason: str, excluded: dict[str, str], status: DataStatus

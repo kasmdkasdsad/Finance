@@ -170,3 +170,26 @@ def trading_days_between(start: date, end: date) -> int:
             count += 1
         cursor += timedelta(days=1)
     return count
+
+
+def upcoming_sessions(moment: datetime, n: int) -> list[date]:
+    """The next ``n`` session dates whose close is still ahead of ``moment`` (today counts until its close)."""
+    if n < 1:
+        return []
+    local = moment.astimezone(NEW_YORK)
+    day = local.date()
+    first = day if is_trading_day(day) and local.time() < regular_close(day) else next_trading_day(day)
+    out = [first]
+    while len(out) < n:
+        out.append(next_trading_day(out[-1]))
+    return out
+
+
+def sessions_after(day: date, n: int) -> date:
+    """The ``n``-th trading day after ``day``."""
+    if n < 1:
+        raise ValueError("n must be >= 1")
+    cursor = day
+    for _ in range(n):
+        cursor = next_trading_day(cursor)
+    return cursor

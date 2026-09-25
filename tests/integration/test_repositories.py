@@ -45,6 +45,30 @@ async def test_bars_upsert_is_idempotent_and_timezone_safe(database):
         assert await repo.load_bars(s, "MSFT", "1d") is None
 
 
+async def test_bars_upsert_writes_only_new_bars_unless_history_was_readjusted(database):
+    async with database.session() as s:
+        assert await repo.upsert_bars(s, _history(30), "yahoo") == 30
+    async with (
+        database.session() as s
+    ):  # same history plus two new days: only the revision window is rewritten
+        assert await repo.upsert_bars(s, _history(32), "yahoo") == 10  # days 22..31 (7-day overlap + new)
+    readjusted = _history(32)
+    readjusted = readjusted.model_copy(
+        update={
+            "bars": [
+                b.model_copy(update={"close": b.close * 0.98, "low": b.low * 0.97}) for b in readjusted.bars
+            ]
+        }
+    )
+    async with (
+        database.session() as s
+    ):  # a split/dividend re-adjustment changes old closes: rewrite everything
+        assert await repo.upsert_bars(s, readjusted, "yahoo") == 32
+    async with database.session() as s:
+        history, _, _ = await repo.load_bars(s, "AAPL", "1d")
+    assert len(history.bars) == 32 and history.bars[0].close == pytest.approx(98.0)
+
+
 async def test_quote_and_curve_round_trip(database):
     q = Quote(symbol="AAPL", price=210.0, previous_close=200.0, timestamp=T0)
     curve = YieldCurve(

@@ -182,7 +182,9 @@ async def test_agent_trades_and_learns_across_days(feed_api, clock):
     assert len(monday["lessons"]) >= 4
     assert all(-1 <= lesson["ic"] <= 1 and lesson["observations"] == 8 for lesson in monday["lessons"])
     assert monday["weights_after"] != monday["weights_before"]
-    assert sum(monday["weights_after"].values()) == pytest.approx(1.0)
+    assert sum(monday["weights_after"].values()) == pytest.approx(
+        1.0, abs=1e-5
+    )  # six weights rounded to 1e-6
 
     account = (await api.get(url)).json()["data"]["account"]
     assert account["periods_learned"] == 1 and account["last_decision_on"] == "2026-09-28"
@@ -199,6 +201,25 @@ async def test_agent_trades_and_learns_across_days(feed_api, clock):
     assert perf["benchmark_return"] is not None and perf["snapshots"] == 4  # created + 3 steps
     assert summary["data_status"] in {"live", "cached"}
     assert {p["symbol"] for p in summary["positions"]} == set(monday["targets"])
+
+
+async def test_agent_can_trade_on_the_stock_model(feed_api):
+    api = feed_api
+    acct = await _create(
+        api, "Model trader", strategy={"universe": SMALL_UNIVERSE, "top_k": 3, "signal": "model"}
+    )
+    assert acct["strategy"]["signal"] == "model"
+    step = (await api.post(f"{BASE}/{acct['id']}/step")).json()
+    assert step["executed"] is True and step["data_status"] == "live", step
+    assert step["lessons"] == [] and 1 <= len(step["targets"]) <= 3
+    report = (await api.get("/api/v1/model/report", params={"symbols": ",".join(SMALL_UNIVERSE)})).json()[
+        "data"
+    ]
+    model_top = [x["symbol"] for x in report["live"] if x["z"] > 0][:3]
+    assert sorted(step["targets"]) == sorted(model_top)  # the agent holds exactly the model's top names
+    assert [c["symbol"] for c in step["candidates"]] == [x["symbol"] for x in report["live"]][:8]
+    decision = (await api.get(f"{BASE}/{acct['id']}/journal")).json()[0]
+    assert decision["kind"] == "decision" and decision["details"]["signal"] == "model"
 
 
 async def test_agent_skips_non_trading_days_unless_forced(feed_api, clock):

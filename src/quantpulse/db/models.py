@@ -394,3 +394,46 @@ class SandboxJournalRow(Base):
     kind: Mapped[str] = mapped_column(String(16))
     summary: Mapped[str] = mapped_column(Text)
     details: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class PredictionRow(Base):
+    """One logged prediction and, once its target date has passed, how it turned out."""
+
+    __tablename__ = "predictions"
+    __table_args__ = (
+        UniqueConstraint("symbol", "source", "horizon_days", "made_on"),
+        Index("ix_predictions_status_target_date", "status", "target_date"),
+        Index("ix_predictions_symbol_made_on", "symbol", "made_on"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    made_on: Mapped[date] = mapped_column(Date)
+    target_date: Mapped[date] = mapped_column(Date)
+    symbol: Mapped[str] = mapped_column(String(16))
+    source: Mapped[str] = mapped_column(String(16))
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    reference_price: Mapped[float] = mapped_column(Float)
+    benchmark: Mapped[str] = mapped_column(String(16))
+    benchmark_reference: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prob_up: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prob_outperform: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q05: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q25: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q50: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q75: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q95: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_version: Mapped[str] = mapped_column(String(40))
+    data_status: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(10), default="open")
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    realized_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_realized: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_up: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    outcome_outperform: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    in_50: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    in_90: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

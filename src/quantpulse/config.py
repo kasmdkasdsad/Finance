@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     ttl_scoreboard_idle: float = 600.0
     ttl_season_results: float = 1800.0
     ttl_odds: float = 900.0
+    ttl_model: float = Field(default=21600.0, gt=0, description="How long a stock-model run is reused.")
     stale_grace_seconds: float = Field(
         default=86400.0, ge=0, description="How long an expired cache entry may still be served as STALE."
     )
@@ -177,6 +178,17 @@ class Settings(BaseSettings):
         default="16:05", description="HH:MM, America/New_York: when every account is marked to market."
     )
 
+    # --- Prediction ledger ------------------------------------------------------------------------
+    predictions_enabled: bool = Field(
+        default=True, description="Log forecasts and model predictions after each close and grade them later."
+    )
+    predictions_log_time: str = Field(
+        default="16:20", description="HH:MM, America/New_York, trading days only."
+    )
+    predictions_allow_synthetic: bool = Field(
+        default=False, description="Log predictions made from synthetic prices (never recommended)."
+    )
+
     # --- Provider quotas ------------------------------------------------------------------------
     polygon_requests_per_minute: float = Field(default=5.0, gt=0, description="Free tier: 5/min.")
 
@@ -205,7 +217,7 @@ class Settings(BaseSettings):
         adapter = TypeAdapter(EmailStr)
         return [adapter.validate_python(v) for v in value]
 
-    @field_validator("picks_send_time", "sandbox_trade_time", "sandbox_mark_time")
+    @field_validator("picks_send_time", "sandbox_trade_time", "sandbox_mark_time", "predictions_log_time")
     @classmethod
     def _validate_time(cls, value: str) -> str:
         from datetime import datetime as _dt

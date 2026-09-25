@@ -8,7 +8,9 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
 * NFL / college-football scoreboards — every ``poll_sports_seconds``;
 * the daily picks email — once per trading day at ``picks_send_time`` (America/New_York) when enabled;
 * the paper-trading sandbox — auto-trading agents rebalance once per trading day after
-  ``sandbox_trade_time`` and every account is marked to market after ``sandbox_mark_time``.
+  ``sandbox_trade_time`` and every account is marked to market after ``sandbox_mark_time``;
+* the prediction ledger — forecasts and model predictions are logged after ``predictions_log_time`` on
+  trading days and graded when their target date's close is in.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 PICKS_CHECK_SECONDS = 60.0
 SANDBOX_CHECK_SECONDS = 60.0
+PREDICTIONS_CHECK_SECONDS = 60.0
 
 
 @dataclass
@@ -80,6 +83,9 @@ class Poller:
                 self._loop("picks_email", lambda: PICKS_CHECK_SECONDS, self.maybe_send_picks)
             ),
             asyncio.create_task(self._loop("sandbox", lambda: SANDBOX_CHECK_SECONDS, self.run_sandbox)),
+            asyncio.create_task(
+                self._loop("predictions", lambda: PREDICTIONS_CHECK_SECONDS, self.run_predictions)
+            ),
         ]
         logger.info("poller started (%d jobs)", len(self._tasks))
 
@@ -169,6 +175,9 @@ class Poller:
 
     async def run_sandbox(self) -> str:
         return await self._c.sandbox.run_scheduled()
+
+    async def run_predictions(self) -> str:
+        return await self._c.predictions.run_scheduled()
 
     async def _already_sent(self, key: str) -> bool:
         async with self._c.db.session() as session:
