@@ -2,16 +2,30 @@
 
 All settings are read from environment variables prefixed with ``QP_`` (or a ``.env`` file).
 Secrets are held as :class:`pydantic.SecretStr` so they never leak into logs or API responses.
+
+Which ``.env`` file (deterministic, whatever the working directory)
+    1. the file named by ``QP_ENV_FILE``, if that variable is set;
+    2. otherwise ``.env`` at the project root (the folder holding ``pyproject.toml``), when running from
+       a source checkout;
+    3. otherwise ``.env`` in the current working directory.
+
+Process environment variables always win over the file (a ``QP_TRADING_DRY_RUN`` left in the shell
+overrides the ``.env``), and settings are read once at startup: after editing ``.env`` the API must be
+restarted. :func:`setting_sources` and :func:`env_file_drift` make both visible (``/trading/status``).
 """
 
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, PrivateAttr, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 MarketProviderName = Literal["polygon", "alpaca", "yahoo"]
@@ -125,6 +139,10 @@ class Settings(BaseSettings):
         validate_default=True,
         populate_by_name=True,
     )
+
+    # Where these settings came from (set by get_settings; None when built directly, e.g. in tests).
+    _source_file: Path | None = PrivateAttr(default=None)
+    _loaded_at: datetime | None = PrivateAttr(default=None)
 
     # --- Runtime -----------------------------------------------------------------------------
     environment: Literal["development", "production", "test"] = "development"
@@ -317,6 +335,13 @@ class Settings(BaseSettings):
     trading_scheduler_enabled: bool = Field(
         default=True,
         description="Let the poller run strategy cycles during market hours (dry runs included).",
+    )
+    trading_scheduler_requires_arming: bool = Field(
+        default=True,
+        description=(
+            "Scheduled cycles stay dry runs until paper execution has been exercised once by hand (a manual "
+            "paper cycle or the confirmed test order), so enabling paper trading never fires a batch on its own."
+        ),
     )
     trading_time: str = Field(default="10:00", description="HH:MM New York: the first cycle of each day.")
     trading_rebalance_interval_minutes: int = Field(default=30, ge=5, le=390)
@@ -624,7 +649,129 @@ class Settings(BaseSettings):
         return checks.get(provider, True)
 
 
+ENV_FILE_VAR = "QP_ENV_FILE"
+# Settings that decide whether (and how) orders reach the Alpaca paper account, with the variable names
+# that can set each one. Reported with their source, never with secret values.
+TRADING_SWITCHES: dict[str, tuple[str, ...]] = {
+    "alpaca_trading_enabled": ("QP_ALPACA_TRADING_ENABLED",),
+    "trading_dry_run": ("QP_TRADING_DRY_RUN",),
+    "alpaca_paper": ("QP_ALPACA_PAPER",),
+    "trading_kill_switch": ("QP_TRADING_KILL_SWITCH",),
+    "trading_scheduler_enabled": ("QP_TRADING_SCHEDULER_ENABLED",),
+    "trading_scheduler_requires_arming": ("QP_TRADING_SCHEDULER_REQUIRES_ARMING",),
+    "trading_require_live_data": ("QP_TRADING_REQUIRE_LIVE_DATA",),
+    "trading_max_spread_bps": ("QP_TRADING_MAX_SPREAD_BPS",),
+    "enable_live_data": ("QP_ENABLE_LIVE_DATA",),
+    "alpaca_stock_feed": ("QP_ALPACA_STOCK_FEED",),
+    "alpaca_api_key_id": ("QP_ALPACA_API_KEY_ID", "APCA_API_KEY_ID", "ALPACA_API_KEY_ID"),
+    "alpaca_api_secret_key": ("QP_ALPACA_API_SECRET_KEY", "APCA_API_SECRET_KEY", "ALPACA_API_SECRET_KEY"),
+    "api_token": ("QP_API_TOKEN",),
+}
+SECRET_SWITCHES = frozenset({"alpaca_api_key_id", "alpaca_api_secret_key", "api_token"})
+
+
+def project_root() -> Path | None:
+    """The source checkout this package runs from (the folder with ``pyproject.toml``), if any."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").is_file() and (parent / "src" / "quantpulse").is_dir():
+            return parent
+    return None
+
+
+def resolve_env_file(environ: Mapping[str, str] | None = None, cwd: Path | None = None) -> Path | None:
+    """The ``.env`` file settings are read from (see the module docstring for the order)."""
+    env = os.environ if environ is None else environ
+    explicit = env.get(ENV_FILE_VAR, "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    root = project_root()
+    if root is not None and (root / ".env").is_file():
+        return root / ".env"
+    local = (cwd or Path.cwd()) / ".env"
+    return local.resolve() if local.is_file() else None
+
+
+def _read_env_file(path: Path | None) -> dict[str, str | None]:
+    if path is None or not path.is_file():
+        return {}
+    from dotenv import dotenv_values
+
+    return {k.upper(): v for k, v in dotenv_values(path, encoding="utf-8-sig").items()}
+
+
+def _render(field: str, value: Any) -> str:
+    if field in SECRET_SWITCHES:
+        return "set" if value is not None else "not set"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+@dataclass(frozen=True, slots=True)
+class SettingSource:
+    field: str
+    variable: str  # the variable that set it (or the primary name when defaulted)
+    source: Literal["environment", "env_file", "default"]
+    value: str  # rendered; secrets are only "set" / "not set"
+
+
+def setting_sources(
+    settings: Settings,
+    environ: Mapping[str, str] | None = None,
+    fields: Mapping[str, Sequence[str]] = TRADING_SWITCHES,
+) -> list[SettingSource]:
+    """Where each trading switch's running value came from: the process environment (which overrides
+    ``.env``), the ``.env`` file, or the built-in default."""
+    env = {k.upper(): v for k, v in (os.environ if environ is None else environ).items()}
+    file_values = _read_env_file(settings._source_file)
+    out: list[SettingSource] = []
+    for field, names in fields.items():
+        value = _render(field, getattr(settings, field))
+        in_env = next((n for n in names if n.upper() in env), None)
+        in_file = next((n for n in names if n.upper() in file_values), None)
+        if in_env is not None:
+            out.append(SettingSource(field, in_env, "environment", value))
+        elif in_file is not None:
+            out.append(SettingSource(field, in_file, "env_file", value))
+        else:
+            out.append(SettingSource(field, names[0], "default", value))
+    return out
+
+
+def env_file_drift(settings: Settings, fields: Sequence[str] = tuple(TRADING_SWITCHES)) -> list[str]:
+    """Trading switches whose value in the ``.env`` file no longer matches the running settings: the file
+    was edited after startup, so the API must be restarted for the change to apply."""
+    path = settings._source_file
+    if path is None or not path.is_file():
+        return []
+    try:
+        fresh = Settings(_env_file=path)
+    except ValidationError as exc:
+        bad = sorted({str(e["loc"][0]) for e in exc.errors() if e.get("loc")})
+        return [f"{path.name} no longer loads ({', '.join(bad)} invalid): the running API keeps its settings"]
+    out: list[str] = []
+    for field in fields:
+        running, on_disk = getattr(settings, field), getattr(fresh, field)
+        if field in SECRET_SWITCHES:
+            same = (running is None) == (on_disk is None) and (
+                running is None or running.get_secret_value() == on_disk.get_secret_value()
+            )
+            detail = "changed in the file" if not same else ""
+        else:
+            same = running == on_disk
+            detail = f"running {_render(field, running)}, file now says {_render(field, on_disk)}"
+        if not same:
+            name = TRADING_SWITCHES.get(field, (field.upper(),))[0]
+            out.append(f"{name}: {detail} — restart the API to apply")
+    return out
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Process-wide cached settings instance."""
-    return Settings()
+    """Process-wide cached settings instance (read once: restart after editing ``.env``)."""
+    env_file = resolve_env_file()
+    settings = Settings(_env_file=env_file)
+    settings._source_file = env_file
+    settings._loaded_at = datetime.now(UTC)
+    return settings

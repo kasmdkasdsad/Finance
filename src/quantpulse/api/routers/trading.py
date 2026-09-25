@@ -20,10 +20,13 @@ from quantpulse.schemas.trading import (
     CloseAllIn,
     CycleOut,
     CycleSummary,
+    DiagnosticOrderIn,
+    DiagnosticOrderOut,
     KillSwitchIn,
     KillSwitchOut,
     ReconcileOut,
     RiskSnapshotOut,
+    TradingDiagnosticsOut,
     TradingEventOut,
     TradingPerformanceOut,
     TradingStatus,
@@ -55,6 +58,32 @@ OrderAuth = [Depends(orders_allowed)]
 @router.get("/status", response_model=TradingStatus, summary="Mode, kill switch, market clock, next cycle")
 async def trading_status(c: Container = ContainerDep) -> TradingStatus:
     return await c.trading.status()
+
+
+@router.get(
+    "/diagnostics",
+    response_model=TradingDiagnosticsOut,
+    summary="Read-only check of the Alpaca paper connection (never places or cancels an order)",
+)
+async def diagnostics(
+    symbols: str = Query(
+        "",
+        max_length=300,
+        description="Comma-separated symbols whose quotes (price, bid/ask, spread source, age) to inspect",
+    ),
+    c: Container = ContainerDep,
+) -> TradingDiagnosticsOut:
+    return await c.trading.diagnostics([x for x in symbols.split(",") if x.strip()])
+
+
+@router.post(
+    "/test-order",
+    response_model=DiagnosticOrderOut,
+    dependencies=OrderAuth,
+    summary="Send exactly ONE small paper test order (needs the exact confirmation phrase)",
+)
+async def send_test_order(body: DiagnosticOrderIn, c: Container = ContainerDep) -> DiagnosticOrderOut:
+    return await c.trading.test_order(body.confirm, body.symbol, body.mode, body.notional)
 
 
 @router.get("/account", response_model=BrokerAccountOut, summary="Alpaca paper account (authoritative)")

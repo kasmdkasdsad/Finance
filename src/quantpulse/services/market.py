@@ -14,7 +14,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
@@ -249,6 +249,21 @@ class MarketService:
         for s in todo[QUOTE_FALLBACKS:]:
             out.missing[s] = "not returned by the batch quote source"
         return out
+
+    async def consolidated_quotes(self, symbols: Sequence[str]) -> dict[str, Any]:
+        """All-exchange (SIP) bid/ask for ``symbols`` from a vendor that offers it (Alpaca), possibly
+        15 minutes delayed; empty when no configured vendor can provide it. Never raises."""
+        if not symbols or not self._settings.enable_live_data:
+            return {}
+        for p in self._providers:
+            fetch = getattr(p, "consolidated_quotes", None)
+            if fetch is None or not p.configured():
+                continue
+            try:
+                return dict(await fetch(list(symbols)))
+            except Exception as exc:  # optional data: the single-venue quote is used instead
+                logger.warning("consolidated quotes from %s failed: %s", p.name, exc)
+        return {}
 
     async def history(
         self, symbol: str, interval: Interval = "1d", lookback_days: int = 365, *, force_refresh: bool = False

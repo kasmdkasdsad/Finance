@@ -3,16 +3,23 @@
 The free plan serves the IEX feed for equities and the ``indicative`` feed for options; set
 ``QP_ALPACA_STOCK_FEED=sip`` / ``QP_ALPACA_OPTIONS_FEED=opra`` with a paid subscription.
 Alpaca option snapshots carry quotes, trades and IV but not open interest.
+
+IEX is a single exchange: its bid/ask is IEX's own book, not the national best bid/offer, and can be far
+wider than the market (or one-sided) for names IEX trades thinly. :meth:`Alpaca.consolidated_quotes`
+reads the consolidated (SIP) quote instead — real time with a subscription that allows it, else the
+15-minute-delayed SIP feed — so spreads can be measured across all exchanges.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 
 from pydantic import Field
 
-from quantpulse.core.errors import ProviderNotConfigured
+from quantpulse.core.errors import ProviderHTTPError, ProviderNotConfigured
 from quantpulse.core.http import HttpClient
 from quantpulse.providers.base import (
     WireModel,
@@ -25,7 +32,13 @@ from quantpulse.providers.base import (
 from quantpulse.schemas.market import Bar, Interval, PriceHistory, Quote
 from quantpulse.schemas.options import OptionChain, OptionContract
 
+logger = logging.getLogger(__name__)
+
 NAME = "alpaca"
+# Consolidated (all-exchange) quote feeds, best first; a feed the subscription refuses is skipped for a while.
+CONSOLIDATED_FEEDS = ("sip", "delayed_sip")
+FEED_REFUSAL_TTL = timedelta(hours=1)
+LATEST_QUOTE_BATCH = 200
 TIMEFRAME: dict[str, str] = {
     "1m": "1Min",
     "5m": "5Min",
@@ -89,6 +102,21 @@ class _OptionSnapshot(WireModel):
     dailyBar: _Bar | None = None
 
 
+class _LatestQuotesResponse(WireModel):
+    quotes: dict[str, _Quote | None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConsolidatedQuote:
+    """A bid/ask across all US exchanges (SIP), possibly 15 minutes delayed (``feed='delayed_sip'``)."""
+
+    symbol: str
+    bid: float | None
+    ask: float | None
+    timestamp: datetime | None
+    feed: str
+
+
 class _OptionSnapshotsResponse(WireModel):
     snapshots: dict[str, _OptionSnapshot] | None = None
     next_page_token: str | None = None
@@ -117,6 +145,7 @@ class Alpaca:
         self._base = data_url.rstrip("/")
         self._stock_feed = stock_feed
         self._options_feed = options_feed
+        self._refused_feeds: dict[str, datetime] = {}  # consolidated feed -> when the subscription refused it
 
     def configured(self) -> bool:
         return bool(self._key_id and self._secret)
@@ -142,10 +171,59 @@ class Alpaca:
                 continue
             symbol = ours.get(sym.upper(), sym.upper())
             snap = parse_wire(NAME, _StockSnapshot, raw)
-            quote = _snapshot_to_quote(symbol, snap)
+            quote = _snapshot_to_quote(symbol, snap, self._stock_feed)
             if quote is not None:
                 out[symbol] = quote
         require(bool(out), NAME, "no snapshots returned")
+        return out
+
+    @property
+    def stock_feed(self) -> str:
+        return self._stock_feed
+
+    async def consolidated_quotes(self, symbols: Sequence[str]) -> dict[str, ConsolidatedQuote]:
+        """Latest consolidated (SIP) bid/ask for ``symbols``: the real-time SIP feed when the subscription
+        allows it, otherwise the 15-minute-delayed SIP feed; empty if neither is permitted."""
+        if not symbols or not self.configured():
+            return {}
+        now = datetime.now(UTC)
+        for feed in CONSOLIDATED_FEEDS:
+            refused = self._refused_feeds.get(feed)
+            if refused is not None and now - refused < FEED_REFUSAL_TTL:
+                continue
+            try:
+                out = await self._latest_quotes(symbols, feed)
+            except ProviderHTTPError as exc:
+                if exc.status_code in (400, 401, 403, 422):  # not in this subscription (or unknown feed)
+                    logger.info(
+                        "Alpaca %s quotes unavailable (HTTP %s): trying the next feed", feed, exc.status_code
+                    )
+                    self._refused_feeds[feed] = now
+                    continue
+                raise
+            self._refused_feeds.pop(feed, None)
+            return out
+        return {}
+
+    async def _latest_quotes(self, symbols: Sequence[str], feed: str) -> dict[str, ConsolidatedQuote]:
+        out: dict[str, ConsolidatedQuote] = {}
+        for i in range(0, len(symbols), LATEST_QUOTE_BATCH):
+            chunk = list(symbols[i : i + LATEST_QUOTE_BATCH])
+            ours = {vendor_symbol(s): s for s in chunk}
+            payload = await self._http.get_json(
+                NAME,
+                f"{self._base}/v2/stocks/quotes/latest",
+                params={"symbols": ",".join(ours), "feed": feed},
+                headers=self._headers(),
+            )
+            page = parse_wire(NAME, _LatestQuotesResponse, payload)
+            for vendor, q in (page.quotes or {}).items():
+                if q is None:
+                    continue
+                symbol = ours.get(vendor.upper(), vendor.upper())
+                out[symbol] = ConsolidatedQuote(
+                    symbol, positive_or_none(q.bp), positive_or_none(q.ap), q.t, feed
+                )
         return out
 
     async def quote(self, symbol: str) -> Quote:
@@ -281,7 +359,7 @@ class Alpaca:
         )
 
 
-def _snapshot_to_quote(symbol: str, snap: _StockSnapshot) -> Quote | None:
+def _snapshot_to_quote(symbol: str, snap: _StockSnapshot, feed: str | None = None) -> Quote | None:
     trade = snap.latestTrade or _Trade()
     daily = snap.dailyBar
     price = positive_or_none(trade.p) or (positive_or_none(daily.c) if daily else None)
@@ -303,4 +381,6 @@ def _snapshot_to_quote(symbol: str, snap: _StockSnapshot) -> Quote | None:
         volume=finite_or_none(daily.v) if daily else None,
         vwap=positive_or_none(daily.vw) if daily else None,
         timestamp=stamp,
+        quote_timestamp=q.t,
+        feed=feed,
     )

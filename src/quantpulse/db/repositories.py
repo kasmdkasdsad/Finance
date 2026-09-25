@@ -1196,6 +1196,17 @@ async def get_broker_order(session: AsyncSession, client_order_id: str) -> Broke
     ).first()
 
 
+async def broker_orders_by_client_ids(
+    session: AsyncSession, client_order_ids: Iterable[str]
+) -> dict[str, BrokerOrderRow]:
+    ids = sorted(set(client_order_ids))
+    out: dict[str, BrokerOrderRow] = {}
+    for i in range(0, len(ids), 500):
+        stmt = select(BrokerOrderRow).where(BrokerOrderRow.client_order_id.in_(ids[i : i + 500]))
+        out.update({r.client_order_id: r for r in (await session.scalars(stmt)).all()})
+    return out
+
+
 async def broker_orders(
     session: AsyncSession,
     limit: int = 200,
@@ -1204,8 +1215,11 @@ async def broker_orders(
     exclude_statuses: Iterable[str] | None = None,
     symbol: str | None = None,
     since: datetime | None = None,
+    strategy: str | None = None,
 ) -> list[BrokerOrderRow]:
     stmt = select(BrokerOrderRow).order_by(BrokerOrderRow.id.desc()).limit(limit)
+    if strategy is not None:
+        stmt = stmt.where(BrokerOrderRow.strategy == strategy)
     if statuses:
         stmt = stmt.where(BrokerOrderRow.status.in_(list(statuses)))
     if exclude_statuses is not None:

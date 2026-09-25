@@ -35,6 +35,12 @@ class Quote(StrictModel):
     shares_outstanding: float | None = Field(default=None, gt=0)
     dividend_yield: float | None = Field(default=None, ge=0, le=1)
     timestamp: AwareDatetime
+    quote_timestamp: AwareDatetime | None = Field(
+        default=None, description="When the bid/ask was quoted (the price's timestamp is the last trade's)"
+    )
+    feed: str | None = Field(
+        default=None, description="Vendor feed, e.g. 'iex' (one exchange) or 'sip' (all US exchanges)"
+    )
 
     @model_validator(mode="after")
     def _derive_change(self) -> Quote:

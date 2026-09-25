@@ -18,7 +18,9 @@ buys only:
     ``max_positions``    no more than ``max_positions`` names (held + pending);
     ``buying_power``     the order fits in buying power and in cash above the ``cash_buffer_pct`` reserve;
     ``liquidity``        price ≥ ``min_price``, 20-day dollar volume ≥ ``min_dollar_volume``, spread ≤
-                         ``max_spread_bps``.
+                         ``max_spread_bps`` — measured on a validated quote (the consolidated SIP quote when
+                         available); a spread that cannot be measured fails when ``require_live_data``;
+    ``quote_quality``    the price agrees with the price history (no bad tick, split or mis-mapped symbol).
 
 The book is *projected*: each approved order is committed so later orders in the same cycle see the
 exposure, positions and cash it will use.
@@ -81,8 +83,11 @@ class QuoteCheck:
     status: DataStatus
     provider: str
     age_seconds: float | None = None
-    spread_bps: float | None = None
+    spread_bps: float | None = None  # validated (see trading_data.assess_quote); None: not measurable
     adv_dollar: float | None = None
+    spread_source: str | None = None  # e.g. "SIP", "IEX only"
+    quote_problems: tuple[str, ...] = ()  # why parts of the quote were not believed
+    entry_blocks: tuple[str, ...] = ()  # price inconsistencies that forbid new buying
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,9 +299,18 @@ class RiskBook:
                 problems.append("unknown trading volume")
             elif adv < L.min_dollar_volume:
                 problems.append(f"${adv / 1e6:,.1f}M/day < ${L.min_dollar_volume / 1e6:,.0f}M")
+            source = f" ({q.spread_source})" if q is not None and q.spread_source else ""
             if q is not None and q.spread_bps is not None and q.spread_bps > L.max_spread_bps:
-                problems.append(f"spread {q.spread_bps:.0f}bp > {L.max_spread_bps:.0f}bp")
-            check("liquidity", not problems, "; ".join(problems) or "liquid")
+                problems.append(f"spread {q.spread_bps:.0f}bp{source} > {L.max_spread_bps:.0f}bp")
+            elif q is not None and q.spread_bps is None and L.require_live_data:
+                why = "; ".join(p.split(": ", 1)[-1] for p in q.quote_problems) or "no bid/ask"
+                problems.append(f"spread cannot be measured ({why})")
+            spread = (
+                f", spread {q.spread_bps:.0f}bp{source}" if q is not None and q.spread_bps is not None else ""
+            )
+            check("liquidity", not problems, "; ".join(problems) or f"liquid{spread}")
+            blocks = list(q.entry_blocks) if q is not None else []
+            check("quote_quality", not blocks, "; ".join(blocks) or "price consistent with its history")
         else:
             check("side", False, f"unknown side {o.side!r}")
         return RiskDecision(o, tuple(checks))

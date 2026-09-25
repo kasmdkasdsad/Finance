@@ -41,13 +41,15 @@ def settings_for(tmp_path, **overrides):
     return make_settings(tmp_path, **base)
 
 
-async def trading_client(tmp_path, clock, fake=None, client_host="127.0.0.1", sessions=320, **overrides):
+async def trading_client(
+    tmp_path, clock, fake=None, client_host="127.0.0.1", sessions=320, feed=None, **overrides
+):
     fake = fake or FakeAlpacaPaper(clock=clock)
     broker = AlpacaPaperBroker(KEY, SECRET, transport=fake)
     async for api in _client(
         settings_for(tmp_path, **overrides), clock, client_host=client_host, broker=broker
     ):
-        feed = TrendFeed(clock, sessions=sessions)
+        feed = feed or TrendFeed(clock, sessions=sessions)
         api.container.market._providers[:] = [feed]
         for s in feed.bars:
             fake.prices[s] = feed.live_price(s)
@@ -339,6 +341,8 @@ async def test_daily_loss_flatten_policy(tmp_path):
 
 
 async def test_scheduler_runs_each_slot_once(tmp_path):
+    """Scheduled cycles stay dry runs until paper execution was used once by hand (arming), then each
+    slot runs once in paper mode."""
     clock = FakeClock(datetime(2026, 9, 25, 13, 45, tzinfo=UTC))  # 09:45 New York
     fake = FakeAlpacaPaper(clock=clock)
     async for api in trading_client(tmp_path, clock, fake=fake, **PAPER):
@@ -347,11 +351,26 @@ async def test_scheduler_runs_each_slot_once(tmp_path):
         assert any(e["kind"] == "reconciliation_completed" for e in (await api.get(f"{BASE}/events")).json())
         clock.advance(20 * 60)  # 10:05
         first = await trading.run_scheduled()
-        assert first.startswith("cycle 20260925T1000 completed (paper")
+        assert first.startswith("cycle 20260925T1000-dry completed (dry_run")
+        assert fake.orders == {} and ("POST", "/v2/orders") not in fake.log
+        dry = (await api.get(f"{BASE}/proposed")).json()
+        assert any("not armed" in n for n in dry["notes"])
+        st = (await api.get(f"{BASE}/status")).json()
+        assert st["can_submit"] and st["submit_blockers"] == []  # a manual cycle would send orders
+        assert not st["scheduler_armed"] and st["scheduled_mode"] == "dry_run"
+        assert await trading.run_scheduled() == "cycle 20260925T1000-dry completed"
+
+        manual = (await api.post(f"{BASE}/run")).json()  # the user's explicit first paper cycle arms it
+        assert manual["mode"] == "paper" and manual["cycle_key"] == "m20260925T1005" and fake.orders
+        st = (await api.get(f"{BASE}/status")).json()
+        assert st["scheduler_armed"] and st["scheduled_mode"] == "paper"
+        assert "paper_armed" in {e["kind"] for e in (await api.get(f"{BASE}/events")).json()}
+
+        assert (await trading.run_scheduled()).startswith("cycle 20260925T1000 completed (paper")
         assert await trading.run_scheduled() == "cycle 20260925T1000 completed"
         n = len(fake.orders)
         clock.advance(30 * 60)  # 10:35
-        assert (await trading.run_scheduled()).startswith("cycle 20260925T1030 completed")
+        assert (await trading.run_scheduled()).startswith("cycle 20260925T1030 completed (paper")
         assert len(fake.orders) >= n
         status = (await api.get(f"{BASE}/status")).json()
         assert (
@@ -359,7 +378,24 @@ async def test_scheduler_runs_each_slot_once(tmp_path):
             and status["last_cycle"]["trigger"] == "schedule"
         )
         cycles = (await api.get(f"{BASE}/cycles")).json()
-        assert [c["cycle_key"] for c in cycles] == ["20260925T1030", "20260925T1000"]
+        assert [c["cycle_key"] for c in cycles] == [
+            "20260925T1030",
+            "20260925T1000",
+            "m20260925T1005",
+            "20260925T1000-dry",
+        ]
+
+
+async def test_scheduler_without_arming_sends_from_the_first_slot(tmp_path):
+    clock = FakeClock(datetime(2026, 9, 25, 14, 5, tzinfo=UTC))  # 10:05 New York
+    fake = FakeAlpacaPaper(clock=clock)
+    async for api in trading_client(
+        tmp_path, clock, fake=fake, trading_scheduler_requires_arming=False, **PAPER
+    ):
+        assert (await api.container.trading.run_scheduled()).startswith(
+            "cycle 20260925T1000 completed (paper"
+        )
+        assert fake.orders
 
 
 async def test_order_endpoints_refuse_remote_callers_without_a_token(tmp_path):

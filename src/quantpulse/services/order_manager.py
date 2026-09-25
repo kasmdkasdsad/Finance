@@ -66,6 +66,48 @@ EVENT_FOR_STATUS = {
 }
 
 
+# Alpaca statuses of an order that is working (acknowledged, not yet done).
+WORKING_STATUSES = frozenset(
+    {
+        "new",
+        "accepted",
+        "accepted_for_bidding",
+        "held",
+        "calculated",
+        "pending_replace",
+        "pending_cancel",
+        "stopped",
+        "suspended",
+    }
+)
+_STAGE_FOR_STATUS = {
+    PENDING_SUBMIT: "submitting",
+    SUBMIT_UNKNOWN: "unknown",
+    SUBMIT_FAILED: "failed",
+    "rejected": "rejected",
+    "pending_new": "submitted",
+    "partially_filled": "partially_filled",
+    "filled": "filled",
+    "canceled": "canceled",
+    "done_for_day": "canceled",
+    "replaced": "canceled",
+    "expired": "expired",
+}
+# Stages that mean Alpaca has (or had) the order.
+AT_ALPACA = frozenset({"submitted", "accepted", "partially_filled", "filled", "canceled", "expired"})
+
+
+def trade_stage(approved: bool, status: str | None) -> str:
+    """Where a proposed trade got to, from its risk decision and its order status (see ``TradeStage``)."""
+    if not approved or status == "risk_rejected":
+        return "risk_rejected"
+    if status in (None, "", "dry_run", "not_submitted"):
+        return "risk_approved"
+    if status in WORKING_STATUSES:
+        return "accepted"
+    return _STAGE_FOR_STATUS.get(status, "submitted")
+
+
 def client_order_id(slot: str, symbol: str, side: str) -> str:
     """Deterministic id for (cycle slot, symbol, side): at most one such order can ever be sent."""
     return f"{PREFIX}-{slot}-{symbol.upper().replace('.', '_')}-{side[:1].lower()}"
@@ -81,10 +123,14 @@ class Submission:
     symbol: str
     side: str
     status: str
-    submitted: bool
+    submitted: bool  # Alpaca acknowledged the order (it has an Alpaca order id)
     duplicate: bool = False
     order: BrokerOrder | None = None
     error: str | None = None
+
+    @property
+    def alpaca_order_id(self) -> str | None:
+        return self.order.id if self.order is not None else None
 
 
 @dataclass
@@ -155,7 +201,10 @@ class OrderManager:
         limit_price: float | None,
         cycle_id: int | None,
         strategy: str = STRATEGY,
+        notional: float | None = None,
     ) -> Submission:
+        """Send one risk-approved order exactly once. ``notional`` (dollars, market orders only) replaces
+        the share quantity when given."""
         now = self._clock.now()
         base = Submission(cid, intent.symbol, intent.side, PENDING_SUBMIT, submitted=False)
         # 1. write-ahead record, unique on the client order id: a repeat attempt stops here
@@ -181,8 +230,8 @@ class OrderManager:
                         cycle_id=cycle_id,
                         symbol=intent.symbol,
                         side=intent.side,
-                        quantity=intent.qty,
-                        notional=round(intent.notional, 2),
+                        quantity=None if notional is not None else intent.qty,
+                        notional=round(notional if notional is not None else intent.notional, 2),
                         order_type=order_type,
                         time_in_force="day",
                         limit_price=limit_price,
@@ -202,19 +251,22 @@ class OrderManager:
             return base
 
         # 2. send it once
-        spec = OrderSpec(
-            symbol=intent.symbol,
-            side="buy" if intent.side == "buy" else "sell",
-            qty=intent.qty,
-            order_type="limit" if order_type in ("limit", "marketable_limit") else "market",
-            client_order_id=cid,
-            limit_price=limit_price,
-        )
         order: BrokerOrder | None = None
         error: str | None = None
         status = PENDING_SUBMIT
         try:
+            spec = OrderSpec(
+                symbol=intent.symbol,
+                side="buy" if intent.side == "buy" else "sell",
+                qty=None if notional is not None else intent.qty,
+                order_type="limit" if order_type in ("limit", "marketable_limit") else "market",
+                client_order_id=cid,
+                limit_price=limit_price,
+                notional=notional,
+            )
             order = await self._broker.submit(spec)
+        except ValueError as exc:  # the order spec itself is invalid: nothing was sent
+            status, error = SUBMIT_FAILED, f"invalid order (never sent): {exc}"
         except DuplicateClientOrderId:
             order = await self._lookup(cid)  # an earlier attempt got through: adopt it
             error = "Alpaca already had this client order id; adopted the existing order"
@@ -227,6 +279,7 @@ class OrderManager:
                     status, error = SUBMIT_UNKNOWN, f"{exc} — left for reconciliation, not resent"
             else:
                 status, error = SUBMIT_FAILED, str(exc)
+        size = f"${notional:,.2f} of" if notional is not None else f"{intent.qty:g}"
 
         # 3. record the outcome
         async with self._db.session() as s:
@@ -238,7 +291,8 @@ class OrderManager:
                 events = [
                     (
                         "order_submitted",
-                        f"{intent.side.upper()} {intent.qty:g} {intent.symbol} sent ({order.status})",
+                        f"{intent.side.upper()} {size} {intent.symbol} sent: Alpaca order {order.id} "
+                        f"({order.status})",
                     )
                 ]
                 events += _apply(row, order, now)
@@ -250,17 +304,13 @@ class OrderManager:
                 events.append(
                     (
                         "order_rejected",
-                        f"{intent.side.upper()} {intent.qty:g} {intent.symbol} rejected: {error}",
+                        f"{intent.side.upper()} {size} {intent.symbol} rejected: {error}",
                     )
                 )
             elif status == SUBMIT_UNKNOWN:
-                events.append(
-                    ("order_unknown", f"{intent.side.upper()} {intent.qty:g} {intent.symbol}: {error}")
-                )
+                events.append(("order_unknown", f"{intent.side.upper()} {size} {intent.symbol}: {error}"))
             elif status == SUBMIT_FAILED:
-                events.append(
-                    ("order_failed", f"{intent.side.upper()} {intent.qty:g} {intent.symbol}: {error}")
-                )
+                events.append(("order_failed", f"{intent.side.upper()} {size} {intent.symbol}: {error}"))
             for kind, message in events:
                 await repo.add_trading_event(
                     s,
@@ -270,7 +320,12 @@ class OrderManager:
                     cycle_id=cycle_id,
                     symbol=intent.symbol,
                     client_order_id=cid,
-                    details={"kind": intent.kind, "reason": intent.reason},
+                    details={
+                        "kind": intent.kind,
+                        "reason": intent.reason,
+                        "alpaca_order_id": order.id if order is not None else None,
+                        "status": status,
+                    },
                 )
         return Submission(
             cid, intent.symbol, intent.side, status, submitted=order is not None, order=order, error=error

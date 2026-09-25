@@ -43,6 +43,8 @@ DEFAULT_TIMEOUT = 10.0
 # Terminal order states: nothing more will happen to the order.
 TERMINAL_STATUSES = frozenset({"filled", "canceled", "expired", "rejected", "replaced", "done_for_day"})
 
+# Alpaca accepts fractional quantities to 9 decimal places and notional amounts to the cent.
+QTY_DECIMALS = 9
 T = TypeVar("T")
 Side = Literal["buy", "sell"]
 OrderType = Literal["market", "limit"]
@@ -87,6 +89,10 @@ class DuplicateClientOrderId(OrderRejected):
 
 class NotPaperTrading(BrokerError):
     """The SDK client does not point at Alpaca's paper endpoint (should be impossible)."""
+
+
+class InvalidOrder(BrokerError):
+    """The order could not even be expressed as an Alpaca request (it was never sent)."""
 
 
 # ----------------------------------------------------------------------------- data
@@ -179,19 +185,34 @@ class MarketClock:
 
 @dataclass(frozen=True, slots=True)
 class OrderSpec:
-    """One order as QuantPulse wants it placed (always a regular-hours DAY order)."""
+    """One order as QuantPulse wants it placed (always a regular-hours DAY order).
+
+    Exactly one of ``qty`` (shares, fractional allowed) and ``notional`` (dollars, market orders only) is
+    set. Quantities are rounded to Alpaca's 9 decimal places, so a float such as 0.30000000000000004 is
+    sent as 0.3."""
 
     symbol: str
     side: Side
-    qty: float
+    qty: float | None
     order_type: OrderType
     client_order_id: str
     limit_price: float | None = None
+    notional: float | None = None
 
     def __post_init__(self) -> None:
-        if self.qty <= 0:
-            raise ValueError("order quantity must be positive")
-        if self.order_type == "limit" and (self.limit_price is None or self.limit_price <= 0):
+        if (self.qty is None) == (self.notional is None):
+            raise ValueError("an order needs exactly one of a quantity or a notional amount")
+        if self.qty is not None:
+            object.__setattr__(self, "qty", round(float(self.qty), QTY_DECIMALS))
+            if not self.qty > 0:
+                raise ValueError("order quantity must be positive")
+        if self.notional is not None:
+            object.__setattr__(self, "notional", round(float(self.notional), 2))
+            if not self.notional > 0:
+                raise ValueError("order notional must be positive")
+            if self.order_type != "market":
+                raise ValueError("a notional (dollar-amount) order must be a market order")
+        if self.order_type == "limit" and (self.limit_price is None or not self.limit_price > 0):
             raise ValueError("a limit order needs a positive limit price")
         if not 1 <= len(self.client_order_id) <= 128:
             raise ValueError("client order ids are 1-128 characters")
@@ -223,6 +244,35 @@ def _enum(value: Any) -> str:
 def _mask(account_number: str | None) -> str:
     s = account_number or ""
     return f"…{s[-4:]}" if len(s) > 4 else s
+
+
+def order_request(spec: OrderSpec) -> MarketOrderRequest | LimitOrderRequest:
+    """The SDK request for ``spec``; ``InvalidOrder`` (never sent) if the SDK refuses to build it."""
+    side = OrderSide.BUY if spec.side == "buy" else OrderSide.SELL
+    try:
+        if spec.order_type == "limit":
+            return LimitOrderRequest(
+                symbol=spec.symbol,
+                qty=spec.qty,
+                side=side,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(float(spec.limit_price or 0.0), 2 if (spec.limit_price or 0) >= 1 else 4),
+                client_order_id=spec.client_order_id,
+            )
+        return MarketOrderRequest(
+            symbol=spec.symbol,
+            qty=spec.qty,
+            notional=spec.notional,
+            side=side,
+            time_in_force=TimeInForce.DAY,
+            client_order_id=spec.client_order_id,
+        )
+    except ValueError as exc:  # pydantic's ValidationError is a ValueError
+        first = str(exc).strip().splitlines()
+        detail = first[-1] if first else type(exc).__name__
+        raise InvalidOrder(
+            f"Alpaca paper order for {spec.symbol} could not be built (never sent): {detail[:200]}"
+        ) from None
 
 
 def account_from_sdk(a: Any) -> BrokerAccount:
@@ -367,6 +417,13 @@ class AlpacaPaperBroker:
     def base_url(self) -> str:
         return PAPER_URL
 
+    def verify_paper_client(self) -> str:
+        """Build the SDK client (no network call) and return the endpoint it points at — always the paper
+        API, or ``NotPaperTrading`` / ``BrokerNotConfigured`` is raised."""
+        client = self._sdk()
+        raw = getattr(client, "_base_url", "")
+        return str(getattr(raw, "value", raw)).rstrip("/")
+
     def _sdk(self) -> TradingClient:
         if self._client is not None:
             return self._client
@@ -454,25 +511,9 @@ class AlpacaPaperBroker:
         return order_from_sdk(raw)
 
     async def submit(self, spec: OrderSpec) -> BrokerOrder:
-        side = OrderSide.BUY if spec.side == "buy" else OrderSide.SELL
-        request: MarketOrderRequest | LimitOrderRequest
-        if spec.order_type == "limit":
-            request = LimitOrderRequest(
-                symbol=spec.symbol,
-                qty=spec.qty,
-                side=side,
-                time_in_force=TimeInForce.DAY,
-                limit_price=round(float(spec.limit_price or 0.0), 2),
-                client_order_id=spec.client_order_id,
-            )
-        else:
-            request = MarketOrderRequest(
-                symbol=spec.symbol,
-                qty=spec.qty,
-                side=side,
-                time_in_force=TimeInForce.DAY,
-                client_order_id=spec.client_order_id,
-            )
+        """Send one order (``POST /v2/orders``). An ``InvalidOrder`` was never sent; an ambiguous
+        ``BrokerError`` may have been: look it up by its client order id, never resend it."""
+        request = order_request(spec)
         return order_from_sdk(await self._call("order submission", lambda c: c.submit_order(request)))
 
     async def cancel(self, order_id: str) -> None:

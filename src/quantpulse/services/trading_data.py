@@ -6,6 +6,12 @@
   holdings are always included.
 * **Prices** — daily bars from the warehouse-first universe panel (only missing sessions are downloaded),
   plus today's live snapshot (price, volume, VWAP, bid/ask) for every candidate.
+* **Quote quality** — every quote is checked before its spread is believed (:func:`assess_quote`): a
+  one-sided, crossed, stale or off-market bid/ask is not a spread. Alpaca's free IEX feed is a single
+  exchange whose book can be far wider than the market, so the consolidated (SIP) quote is used for the
+  spread when the subscription allows it (possibly 15 minutes delayed). A price far from the last close
+  or history that disagrees with the vendor's previous close blocks new entries (bad tick, split or a
+  mis-mapped symbol). Nothing here loosens a limit: an unmeasurable spread fails the liquidity check.
 * **Stock model** — the latest walk-forward run's live z-scores, and its point-in-time fundamentals and
   earnings-reaction features (never waits long: the previous run is used while a new one trains).
 * **VIX** (when a live source has it), **implied volatility** for the leading candidates, and **earnings
@@ -20,7 +26,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 
 import pandas as pd
@@ -31,7 +37,7 @@ from quantpulse.core.errors import DomainError
 from quantpulse.core.market_calendar import NEW_YORK, Session, is_trading_day, regular_close, session_at
 from quantpulse.domain.trading_signals import LiveBar
 from quantpulse.schemas.common import DataStatus
-from quantpulse.schemas.market import Quote
+from quantpulse.schemas.market import Bar, Quote
 from quantpulse.schemas.options import OptionChain
 from quantpulse.services.market import MarketService
 from quantpulse.services.model import ModelService, ModelSnapshot
@@ -46,10 +52,25 @@ MIN_BARS = 64
 IV_TIMEOUT = 20.0
 EARNINGS_TIMEOUT = 20.0
 VIX_SYMBOL = "^VIX"
+DELAYED_SIP_SECONDS = 15 * 60  # Alpaca's delayed SIP feed lags by 15 minutes
+OFF_MARKET_PCT = (
+    0.03  # a real-time bid/ask midpoint this far from the last trade does not describe the market
+)
+OFF_MARKET_DELAYED_PCT = 0.10  # the same for a 15-minute-old consolidated quote
+PRICE_JUMP_PCT = 0.25  # live price this far from the last close: bad tick, split or wrong symbol
+HISTORY_MISMATCH_PCT = 0.15  # stored close vs the vendor's previous close: split or mis-mapped history
+FEED_LABELS = {"iex": "IEX", "sip": "SIP", "delayed_sip": "SIP (15-min delayed)"}
 Progress = Callable[[float, str], None]
 
 
 def _noop(_: float, __: str) -> None:
+    return None
+
+
+def spread_of(bid: float | None, ask: float | None) -> float | None:
+    """Quoted spread in basis points of the midpoint (``None`` when one-sided or crossed)."""
+    if bid and ask and ask >= bid > 0:
+        return (ask - bid) / (0.5 * (ask + bid)) * 10_000
     return None
 
 
@@ -64,15 +85,48 @@ class LiveQuote:
     day_high: float | None
     day_low: float | None
     day_open: float | None
-    timestamp: datetime
+    timestamp: datetime  # of the last trade (the price)
     provider: str
-    age_seconds: float
+    age_seconds: float  # of the last trade
+    quote_time: datetime | None = None  # of the bid/ask
+    feed: str | None = None  # vendor feed: "iex" is one exchange, "sip" all of them
+    previous_close: float | None = None  # the vendor's previous session close
+    as_of: datetime | None = None
+    # consolidated (all-exchange) quote, when the vendor offers one (possibly 15 minutes delayed)
+    nbbo_bid: float | None = None
+    nbbo_ask: float | None = None
+    nbbo_time: datetime | None = None
+    nbbo_feed: str | None = None
+    history_close: float | None = None  # the last completed close in QuantPulse's price history
+
+    @property
+    def venue(self) -> str:
+        return FEED_LABELS.get(self.feed or "", self.provider)
+
+    @property
+    def quote_age_seconds(self) -> float | None:
+        if self.quote_time is None or self.as_of is None:
+            return None
+        return max((self.as_of - self.quote_time).total_seconds(), 0.0)
+
+    @property
+    def nbbo_age_seconds(self) -> float | None:
+        if self.nbbo_time is None or self.as_of is None:
+            return None
+        return max((self.as_of - self.nbbo_time).total_seconds(), 0.0)
+
+    @property
+    def venue_spread_bps(self) -> float | None:
+        return spread_of(self.bid, self.ask)
+
+    @property
+    def nbbo_spread_bps(self) -> float | None:
+        return spread_of(self.nbbo_bid, self.nbbo_ask)
 
     @property
     def spread_bps(self) -> float | None:
-        if self.bid and self.ask and self.ask >= self.bid > 0:
-            return (self.ask - self.bid) / (0.5 * (self.ask + self.bid)) * 10_000
-        return None
+        """The spread as quoted by the primary feed (unvalidated; see :func:`assess_quote`)."""
+        return self.venue_spread_bps
 
     def bar(self) -> LiveBar:
         return LiveBar(
@@ -83,6 +137,90 @@ class LiveQuote:
             low=self.day_low,
             open=self.day_open,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class QuoteQuality:
+    """What a quote can be trusted for."""
+
+    spread_bps: float | None  # the spread risk checks use (None: it cannot be measured reliably)
+    spread_source: str  # "SIP", "SIP (15-min delayed)", "IEX only", … or "unavailable"
+    problems: tuple[str, ...] = ()  # parts of the quote that were not believed, and why
+    entry_blocks: tuple[str, ...] = ()  # reasons no new position may be opened or added (exits still go)
+
+    @property
+    def usable_bid_ask(self) -> bool:
+        return not any(p.startswith("primary:") for p in self.problems)
+
+
+def assess_quote(q: LiveQuote, max_age_seconds: float) -> QuoteQuality:
+    """Validate a quote before its spread is used: one-sided, crossed, stale or off-market bid/asks are
+    discarded (never read as a spread), the consolidated quote is preferred over a single exchange, and
+    prices inconsistent with the price history block new entries."""
+    problems: list[str] = []
+    blocks: list[str] = []
+
+    venue: float | None = None
+    label = q.venue
+    if not q.bid or not q.ask:
+        missing = "bid" if not q.bid else "ask"
+        problems.append(f"primary: {label} quote is one-sided (no {missing})")
+    elif q.bid > q.ask:
+        problems.append(f"primary: {label} quote is crossed (bid ${q.bid:,.2f} > ask ${q.ask:,.2f})")
+    elif q.quote_age_seconds is not None and q.quote_age_seconds > max_age_seconds:
+        problems.append(
+            f"primary: {label} bid/ask is {q.quote_age_seconds:,.0f}s old (limit {max_age_seconds:,.0f}s)"
+        )
+    elif abs(0.5 * (q.bid + q.ask) / q.price - 1) > OFF_MARKET_PCT:
+        off = 0.5 * (q.bid + q.ask) / q.price - 1
+        problems.append(
+            f"primary: {label} bid/ask midpoint is {off:+.1%} from the last trade ${q.price:,.2f}: not the market"
+        )
+    else:
+        venue = q.venue_spread_bps
+
+    nbbo: float | None = None
+    if q.nbbo_feed:
+        nlabel = FEED_LABELS.get(q.nbbo_feed, q.nbbo_feed)
+        delayed = q.nbbo_feed == "delayed_sip"
+        limit = max_age_seconds + (DELAYED_SIP_SECONDS if delayed else 0)
+        age = q.nbbo_age_seconds
+        spread = q.nbbo_spread_bps
+        if spread is None:
+            problems.append(f"consolidated: {nlabel} quote is one-sided or crossed")
+        elif age is not None and age > limit:
+            problems.append(f"consolidated: {nlabel} quote is {age:,.0f}s old (limit {limit:,.0f}s)")
+        elif abs(0.5 * ((q.nbbo_bid or 0) + (q.nbbo_ask or 0)) / q.price - 1) > (
+            OFF_MARKET_DELAYED_PCT if delayed else OFF_MARKET_PCT
+        ):
+            problems.append(f"consolidated: {nlabel} midpoint is far from the last trade ${q.price:,.2f}")
+        else:
+            nbbo = spread
+
+    if nbbo is not None:
+        spread_bps, source = nbbo, FEED_LABELS.get(q.nbbo_feed or "", "consolidated")
+    elif venue is not None:
+        spread_bps = venue
+        source = f"{label} only" if q.feed in (None, "iex") else label
+    else:
+        spread_bps, source = None, "unavailable"
+
+    ref = q.history_close or q.previous_close
+    if ref and ref > 0 and abs(q.price / ref - 1) > PRICE_JUMP_PCT:
+        blocks.append(
+            f"price ${q.price:,.2f} is {q.price / ref - 1:+.0%} from the last close ${ref:,.2f}: "
+            "possible bad tick, split or wrong symbol"
+        )
+    if (
+        q.history_close
+        and q.previous_close
+        and abs(q.previous_close / q.history_close - 1) > HISTORY_MISMATCH_PCT
+    ):
+        blocks.append(
+            f"stored history (last close ${q.history_close:,.2f}) disagrees with {q.provider}'s previous "
+            f"close ${q.previous_close:,.2f}: possible split or mis-mapped symbol"
+        )
+    return QuoteQuality(spread_bps, source, tuple(problems), tuple(blocks))
 
 
 @dataclass
@@ -100,6 +238,7 @@ class TradingInputs:
     price_status: DataStatus
     quotes: dict[str, LiveQuote]
     missing_quotes: dict[str, str]
+    quality: dict[str, QuoteQuality] = field(default_factory=dict)
     model: ModelSnapshot | None = None
     model_note: str | None = None
     vix: float | None = None
@@ -212,10 +351,14 @@ class TradingDataLoader:
         )
 
         progress(0.55, f"fetching live quotes for {len(universe)} symbols")
-        live = await self._market.live_quotes(list(dict.fromkeys([*universe, bench, "QQQ"])))
-        quotes: dict[str, LiveQuote] = {}
-        for sym, q in live.quotes.items():
-            quotes[sym] = _live_quote(sym, q, live.providers.get(sym, "?"), now)
+        history_close = {
+            sym: float(f["close"].reindex(index).dropna().iloc[-1])
+            for sym, f in frames.items()
+            if f["close"].reindex(index).notna().any()
+        }
+        quotes, missing_quotes = await self._live(
+            list(dict.fromkeys([*universe, bench, "QQQ"])), consolidated=True, history_close=history_close
+        )
         is_open = session_at(now) is Session.REGULAR and is_trading_day(now.astimezone(NEW_YORK).date())
         inputs = TradingInputs(
             as_of=now,
@@ -230,9 +373,21 @@ class TradingDataLoader:
             qqq=frames["QQQ"]["close"].reindex(index) if "QQQ" in frames else None,
             price_status=price_status,
             quotes=quotes,
-            missing_quotes=dict(live.missing),
+            missing_quotes=missing_quotes,
+            quality={sym: assess_quote(q, s.trading_max_quote_age_seconds) for sym, q in quotes.items()},
             skipped=skipped,
         )
+        consolidated = sum(1 for q in quotes.values() if q.nbbo_feed)
+        if quotes and any(q.feed == "iex" for q in quotes.values()):
+            inputs.notes.append(
+                "Live quotes are Alpaca IEX (one exchange): "
+                + (
+                    f"spreads measured on the consolidated SIP quote for {consolidated} symbol(s)"
+                    if consolidated
+                    else "no consolidated quote is available on this subscription, so spreads are IEX's own "
+                    "book (often wider than the market): names with an unmeasurable or wide spread are not bought"
+                )
+            )
         inputs.notes.append(
             f"{len(universe)} of {len(pool)} symbols tradable after the liquidity cut; live quotes for "
             f"{len([u for u in universe if u in quotes])}"
@@ -301,12 +456,45 @@ class TradingDataLoader:
                 [asyncio.ensure_future(earnings(sym)) for sym in stocks], "earnings dates", EARNINGS_TIMEOUT
             )
 
-    async def live_quotes(self, symbols: Sequence[str]) -> dict[str, LiveQuote]:
+    async def live_quotes(
+        self,
+        symbols: Sequence[str],
+        *,
+        consolidated: bool = True,
+        history_close: dict[str, float] | None = None,
+    ) -> dict[str, LiveQuote]:
+        """Live quotes for ``symbols``, with the consolidated (SIP) bid/ask attached where the primary feed
+        is a single exchange and a vendor offers it."""
+        quotes, _ = await self._live(symbols, consolidated=consolidated, history_close=history_close)
+        return quotes
+
+    async def _live(
+        self, symbols: Sequence[str], *, consolidated: bool, history_close: dict[str, float] | None
+    ) -> tuple[dict[str, LiveQuote], dict[str, str]]:
         if not symbols:
-            return {}
+            return {}, {}
         got = await self._market.live_quotes(symbols)
         now = self._clock.now()
-        return {s: _live_quote(s, q, got.providers.get(s, "?"), now) for s, q in got.quotes.items()}
+        out = {
+            sym: _live_quote(sym, q, got.providers.get(sym, "?"), now, (history_close or {}).get(sym))
+            for sym, q in got.quotes.items()
+        }
+        need = [sym for sym, q in out.items() if q.feed != "sip"] if consolidated else []
+        if need:
+            nbbo = await self._market.consolidated_quotes(need)
+            for sym, c in nbbo.items():
+                if sym in out:
+                    out[sym] = replace(
+                        out[sym], nbbo_bid=c.bid, nbbo_ask=c.ask, nbbo_time=c.timestamp, nbbo_feed=c.feed
+                    )
+        return out, dict(got.missing)
+
+    async def daily_history(self, symbol: str, days: int = 15) -> list[Bar]:
+        """Recent daily bars for one symbol (empty when only synthetic prices exist)."""
+        r = await self._market.history(symbol, "1d", days)
+        if r.status is DataStatus.SYNTHETIC:
+            return []
+        return list(r.value.bars)
 
     async def _vix(self) -> float | None:
         if not self._s.enable_live_data:
@@ -324,7 +512,9 @@ class TradingDataLoader:
         return float(last.close)
 
 
-def _live_quote(symbol: str, q: Quote, provider: str, now: datetime) -> LiveQuote:
+def _live_quote(
+    symbol: str, q: Quote, provider: str, now: datetime, history_close: float | None = None
+) -> LiveQuote:
     return LiveQuote(
         symbol=symbol,
         price=q.price,
@@ -338,4 +528,9 @@ def _live_quote(symbol: str, q: Quote, provider: str, now: datetime) -> LiveQuot
         timestamp=q.timestamp,
         provider=provider,
         age_seconds=max((now - q.timestamp).total_seconds(), 0.0),
+        quote_time=q.quote_timestamp,
+        feed=q.feed,
+        previous_close=q.previous_close,
+        as_of=now,
+        history_close=history_close,
     )

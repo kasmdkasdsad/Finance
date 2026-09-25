@@ -46,6 +46,8 @@ class FakeAlpacaPaper(BaseAdapter):
         self.auth_headers_seen: list[bool] = []
         self.blocked = False
         self.fail_status: int | None = None  # next request answers this HTTP status
+        self.buying_power_override: float | None = None  # e.g. a margin account's buying power
+        self.bodies: list[dict[str, Any]] = []  # JSON body of every POST /v2/orders, as the SDK sent it
 
     # ------------------------------------------------------------------ helpers
     def now(self) -> datetime:
@@ -96,7 +98,11 @@ class FakeAlpacaPaper(BaseAdapter):
             "account_number": "PA3TESTPAPER1",
             "status": "ACTIVE",
             "currency": "USD",
-            "buying_power": str(max(self.cash, 0.0) * 2),
+            "buying_power": str(
+                self.buying_power_override
+                if self.buying_power_override is not None
+                else max(self.cash, 0.0) * 2
+            ),
             "regt_buying_power": str(max(self.cash, 0.0) * 2),
             "cash": str(self.cash),
             "portfolio_value": str(equity),
@@ -160,7 +166,7 @@ class FakeAlpacaPaper(BaseAdapter):
             "asset_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, body["symbol"])),
             "symbol": body["symbol"],
             "asset_class": "us_equity",
-            "notional": None,
+            "notional": str(body["notional"]) if body.get("notional") is not None else None,
             "qty": str(body.get("qty")),
             "filled_qty": "0",
             "filled_avg_price": None,
@@ -213,10 +219,16 @@ class FakeAlpacaPaper(BaseAdapter):
             self._fill(order, left)
 
     def _submit(self, request: requests.PreparedRequest, body: dict[str, Any]) -> requests.Response:
+        self.bodies.append(dict(body))
         cid = body.get("client_order_id")
         if cid and cid in self.by_client:
             return self._error(request, 422, 40010001, "client_order_id must be unique")
-        symbol, side, qty = body["symbol"], body["side"], float(body["qty"])
+        if (body.get("qty") is None) == (body.get("notional") is None):
+            return self._error(request, 422, 40010001, "qty or notional is required")
+        symbol, side = body["symbol"], body["side"]
+        if body.get("notional") is not None:
+            body = {**body, "qty": round(float(body["notional"]) / self.price(symbol), 9)}
+        qty = float(body["qty"])
         mode = self.fill_mode.get(symbol, self.default_mode)
         if mode == "reject":
             return self._error(request, 403, 40310000, "insufficient buying power")

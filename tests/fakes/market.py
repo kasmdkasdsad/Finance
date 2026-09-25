@@ -48,8 +48,14 @@ class TrendFeed:
     name = "trendfeed"
 
     def __init__(
-        self, clock, drifts: dict[str, float] | None = None, sessions: int = 320, seed: int = 11
+        self,
+        clock,
+        drifts: dict[str, float] | None = None,
+        sessions: int = 320,
+        seed: int = 11,
+        anchors: dict[str, float] | None = None,
     ) -> None:
+        """``anchors`` pins a symbol's last close (its whole path is scaled to end there)."""
         self.clock = clock
         self.drifts = dict(drifts or DRIFTS)
         self.live_move: dict[str, float] = {}  # today's move vs the last close, per symbol
@@ -63,6 +69,8 @@ class TrendFeed:
             noise = rng.normal(0.0, 0.006, len(self.days))
             logp = np.log(50.0 + 10 * i) + np.cumsum(drift + noise)
             closes = np.exp(logp)
+            if anchors and symbol in anchors:
+                closes = closes * (anchors[symbol] / closes[-1])
             bars = []
             for d, c, prev in zip(self.days, closes, np.r_[closes[0], closes[:-1]], strict=True):
                 high, low = max(c, prev) * 1.004, min(c, prev) * 0.996

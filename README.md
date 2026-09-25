@@ -755,6 +755,25 @@ QP_ALPACA_PAPER=true
 QP_TRADING_DRY_RUN=false
 ```
 
+**Where settings come from.** Settings are read **once, at start-up**: after editing `.env`, restart the
+API. The `.env` file is found the same way whatever folder the API is started from:
+
+1. the file named by `QP_ENV_FILE`, if set;
+2. otherwise `.env` in the project folder (next to `pyproject.toml`);
+3. otherwise `.env` in the current folder.
+
+Process environment variables **override** `.env` (a `QP_TRADING_DRY_RUN` left in your shell or your
+Windows user environment wins over the file). `GET /trading/status` shows the file that was read, where
+each trading switch came from (`environment`, `env_file` or `default`; keys only as *set / not set*), a
+**restart-required** warning when `.env` changed after start-up, and `submit_blockers`: every reason
+orders are not being sent right now.
+
+**Scheduled cycles need arming.** With `QP_TRADING_SCHEDULER_REQUIRES_ARMING=true` (the default),
+switching paper execution on never makes the scheduler fire a batch by itself: scheduled cycles stay dry
+runs until you have used paper execution once by hand, with a manual **Run strategy now** (paper) or the
+confirmed test order. Set `QP_TRADING_SCHEDULER_ENABLED=false` to keep the scheduler out of the way
+entirely during a first session.
+
 ### How one cycle works
 
 ```
@@ -874,7 +893,25 @@ cycle, and open orders count from the start.
 | `total_exposure` | Long exposure stays within `QP_TRADING_MAX_TOTAL_EXPOSURE_PCT` (95%) |
 | `max_positions` | At most `QP_TRADING_MAX_POSITIONS` (8) names, held plus pending |
 | `buying_power` | The order fits in buying power and in cash above the `QP_TRADING_CASH_BUFFER_PCT` (2%) reserve: no margin |
-| `liquidity` | Price ≥ $5, 20-day dollar volume ≥ `QP_TRADING_MIN_DOLLAR_VOLUME` ($25M), spread ≤ 30 bp |
+| `liquidity` | Price ≥ $5, 20-day dollar volume ≥ `QP_TRADING_MIN_DOLLAR_VOLUME` ($25M), spread ≤ `QP_TRADING_MAX_SPREAD_BPS` (30 bp) measured on a validated quote; a spread that cannot be measured fails while `QP_TRADING_REQUIRE_LIVE_DATA=true` |
+| `quote_quality` | Buys only: the price agrees with the price history (no bad tick, split or mis-mapped symbol) |
+
+**Quotes are validated before their spread is believed** (`services/trading_data.py`, `assess_quote`).
+Alpaca's free data plan streams the **IEX** feed: one exchange with a few percent of the volume. Its
+bid/ask is IEX's own book, not the national best bid and offer. For names IEX trades thinly it can be
+one-sided or 5–10% wide (the source of "spreads" such as 1,000 bp on large caps). So:
+
+* a one-sided, crossed, stale (bid/ask older than `QP_TRADING_MAX_QUOTE_AGE_SECONDS`) or off-market
+  bid/ask (midpoint more than 3% from the last trade) is never read as a spread, and never prices a
+  limit order;
+* the spread comes from the **consolidated SIP quote** (all exchanges) when your data subscription
+  allows it. It uses the real-time SIP feed, or else Alpaca's 15-minute-delayed SIP feed (a spread from
+  15 minutes ago is a fair measure of a stock's liquidity; the order price still comes from the live
+  quote). Without either, the IEX spread is used as is, and wide names are simply not bought;
+* a live price more than 25% from the last close, or stored history that disagrees with the vendor's
+  previous close by more than 15%, blocks new buys in that name (exits are never blocked);
+* the 30 bp limit itself is unchanged. `GET /trading/diagnostics?symbols=DELL,MPC` shows each quote's
+  bid/ask, feed, ages, IEX and SIP spreads, the spread used, and why a part was not trusted.
 
 ### Duplicate protection and reconciliation (`services/order_manager.py`)
 
@@ -901,6 +938,18 @@ Three tables come from migration `0010`:
   signals with their components, targets, proposed trades with risk decisions and order status, and
   notes.
 * `broker_orders`: every order with its Alpaca id, client id, strategy, score, reason and error.
+
+Every proposed trade records how far it got (`stage`) and, once Alpaca acknowledged it, its
+`alpaca_order_id`:
+
+* `risk_rejected` means it failed a risk check;
+* `risk_approved` means it passed but was not sent (dry run, kill switch);
+* `submitting`, then `submitted` / `accepted`, `partially_filled`, `filled`, `canceled` or `expired`;
+* or `rejected` (by Alpaca), `failed` (never reached Alpaca) or `unknown` (sent, no answer yet;
+  looked up by client id, never resent).
+
+The views show each trade's *current* state, since orders are reconciled with Alpaca. A cycle's "sent"
+count only includes orders Alpaca acknowledged.
 * `trading_events`: the audit trail. It records signals generated, trades proposed, risk
   approved/rejected, orders submitted, partially filled, filled, canceled and rejected, the kill switch,
   the daily loss limit, and reconciliation.
@@ -924,7 +973,12 @@ A statistic without enough data is empty, with a note saying why.
   * Portfolio: shares, entry, price, value, weight, P/L, target weight, score, stop-loss.
   * Strategy: regime, top opportunities with every component, target vs current portfolio, proposed
     trades with each risk check.
-  * Orders, Risk (limits and usage), Activity (cycles and the audit trail) and Performance.
+  * Orders (with Alpaca order ids), Risk (limits and usage), Activity (cycles and the audit trail) and
+    Performance.
+  * Diagnostics: the read-only connection check, quote inspection, the configuration in use, and the
+    one-order test.
+* **Status:** mode, broker and endpoint, trading enabled, dry run, kill switch, scheduler (and whether
+  it is armed), market, last cycle (sent / proposed), next cycle, and why orders are not sent.
 * **Controls:**
   * Run strategy now (optionally forced to a dry run).
   * Kill switch (optionally cancelling working orders).
@@ -945,32 +999,56 @@ A statistic without enough data is empty, with a note saying why.
 | `POST /trading/kill-switch` `{"active": true, "reason": "...", "cancel_open_orders": true}` | Kill switch on/off (the env switch can only be released in `.env`) |
 | `POST /trading/cancel-all` `{"confirm": true}` | Cancel every open order on the paper account |
 | `POST /trading/close-all` `{"confirm": "CLOSE ALL"}` | Sell every position (a preview in dry-run mode) |
+| `GET /trading/diagnostics?symbols=` | **Read-only** connection check: settings and their sources, keys (presence only), the SDK client's paper endpoint, account, clock, positions, open orders, and quote quality for `symbols`. Never places or cancels an order |
+| `POST /trading/test-order` `{"confirm": "SUBMIT ONE PAPER TEST ORDER", "symbol": "SPY", "mode": "rest_and_cancel"}` | Send exactly **one** small paper order to prove the path end to end (see below) |
 
-The order endpoints (`run`, `kill-switch`, `cancel-all` and `close-all`) require either `QP_API_TOKEN`
+The order endpoints (`run`, `test-order`, `kill-switch`, `cancel-all` and `close-all`) require either `QP_API_TOKEN`
 (sent as `X-API-Key`) or a request from the same machine. A missing broker returns 503, an order Alpaca
 refuses returns 422, and other broker failures return 502. API keys never appear in a response, a log
 line or the UI; account numbers are masked.
 
 ### First paper-trading session, step by step
 
-1. `make test` (or `python -m pytest`) — everything is mocked; no test touches Alpaca.
-2. `quantpulse-migrate` — creates the trading tables (revision `0010`).
-3. Start the API and the UI (see [Quick start](#quick-start)).
-4. Open **Paper Trading (Alpaca)**. Check that the page says *Paper* and shows your paper equity
-   (≈ $100,000), or run `curl localhost:8000/api/v1/trading/account`.
-5. With the defaults (dry run), open **Controls → Run strategy now**. Then look at **Strategy**: the
-   regime, top opportunities, target portfolio, and proposed trades with every risk decision.
-6. When satisfied, set `QP_ALPACA_TRADING_ENABLED=true` and `QP_TRADING_DRY_RUN=false`, then restart
-   the API.
-7. During market hours, **Run strategy now** submits the approved orders. Alternatively, lower
-   `QP_TRADING_MAX_ORDER_NOTIONAL` first for a smaller initial trade.
-8. Verify each of the following:
-   * the orders appear in Alpaca's paper dashboard;
-   * the **Orders** view shows them with QuantPulse's reasons, and fills are reconciled;
-   * **Portfolio** updates;
-   * restarting the API and pressing **Reconcile** shows the same orders and adds none.
+Commands are PowerShell (Windows); `curl` works the same elsewhere. If `QP_API_TOKEN` is set, add
+`-Headers @{ "X-API-Key" = $env:QP_API_TOKEN }` to each call.
 
----
+1. `python -m pytest -q` runs the tests. Everything is mocked; no test touches Alpaca.
+2. `quantpulse-migrate` creates the trading tables.
+3. Put the paper keys in `.env` (project folder). Leave `QP_ALPACA_TRADING_ENABLED=false` and
+   `QP_TRADING_DRY_RUN=true`, and set `QP_TRADING_SCHEDULER_ENABLED=false` for this first session.
+   Start the API and the UI (see [Quick start](#quick-start)).
+4. Run the read-only check. Each step should show `ok: True`, and `endpoint_verified: True`:
+
+   ```powershell
+   $d = Invoke-RestMethod http://127.0.0.1:8000/api/v1/trading/diagnostics?symbols=AMD,MSFT,DELL
+   $d.checks | Format-Table name, ok, detail -Wrap
+   $d.quotes | Format-Table symbol, price, bid, ask, venue_spread_bps, consolidated_spread_bps, spread_source, spread_ok
+   ```
+
+5. Run a dry cycle (`Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/v1/trading/run?dry_run=true`)
+   and review the proposed trades under **Strategy**. They show `Risk approved — not sent`; nothing
+   reaches Alpaca.
+6. Enable paper execution in `.env` (`QP_ALPACA_TRADING_ENABLED=true`, `QP_TRADING_DRY_RUN=false`) and
+   **restart the API**. `GET /trading/status` must now say `mode: paper` with empty `submit_blockers`.
+   The scheduler stays off (and would stay unarmed anyway).
+7. Send **one** test order. By default it is a 1-share limit buy priced 10% below the bid; it cannot
+   fill and is canceled at once. It works while the market is closed too.
+
+   ```powershell
+   $body = @{ confirm = "SUBMIT ONE PAPER TEST ORDER"; symbol = "SPY"; mode = "rest_and_cancel" } | ConvertTo-Json
+   $t = Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/v1/trading/test-order -ContentType application/json -Body $body
+   $t | Format-List sent, alpaca_order_id, statuses_seen, final_status, message
+   ```
+
+8. Verify it:
+   * `Invoke-RestMethod "http://127.0.0.1:8000/api/v1/trading/orders?status=all&limit=5" | Format-Table client_order_id, alpaca_order_id, symbol, status, source`
+     shows the `qp-test-…` order with the same Alpaca order id and status `canceled`;
+   * the order also appears in Alpaca's paper dashboard.
+9. When you are ready, during market hours, run **one** manual paper cycle: **Run strategy now**, or
+   `Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/v1/trading/run`. Every trade then shows its
+   stage and Alpaca order id.
+10. Re-enable the scheduler (`QP_TRADING_SCHEDULER_ENABLED=true`, restart) when you want it to trade on
+    its own.
 
 ## Vehicle module reference data
 

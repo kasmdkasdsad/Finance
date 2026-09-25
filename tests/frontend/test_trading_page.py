@@ -97,7 +97,9 @@ def test_every_view_renders_with_banners_and_account(trading_server):
     labels = {m.label for m in at.metric}
     assert {"Equity", "Cash", "Buying power", "Today's P/L", "Total P/L", "Mode", "Kill switch"} <= labels
     assert at.dataframe and at.get("plotly_chart")  # positions and current-vs-target weights
-    for view in ("Strategy", "Orders", "Risk", "Activity", "Performance", "Controls"):
+    labels = {m.label for m in at.metric}
+    assert {"Broker", "Dry run", "Scheduler", "Last cycle", "Next cycle"} <= labels
+    for view in ("Strategy", "Orders", "Risk", "Activity", "Performance", "Controls", "Diagnostics"):
         at.segmented_control(key="trade_view").set_value(view).run()
         assert_ok(at)
     at.segmented_control(key="trade_view").set_value("Strategy").run()
@@ -137,3 +139,39 @@ def test_controls_run_kill_switch_and_guarded_close_all(trading_server):
     assert_ok(at)
     assert any("closing order(s)" in s.value for s in at.success)
     assert fake.positions == {}
+
+
+def test_trades_show_their_stage_and_alpaca_order_id(trading_server):
+    url, fake, _ = trading_server
+    at = page("trading", url, {"trade_view": "Strategy"})
+    at.run()
+    assert_ok(at)
+    trades = next(d.value for d in at.dataframe if "stage_label" in d.value.columns)
+    sent = trades[trades["alpaca_order_id"].notna()]
+    assert len(sent) and set(sent["stage_label"]) <= {"✓ Filled"}
+    assert set(sent["alpaca_order_id"]) <= {o["id"] for o in fake.orders.values()}
+
+
+def test_diagnostics_view_checks_the_connection_and_guards_the_test_order(trading_server):
+    url, fake, clock = trading_server
+    clock.advance(120)
+    at = page("trading", url, {"trade_view": "Diagnostics"})
+    at.run()
+    assert_ok(at)
+    at.text_input(key="trade_diag_symbols").set_value("UPA,UPB")
+    at.button(key="trade_diag_run").click().run()
+    assert_ok(at)
+    checks = at.dataframe[0].value
+    assert list(checks["step"])[:4] == ["settings", "credentials", "sdk_client", "account"]
+    assert set(checks[""]) == {"✓"}
+    assert any("verified paper" in c.value for c in at.caption)
+
+    before = len(fake.orders)
+    assert at.button(key="trade_test_send").disabled  # the phrase is required
+    at.text_input(key="trade_test_phrase").set_value("SUBMIT ONE PAPER TEST ORDER").run()
+    assert not at.button(key="trade_test_send").disabled
+    fake.fill_mode["SPY"] = "accept"
+    at.button(key="trade_test_send").click().run()
+    assert_ok(at)
+    assert any("it was canceled" in s.value for s in at.success), [s.value for s in at.success]
+    assert len(fake.orders) == before + 1

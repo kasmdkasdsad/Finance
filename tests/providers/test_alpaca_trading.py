@@ -144,3 +144,38 @@ async def test_the_test_suite_cannot_reach_a_real_alpaca_account():
     real = AlpacaPaperBroker(KEY, SECRET)  # no fake transport
     with pytest.raises(BrokerError):
         await real.account()
+
+
+async def test_fractional_quantities_are_sent_to_alpacas_nine_decimals(broker, fake):
+    fake.hold("NVDA", 1.0, 200.0)
+    await broker.submit(OrderSpec("NVDA", "sell", 0.1 + 0.2, "market", "qp-t-NVDA-s"))
+    await broker.submit(OrderSpec("NVDA", "sell", 0.1234567891234, "market", "qp-t-NVDA-s2"))
+    assert [b["qty"] for b in fake.bodies] == [0.3, 0.123456789]  # not 0.30000000000000004
+    assert all(b["type"] == "market" and b["time_in_force"] == "day" for b in fake.bodies)
+
+
+async def test_notional_orders(broker, fake):
+    fake.prices["SPY"] = 500.0
+    o = await broker.submit(OrderSpec("SPY", "buy", None, "market", "qp-test-SPY-b", notional=10.004))
+    assert fake.bodies[-1]["notional"] == 10.0 and "qty" not in fake.bodies[-1]
+    assert o.status == "filled" and o.filled_qty == pytest.approx(0.02)
+    with pytest.raises(ValueError, match="market order"):
+        OrderSpec("SPY", "buy", None, "limit", "qp-x", 400.0, notional=10.0)
+    with pytest.raises(ValueError, match="exactly one"):
+        OrderSpec("SPY", "buy", 1, "market", "qp-x", notional=10.0)
+
+
+async def test_an_order_the_sdk_cannot_build_is_never_sent_and_not_ambiguous(broker, fake, monkeypatch):
+    def refuse(**kwargs):
+        raise ValueError("1 validation error for MarketOrderRequest\nqty\n  Input should be greater than 0")
+
+    monkeypatch.setattr(at, "MarketOrderRequest", refuse)
+    with pytest.raises(at.InvalidOrder, match="never sent") as exc:
+        await broker.submit(OrderSpec("AAPL", "buy", 1, "market", "qp-t-AAPL-b"))
+    assert not exc.value.ambiguous and fake.bodies == []
+
+
+def test_limit_prices_use_alpacas_tick_rules():
+    sub_dollar = at.order_request(OrderSpec("XYZ", "buy", 100, "limit", "qp-x", 0.123456))
+    assert sub_dollar.limit_price == 0.1235
+    assert at.order_request(OrderSpec("AMD", "buy", 7, "limit", "qp-y", 630.4349)).limit_price == 630.43

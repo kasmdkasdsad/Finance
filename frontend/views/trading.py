@@ -12,7 +12,7 @@ from frontend import charts
 from frontend.components import api, guarded, money, num, pct
 
 BASE = "/trading"
-VIEWS = ["Portfolio", "Strategy", "Orders", "Risk", "Activity", "Performance", "Controls"]
+VIEWS = ["Portfolio", "Strategy", "Orders", "Risk", "Activity", "Performance", "Controls", "Diagnostics"]
 COMPONENT_LABELS = {
     "momentum": "Momentum",
     "trend": "Trend",
@@ -30,6 +30,23 @@ REGIME_ICON = {
     "risk_off": ":material/shield:",
 }
 CLOSE_ALL_PHRASE = "CLOSE ALL"
+TEST_ORDER_PHRASE = "SUBMIT ONE PAPER TEST ORDER"
+# How far a proposed trade got. Only the stages from "Submitted" on mean Alpaca has the order.
+STAGE_LABELS = {
+    "risk_rejected": "✗ Risk rejected",
+    "risk_approved": "Risk approved — not sent",
+    "submitting": "Submitting…",
+    "unknown": "Sent, outcome unknown (reconciling)",
+    "failed": "✗ Failed — never reached Alpaca",
+    "rejected": "✗ Rejected by Alpaca",
+    "submitted": "Submitted to Alpaca",
+    "accepted": "Accepted by Alpaca (working)",
+    "partially_filled": "Partially filled",
+    "filled": "✓ Filled",
+    "canceled": "Canceled",
+    "expired": "Expired",
+}
+AT_ALPACA = {"submitted", "accepted", "partially_filled", "filled", "canceled", "expired"}
 
 
 def _md(text: str) -> str:
@@ -49,8 +66,14 @@ def _banners(status: dict[str, Any]) -> None:
             f"**KILL SWITCH ON** — no new orders ({ks.get('reason') or ks.get('source')}).",
             icon=":material/block:",
         )
+    blockers = status.get("submit_blockers") or []
+    if blockers and status["broker_configured"]:
+        st.info(
+            _md("**Orders are not sent to Alpaca because:** " + "; ".join(blockers)),
+            icon=":material/do_not_disturb_on:",
+        )
     for w in status["warnings"]:
-        st.warning(w, icon=":material/warning:")
+        st.warning(_md(w), icon=":material/warning:")
 
 
 def _setup_help() -> None:
@@ -63,22 +86,73 @@ def _setup_help() -> None:
     )
 
 
+def _when(stamp: str | None, fmt: str = "%a %H:%M ET") -> str:
+    return pd.Timestamp(stamp).tz_convert("America/New_York").strftime(fmt) if stamp else "—"
+
+
 def _status_row(status: dict[str, Any]) -> None:
     c = st.columns(5)
-    c[0].metric("Mode", "Paper" if status["mode"] == "paper" else "Dry run")
-    c[1].metric("Trading enabled", "yes" if status["trading_enabled"] else "no")
-    c[2].metric("Kill switch", "ON" if status["kill_switch"]["active"] else "off")
+    c[0].metric(
+        "Mode",
+        "Paper" if status["mode"] == "paper" else "Dry run",
+        "orders are sent" if status["mode"] == "paper" else "nothing is sent",
+        delta_color="off",
+    )
+    c[1].metric(
+        "Broker",
+        "Alpaca paper" if status["broker_configured"] else "not configured",
+        status["endpoint"].removeprefix("https://"),
+        delta_color="off",
+        help="QuantPulse only ever uses Alpaca's paper endpoint (TradingClient(paper=True)).",
+    )
+    c[2].metric(
+        "Trading enabled",
+        "yes" if status["trading_enabled"] else "no",
+        "QP_ALPACA_TRADING_ENABLED",
+        delta_color="off",
+    )
+    c[3].metric("Dry run", "yes" if status["dry_run"] else "no", "QP_TRADING_DRY_RUN", delta_color="off")
+    c[4].metric("Kill switch", "ON" if status["kill_switch"]["active"] else "off")
+    d = st.columns(5)
+    if not status["scheduler_enabled"]:
+        sched, sched_note = "off", "manual cycles only"
+    elif status.get("scheduled_mode") == "paper":
+        sched, sched_note = "on", "sends orders"
+    elif status["mode"] == "paper" and not status.get("scheduler_armed", True):
+        sched, sched_note = "on", "dry runs until armed"
+    else:
+        sched, sched_note = "on", "dry runs"
+    d[0].metric(
+        "Scheduler",
+        sched,
+        sched_note,
+        delta_color="off",
+        help="Scheduled cycles only send orders once paper execution has been used by hand "
+        "(a manual paper cycle or the confirmed test order).",
+    )
     market = status.get("market") or {}
-    c[3].metric(
+    d[1].metric(
         "Market", "open" if market.get("is_open") else "closed", market.get("source"), delta_color="off"
     )
-    nxt = status.get("next_cycle_at")
-    c[4].metric(
+    last = status.get("last_cycle")
+    d[2].metric(
+        "Last cycle",
+        _when(last["started_at"]) if last else "—",
+        (
+            f"{'paper' if last['mode'] == 'paper' else 'dry run'}: {last['orders_submitted']} sent / "
+            f"{last['trades_proposed']} proposed"
+        )
+        if last
+        else None,
+        delta_color="off",
+    )
+    d[3].metric(
         "Next cycle",
-        pd.Timestamp(nxt).tz_convert("America/New_York").strftime("%a %H:%M ET") if nxt else "—",
+        _when(status.get("next_cycle_at")),
         f"every {status['interval_minutes']} min" if status["scheduler_enabled"] else "scheduler off",
         delta_color="off",
     )
+    d[4].metric("Last reconciled", _when(status.get("last_reconciled_at"), "%H:%M:%S ET"))
 
 
 def _account(acct: dict[str, Any]) -> None:
@@ -94,9 +168,13 @@ def _account(acct: dict[str, Any]) -> None:
         help=f"Since QuantPulse first recorded {money(acct['baseline_equity'])} on {acct['baseline_at']}",
     )
     st.caption(
-        f"Alpaca paper account {acct['account_number']} · {acct['status']} · exposure "
-        f"{pct(acct['exposure_pct'], 1)} · day trades {acct['daytrade_count']}"
-        + (" · TRADING BLOCKED BY ALPACA" if acct["trading_blocked"] else "")
+        _md(
+            f"Alpaca paper account {acct['account_number']} · {acct['status']} · long market value "
+            f"{money(acct['long_market_value'])} · exposure {pct(acct['exposure_pct'], 1)} · day trades "
+            f"{acct['daytrade_count']}"
+            + (" · TRADING BLOCKED BY ALPACA" if acct["trading_blocked"] else "")
+            + (" · cash is negative (margin): QuantPulse never buys on margin" if acct["cash"] < 0 else "")
+        )
     )
 
 
@@ -148,11 +226,19 @@ def _portfolio() -> None:
     charts.show(fig, key="trade_alloc")
 
 
+def _stage(t: dict[str, Any]) -> str:
+    return STAGE_LABELS.get(t.get("stage") or "", t.get("status") or "—")
+
+
 def _trades_table(trades: list[dict[str, Any]], key: str) -> None:
     if not trades:
         st.caption("No trades proposed.")
         return
     df = pd.DataFrame(trades)
+    df["stage_label"] = [_stage(t) for t in trades]
+    for col in ("alpaca_order_id", "filled_qty", "filled_avg_price", "error"):
+        if col not in df:
+            df[col] = None
     st.dataframe(
         df[
             [
@@ -161,11 +247,15 @@ def _trades_table(trades: list[dict[str, Any]], key: str) -> None:
                 "qty",
                 "notional",
                 "kind",
-                "status",
                 "approved",
+                "stage_label",
+                "filled_qty",
+                "filled_avg_price",
                 "risk",
                 "order_type",
                 "limit_price",
+                "alpaca_order_id",
+                "error",
                 "reason",
             ]
         ],
@@ -177,14 +267,25 @@ def _trades_table(trades: list[dict[str, Any]], key: str) -> None:
             "notional": st.column_config.NumberColumn("Notional", format="dollar"),
             "limit_price": st.column_config.NumberColumn("Limit", format="dollar"),
             "approved": st.column_config.CheckboxColumn("Risk OK"),
+            "stage_label": st.column_config.TextColumn("Stage", width="medium"),
+            "filled_qty": st.column_config.NumberColumn("Filled", format="%g"),
+            "filled_avg_price": st.column_config.NumberColumn("Avg fill", format="dollar"),
+            "alpaca_order_id": st.column_config.TextColumn("Alpaca order id"),
+            "error": st.column_config.TextColumn("Error", width="medium"),
             "risk": st.column_config.TextColumn("Risk decision", width="large"),
             "reason": st.column_config.TextColumn("Why", width="large"),
         },
     )
+    counts: dict[str, int] = {}
+    for t in trades:
+        counts[_stage(t)] = counts.get(_stage(t), 0) + 1
+    st.caption(" · ".join(f"{n} {label}" for label, n in counts.items()))
     with st.expander("Risk checks per trade", icon=":material/fact_check:"):
         for t in trades:
             mark = "✓" if t["approved"] else "✗"
-            st.markdown(f"**{mark} {t['side'].upper()} {t['qty']:g} {t['symbol']}** — {t['kind']}")
+            st.markdown(
+                _md(f"**{mark} {t['side'].upper()} {t['qty']:g} {t['symbol']}** — {t['kind']} — {_stage(t)}")
+            )
             st.caption(
                 _md(
                     " · ".join(
@@ -319,12 +420,18 @@ def _orders() -> None:
                 "strategy",
                 "reason",
                 "error",
+                "alpaca_order_id",
                 "client_order_id",
+                "source",
             ]
         ],
         hide_index=True,
         width="stretch",
         column_config={
+            "alpaca_order_id": st.column_config.TextColumn("Alpaca order id"),
+            "source": st.column_config.TextColumn(
+                "Source", help="alpaca: read from the paper account now; quantpulse: never reached Alpaca"
+            ),
             "qty": st.column_config.NumberColumn("Qty", format="%g"),
             "filled_qty": st.column_config.NumberColumn("Filled", format="%g"),
             "limit_price": st.column_config.NumberColumn("Limit", format="dollar"),
@@ -410,13 +517,25 @@ def _activity() -> None:
                     "status",
                     "started_at",
                     "trades_proposed",
+                    "trades_approved",
                     "orders_submitted",
+                    "orders_filled",
+                    "orders_failed",
                     "skip_reason",
                 ]
             ],
             hide_index=True,
             width="stretch",
-            column_config={"started_at": st.column_config.DatetimeColumn("Started", format="MMM D HH:mm")},
+            column_config={
+                "started_at": st.column_config.DatetimeColumn("Started", format="MMM D HH:mm"),
+                "trades_proposed": "Proposed",
+                "trades_approved": "Risk approved",
+                "orders_submitted": st.column_config.NumberColumn(
+                    "Sent to Alpaca", help="Orders Alpaca acknowledged (they have an Alpaca order id)"
+                ),
+                "orders_filled": "Filled",
+                "orders_failed": "Rejected / failed",
+            },
         )
     else:
         st.caption("No cycles yet.")
@@ -500,11 +619,22 @@ def _controls(status: dict[str, Any]) -> None:
     if st.button("Run strategy now", type="primary", icon=":material/play_arrow:", key="trade_run"):
         out = guarded(lambda: api().post(f"{BASE}/run", dry_run=force_dry, wait=60), "strategy cycle")
         if out:
-            sent = sum(1 for t in out["trades"] if t["client_order_id"])
+            trades = out["trades"]
+            approved = sum(1 for t in trades if t["approved"])
+            sent = sum(1 for t in trades if t.get("alpaca_order_id") or t.get("stage") in AT_ALPACA)
+            failed = sum(1 for t in trades if t.get("stage") in ("rejected", "failed", "unknown"))
+            dry = out["mode"] == "dry_run"
             st.success(
-                f"Cycle {out['cycle_key']} {out['status']} ({'dry run' if out['mode'] == 'dry_run' else 'paper'}): "
-                f"{len(out['trades'])} trade(s) proposed, {sent} order(s) sent."
-                + (f" Error: {out['error']}" if out["error"] else ""),
+                _md(
+                    f"Cycle {out['cycle_key']} {out['status']} ({'dry run' if dry else 'paper'}): "
+                    f"{len(trades)} trade(s) proposed, {approved} risk-approved, "
+                    + (
+                        "0 sent (dry run: nothing is sent)."
+                        if dry
+                        else f"{sent} accepted by Alpaca, {failed} rejected/failed."
+                    )
+                    + (f" Error: {out['error']}" if out["error"] else "")
+                ),
                 icon=":material/check_circle:",
             )
 
@@ -566,6 +696,153 @@ def _controls(status: dict[str, Any]) -> None:
                 _trades_table(out["trades"], "trade_close_table")
 
 
+def _diagnostics(status: dict[str, Any]) -> None:
+    st.markdown("#### Connection check (read-only)")
+    st.caption(
+        "Checks the settings QuantPulse is running with, the keys (presence only), the SDK client's paper "
+        "endpoint, then reads the account, market clock, positions and open orders. Never places or cancels "
+        "an order."
+    )
+    symbols = st.text_input(
+        "Also inspect quotes for (comma-separated)",
+        key="trade_diag_symbols",
+        placeholder="DELL,MPC,MRVL,DDOG",
+    )
+    if st.button("Run connection check", icon=":material/stethoscope:", key="trade_diag_run"):
+        st.session_state["trade_diag"] = guarded(
+            lambda: api().get(f"{BASE}/diagnostics", symbols=symbols or ""), "diagnostics"
+        )
+    diag = st.session_state.get("trade_diag")
+    if diag:
+        mark = {True: "✓", False: "✗", None: "–"}
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"": mark[c["ok"]], "step": c["name"], "result": c["detail"], "ms": c["ms"]}
+                    for c in diag["checks"]
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "result": st.column_config.TextColumn("Result", width="large"),
+                "ms": st.column_config.NumberColumn("ms", format="%.0f"),
+            },
+        )
+        cred = diag["credentials"]
+        st.caption(
+            _md(
+                f"Endpoint {diag['endpoint']} ({'verified paper' if diag['endpoint_verified'] else 'NOT verified'}) · "
+                f"alpaca-py {diag['sdk_version'] or '?'} · key id {'set' if cred['key_id_set'] else 'NOT SET'} "
+                f"({cred['key_id_source']}) · secret {'set' if cred['secret_set'] else 'NOT SET'} "
+                f"({cred['secret_source']})"
+            )
+        )
+        if diag["quotes"]:
+            st.markdown("##### Quotes")
+            st.dataframe(
+                pd.DataFrame(diag["quotes"])[
+                    [
+                        "symbol",
+                        "price",
+                        "bid",
+                        "ask",
+                        "feed",
+                        "venue_spread_bps",
+                        "consolidated_feed",
+                        "consolidated_spread_bps",
+                        "spread_bps",
+                        "spread_source",
+                        "spread_ok",
+                        "quote_age_seconds",
+                        "trade_age_seconds",
+                        "problems",
+                        "entry_blocks",
+                    ]
+                ],
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "price": st.column_config.NumberColumn(format="dollar"),
+                    "bid": st.column_config.NumberColumn(format="dollar"),
+                    "ask": st.column_config.NumberColumn(format="dollar"),
+                    "venue_spread_bps": st.column_config.NumberColumn("Feed spread (bp)", format="%.0f"),
+                    "consolidated_spread_bps": st.column_config.NumberColumn(
+                        "SIP spread (bp)", format="%.1f"
+                    ),
+                    "spread_bps": st.column_config.NumberColumn("Spread used (bp)", format="%.1f"),
+                    "spread_ok": st.column_config.CheckboxColumn(
+                        f"≤ {diag['quotes'][0]['max_spread_bps']:g}bp"
+                    ),
+                    "quote_age_seconds": st.column_config.NumberColumn("Bid/ask age (s)", format="%.0f"),
+                    "trade_age_seconds": st.column_config.NumberColumn("Trade age (s)", format="%.0f"),
+                },
+            )
+        cfg = diag["config"]
+        with st.expander("Configuration the API is running with", icon=":material/settings:"):
+            st.caption(
+                _md(
+                    f".env file: {cfg['env_file'] or 'none found'} · read at {cfg['loaded_at'] or '—'} · "
+                    f"database: {cfg['database']}"
+                )
+            )
+            for d in cfg["drift"]:
+                st.warning(_md(d), icon=":material/restart_alt:")
+            st.dataframe(pd.DataFrame(cfg["sources"]), hide_index=True, width="stretch")
+
+    st.markdown("#### Send ONE paper test order")
+    st.caption(
+        "Proves the whole path to your Alpaca paper account with a single small order, recorded like any "
+        "other (Alpaca order id, events). **Rest & cancel** buys 1 share with a limit about 10% below the "
+        "bid — it cannot fill — and cancels it at once. **Fill** buys up to $25 at market from cash (never "
+        "margin) and leaves that tiny position. Needs paper execution (trading enabled, dry run off, kill "
+        "switch off)."
+    )
+    mode = st.radio(
+        "Test",
+        ["rest_and_cancel", "fill"],
+        format_func={"rest_and_cancel": "Rest & cancel (no position)", "fill": "Fill (≤ $25)"}.get,
+        horizontal=True,
+        key="trade_test_mode",
+    )
+    c = st.columns(2)
+    symbol = c[0].text_input("Symbol", value="SPY", key="trade_test_symbol")
+    notional = c[1].number_input(
+        "Dollars (fill only)", min_value=1.0, max_value=25.0, value=10.0, step=1.0, key="trade_test_notional"
+    )
+    phrase = st.text_input(
+        f"Type `{TEST_ORDER_PHRASE}` to enable the button",
+        key="trade_test_phrase",
+        placeholder=TEST_ORDER_PHRASE,
+    )
+    if status["mode"] != "paper":
+        st.caption(_md("Not available: " + "; ".join(status.get("submit_blockers") or ["dry-run mode"])))
+    if st.button(
+        "Send one paper test order",
+        type="primary",
+        icon=":material/send:",
+        disabled=phrase.strip() != TEST_ORDER_PHRASE or status["mode"] != "paper",
+        key="trade_test_send",
+    ):
+        body = {"confirm": phrase.strip(), "symbol": symbol.strip(), "mode": mode, "notional": notional}
+        out = guarded(lambda: api().post(f"{BASE}/test-order", body), "test order")
+        if out:
+            (st.success if out["sent"] else st.warning)(
+                _md(
+                    out["message"]
+                    + (f" · Alpaca order id {out['alpaca_order_id']}" if out["alpaca_order_id"] else "")
+                    + (f" · statuses: {' → '.join(out['statuses_seen'])}" if out["statuses_seen"] else "")
+                )
+            )
+            st.caption(
+                _md(
+                    " · ".join(
+                        f"{'✓' if ch['passed'] else '✗'} {ch['name']}: {ch['detail']}" for ch in out["checks"]
+                    )
+                )
+            )
+
+
 def render() -> None:
     st.title("Alpaca Paper Trading")
     st.caption(
@@ -597,5 +874,7 @@ def render() -> None:
         _activity()
     elif view == "Performance":
         _performance()
+    elif view == "Diagnostics":
+        _diagnostics(status)
     else:
         _controls(status)
