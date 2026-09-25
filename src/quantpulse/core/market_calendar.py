@@ -185,6 +185,15 @@ def upcoming_sessions(moment: datetime, n: int) -> list[date]:
     return out
 
 
+def last_settled_session(moment: datetime, settle: timedelta = timedelta(minutes=20)) -> date:
+    """The latest session whose closing prices are final at ``moment`` (``settle`` after the close)."""
+    local = moment.astimezone(NEW_YORK)
+    day = local.date()
+    if is_trading_day(day) and local >= datetime.combine(day, regular_close(day), NEW_YORK) + settle:
+        return day
+    return previous_trading_day(day)
+
+
 def sessions_after(day: date, n: int) -> date:
     """The ``n``-th trading day after ``day``."""
     if n < 1:

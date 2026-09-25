@@ -58,6 +58,12 @@ class ModelView(StrictModel):
     verdict: str
     as_of: date
     data_status: DataStatus
+    model_label: str | None = None
+    sector_label: str | None = None
+    industry_rank: int | None = Field(
+        default=None, description="Rank among today's ranked stocks in its industry"
+    )
+    industry_size: int | None = None
 
 
 class ValuationView(StrictModel):

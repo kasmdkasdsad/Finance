@@ -2,6 +2,16 @@
 
 Every value at date *t* uses only data up to and including the close of *t*. Features are raw
 (un-oriented): the model learns each sign from data, and the research lab reports it.
+
+Besides the price features there are
+    * **earnings** features (post-earnings drift): the abnormal price reaction to the latest release;
+    * **sector** features: the average momentum of a stock's industry (industry momentum);
+    * **fundamental** features (value and quality, :mod:`quantpulse.domain.fundamental_factors`).
+
+Sector-relative comparisons
+    Stock-level features can be *sector-neutralised*: on each date the average of the stock's industry
+    peers is subtracted, so "cheap" means cheap *for a bank* or *for a software company*, and momentum
+    means beating the industry. Industry-wide effects are kept through the separate sector features.
 """
 
 from __future__ import annotations
@@ -37,6 +47,23 @@ FEATURES: dict[str, str] = {
     "skew_63": "3-month skewness of daily returns",
     "volume_trend": "20-day vs 120-day average volume",
 }
+
+
+EARNINGS_FEATURES: dict[str, str] = {
+    "earn_reaction": "abnormal 2-day reaction to the latest earnings release, in volatility units (63 days)",
+}
+SECTOR_FEATURES: dict[str, str] = {
+    "sector_mom_6_1": "industry average 6-month momentum (skipping the latest month)",
+    "sector_ret_1m": "industry average 1-month return",
+}
+EARNINGS_HOLD_DAYS = 63  # the post-earnings drift is measured over roughly one quarter
+MIN_GROUP = 3  # smallest industry group whose average is used (smaller groups use the whole market)
+
+
+def all_features() -> dict[str, str]:
+    from quantpulse.domain.fundamental_factors import FUNDAMENTAL_FEATURES
+
+    return {**FEATURES, **EARNINGS_FEATURES, **SECTOR_FEATURES, **FUNDAMENTAL_FEATURES}
 
 
 @dataclass
@@ -110,6 +137,91 @@ def compute_features(panel: Panel) -> dict[str, pd.DataFrame]:
     return {k: v.replace([np.inf, -np.inf], np.nan) for k, v in out.items()}
 
 
+def earnings_reaction(
+    close: pd.DataFrame,
+    benchmark: pd.Series,
+    reaction_days: dict[str, list[pd.Timestamp]],
+    hold: int = EARNINGS_HOLD_DAYS,
+) -> pd.DataFrame:
+    """Abnormal return from the close before the reaction day to the close after it, divided by the
+    stock's prior 63-day daily volatility × √2. Known from the close of the day after the reaction day
+    (the 2-day window absorbs any uncertainty about release timing) and carried for ``hold`` sessions."""
+    dates = close.index
+    out = pd.DataFrame(np.nan, index=dates, columns=close.columns)
+    logret = np.log(close).diff()
+    vol = logret.rolling(63, min_periods=40).std()
+    bench = benchmark.to_numpy(dtype=float)
+    for symbol, days in reaction_days.items():
+        if symbol not in close.columns or not days:
+            continue
+        c = close[symbol].to_numpy(dtype=float)
+        v = vol[symbol].to_numpy(dtype=float)
+        col = out.columns.get_loc(symbol)
+        for day in sorted(days):
+            p = int(dates.searchsorted(day))  # first session on/after the reaction day
+            if p < 1 or p + 1 >= len(dates):
+                continue
+            r = c[p + 1] / c[p - 1] - 1
+            rb = bench[p + 1] / bench[p - 1] - 1
+            sigma = v[p - 1]
+            if not (np.isfinite(r) and np.isfinite(rb) and np.isfinite(sigma) and sigma > 0):
+                continue
+            out.iloc[p + 1 : p + 1 + hold, col] = (r - rb) / (sigma * math.sqrt(2))
+    return out
+
+
+def _group_means(vals: np.ndarray, labels: np.ndarray, min_group: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-date industry averages broadcast to members, and a mask of where the group is big enough."""
+    means = np.full(vals.shape, np.nan)
+    enough = np.zeros(vals.shape, dtype=bool)
+    present = ~np.isnan(vals)
+    for g in {x for x in labels if x is not None and x == x}:
+        idx = np.flatnonzero(labels == g)
+        block = vals[:, idx]
+        cnt = present[:, idx].sum(axis=1)
+        mean = np.where(cnt > 0, np.nansum(block, axis=1) / np.maximum(cnt, 1), np.nan)
+        means[:, idx] = mean[:, None]
+        enough[:, idx] = (cnt >= min_group)[:, None]
+    return means, enough
+
+
+def _labels(sectors: pd.Series, columns: pd.Index) -> np.ndarray:
+    return np.array([None if pd.isna(x) else str(x) for x in sectors.reindex(columns)], dtype=object)
+
+
+def group_mean(wide: pd.DataFrame, sectors: pd.Series, min_group: int = MIN_GROUP) -> pd.DataFrame:
+    """Each cell replaced by its industry's average on that date; the market average when the
+    industry has fewer than ``min_group`` names that day (or the stock's industry is unknown)."""
+    vals = wide.to_numpy(dtype=float)
+    present = ~np.isnan(vals)
+    cnt = present.sum(axis=1)
+    market = np.where(cnt > 0, np.nansum(vals, axis=1) / np.maximum(cnt, 1), np.nan)
+    means, enough = _group_means(vals, _labels(sectors, wide.columns), min_group)
+    out = np.where(enough, means, market[:, None])
+    out[~present] = np.nan
+    return pd.DataFrame(out, index=wide.index, columns=wide.columns)
+
+
+def sector_features(
+    raw: dict[str, pd.DataFrame], sectors: pd.Series, min_group: int = MIN_GROUP
+) -> dict[str, pd.DataFrame]:
+    """Industry averages of 6-1 momentum and 1-month return, assigned to every industry member
+    (NaN for stocks whose industry is unknown or too small that day)."""
+    out: dict[str, pd.DataFrame] = {}
+    for name, source in (("sector_mom_6_1", "mom_6_1"), ("sector_ret_1m", "ret_1m")):
+        wide = raw[source]
+        vals = wide.to_numpy(dtype=float)
+        means, enough = _group_means(vals, _labels(sectors, wide.columns), min_group)
+        values = np.where(enough & ~np.isnan(vals), means, np.nan)
+        out[name] = pd.DataFrame(values, index=wide.index, columns=wide.columns)
+    return out
+
+
+def neutralise(wide: pd.DataFrame, sectors: pd.Series, min_group: int = MIN_GROUP) -> pd.DataFrame:
+    """Subtract each stock's industry average on each date (see :func:`group_mean`)."""
+    return wide - group_mean(wide, sectors, min_group)
+
+
 def cross_sectional_z(wide: pd.DataFrame, clip: float = 3.0) -> pd.DataFrame:
     """Per-date z-scores (winsorised at ±``clip``); dates with fewer than 3 values are left NaN."""
     counts = wide.notna().sum(axis=1)
@@ -120,10 +232,16 @@ def cross_sectional_z(wide: pd.DataFrame, clip: float = 3.0) -> pd.DataFrame:
 
 
 def feature_matrix(
-    features: dict[str, pd.DataFrame], names: list[str] | None = None, min_coverage: float = 0.9
+    features: dict[str, pd.DataFrame],
+    names: list[str] | None = None,
+    min_coverage: float = 0.9,
+    coverage_names: list[str] | None = None,
+    dtype: type = np.float64,
 ) -> pd.DataFrame:
     """Long matrix indexed by (date, symbol): cross-sectional z-scores, gaps filled with 0 (the
-    cross-sectional mean); rows with fewer than ``min_coverage`` of the features present are dropped."""
+    cross-sectional mean); rows with fewer than ``min_coverage`` of the ``coverage_names`` features
+    (default: all of them) present are dropped. Sparse inputs such as fundamentals or earnings are
+    left out of ``coverage_names`` so a missing report never removes a stock from the cross-section."""
     names = names or list(FEATURES)
     missing = [n for n in names if n not in features]
     if missing:
@@ -131,8 +249,9 @@ def feature_matrix(
     stacked = {n: cross_sectional_z(features[n]).stack(future_stack=True) for n in names}
     frame = pd.DataFrame(stacked)
     frame.index.names = ["date", "symbol"]
-    coverage = frame.notna().mean(axis=1)
-    return frame[coverage >= min_coverage].fillna(0.0)
+    required = [n for n in (coverage_names or names) if n in names]
+    coverage = frame[required].notna().mean(axis=1)
+    return frame[coverage >= min_coverage].fillna(0.0).astype(dtype)
 
 
 def forward_returns(close: pd.DataFrame, horizon: int) -> pd.DataFrame:

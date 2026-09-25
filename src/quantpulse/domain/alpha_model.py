@@ -1,29 +1,38 @@
-"""Cross-sectional return model trained walk-forward, with an honest out-of-sample track record.
+"""Cross-sectional return models trained walk-forward, with an honest out-of-sample track record.
 
 Target
     For every date, the ``h``-day forward returns of the universe are ranked and mapped to normal scores
-    (rank-Gauss). The model therefore predicts *relative* performance: which stocks will do better than
-    the others, not where the market goes.
+    (rank-Gauss). The models therefore predict *relative* performance: which stocks will do better than
+    the others, not where the market goes. With a point-in-time universe (the S&P 500 as it was on each
+    date) only the stocks that were members on a date are ranked, trained on and evaluated there, and a
+    stock that is delisted inside the horizon keeps its last price (cash-out) instead of vanishing.
 
-Model
-    Ridge regression on per-date z-scored features (:mod:`quantpulse.domain.features`). The ridge penalty
-    is picked inside each training window by a purged time-series split (the last 25% of the window is
-    the validation set, and training labels that overlap it are dropped).
+Models
+    * ``ridge``: linear regression with an L2 penalty on per-date z-scored features, refitted monthly;
+    * ``gbm``: gradient-boosted trees (histogram GBM) that can learn interactions and non-linear effects
+      (e.g. value only working among profitable firms), refitted quarterly on at most ``gbm_max_rows``
+      randomly sampled rows;
+    * ``ensemble``: the average of the two models' per-date z-scores (the default).
+
+    Hyper-parameters (the ridge penalty, the tree size) are chosen inside each training window on a purged
+    hold-out: the last 25% of the window is the validation set and training labels that overlap it are
+    dropped.
 
 Walk-forward protocol (no look-ahead)
-    To predict at the close of day *t*, the model may only use labels already realised by *t*: a sample
+    To predict at the close of day *t*, a model may only use labels already realised by *t*: a sample
     from day *s* has a label ending at *s + h*, so training uses days *s ≤ t − h* (purging), within a
-    rolling ``train_window``. The model is refitted every ``retrain_every`` days and the coefficients are
-    frozen in between. Every prediction reported as out-of-sample was made this way.
+    rolling ``train_window``. Coefficients or trees are frozen between refits. Every prediction reported
+    as out-of-sample was made this way, and every model type is evaluated on the same dates.
 
 Evaluation (all out-of-sample)
     * information coefficient (IC): per-date Spearman correlation of prediction vs realised return,
-      its mean, and a t-statistic on non-overlapping dates;
+      its mean, and a t-statistic on non-overlapping dates; also the IC *within industries* (realised
+      returns minus the industry average), which isolates stock picking from industry bets;
     * hit rate: how often a stock predicted above the median actually finished above it (and vice versa);
     * bucket returns: average realised return of each prediction quintile, and the top-minus-bottom spread;
     * a top-``k`` long-only portfolio rebalanced every ``h`` days, net of trading costs, against an
       equal-weight universe and the benchmark;
-    * the same IC statistics for the platform's hand-set factor rule, as a baseline to beat.
+    * the same statistics for the platform's hand-set factor rule, as a baseline to beat.
 
 Probabilities
     Out-of-sample predictions are bucketed; in each bucket the observed frequency of beating the benchmark
@@ -36,8 +45,9 @@ Probabilities
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -53,6 +63,13 @@ BASELINE_WEIGHTS: dict[str, float] = {  # the Daily Picks rule, expressed on the
     "vol_63": -0.10,
     "rsi_14": -0.10,
 }
+MODEL_TYPES: tuple[str, ...] = ("ridge", "gbm", "ensemble")
+MODEL_LABELS: dict[str, str] = {
+    "ridge": "Ridge regression",
+    "gbm": "Gradient-boosted trees",
+    "ensemble": "Ensemble (ridge + trees)",
+    "baseline": "Hand-set factor rule",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,20 +83,39 @@ class ModelConfig:
     buckets: int = 5
     cost_bps: float = 10.0
     prior_strength: float = 50.0
-    features: tuple[str, ...] = tuple(feat.FEATURES)
+    features: tuple[str, ...] | None = None  # None: every column of the feature matrix
+    model_type: str = "ensemble"
+    compare: bool = True  # also evaluate the other model types on the same dates
+    gbm_retrain_every: int = 63
+    gbm_max_rows: int = 150_000
+    gbm_grid: tuple[tuple[int, int], ...] = ((7, 100), (31, 60))  # (leaves per tree, trees)
+    gbm_tune_every: int = 4  # re-choose the tree size every this many refits
+    seed: int = 7
 
     def __post_init__(self) -> None:
         if not 1 <= self.horizon <= 126:
             raise DomainError("horizon must be between 1 and 126 trading days")
         if self.min_train < 60 or self.train_window < self.min_train:
             raise DomainError("need min_train >= 60 and train_window >= min_train")
-        if self.retrain_every < 1 or self.top_k < 1 or self.buckets < 2:
-            raise DomainError("retrain_every and top_k must be >= 1 and buckets >= 2")
+        if self.retrain_every < 1 or self.gbm_retrain_every < 1 or self.top_k < 1 or self.buckets < 2:
+            raise DomainError("retrain intervals and top_k must be >= 1 and buckets >= 2")
         if not self.lambdas or any(lam <= 0 for lam in self.lambdas):
             raise DomainError("lambdas must be positive")
-        unknown = [f for f in self.features if f not in feat.FEATURES]
-        if unknown:
-            raise DomainError(f"unknown features: {unknown}")
+        if self.model_type not in MODEL_TYPES:
+            raise DomainError(f"model_type must be one of {', '.join(MODEL_TYPES)}")
+        if not self.gbm_grid or any(leaves < 2 or trees < 1 for leaves, trees in self.gbm_grid):
+            raise DomainError("gbm_grid needs (leaves >= 2, trees >= 1) pairs")
+        if self.features is not None:
+            unknown = [f for f in self.features if f not in feat.all_features()]
+            if unknown:
+                raise DomainError(f"unknown features: {unknown}")
+
+    @property
+    def model_kinds(self) -> list[str]:
+        """The base learners that must be trained (the ensemble needs both)."""
+        if self.compare or self.model_type == "ensemble":
+            return ["ridge", "gbm"]
+        return [self.model_type]
 
 
 # ----------------------------------------------------------------------------- data plumbing
@@ -91,10 +127,11 @@ class ModelData:
     position in the trading calendar, so selecting "all rows known by day t" is a vector comparison."""
 
     X: pd.DataFrame  # (date, symbol) -> feature z-scores
-    fwd: pd.DataFrame  # wide forward returns (dates x symbols), NaN where not yet realised
+    fwd: pd.DataFrame  # wide forward returns (dates x symbols), NaN where not yet realised / not eligible
     bench_fwd: pd.Series  # benchmark forward return per date
     positions: pd.Series  # date -> integer position in the trading calendar
     horizon: int
+    sectors: pd.Series | None = None  # symbol -> industry, for within-industry evaluation
     y: pd.Series = field(init=False)
     y_wide: pd.DataFrame = field(init=False)
     X_np: np.ndarray = field(init=False)
@@ -108,7 +145,7 @@ class ModelData:
         target.index.names = ["date", "symbol"]
         self.y = target.reindex(self.X.index)
         self.y_wide = self.y.unstack()
-        self.X_np = self.X.to_numpy(dtype=float)
+        self.X_np = self.X.to_numpy(dtype=np.float32)
         self.y_np = self.y.to_numpy(dtype=float)
         self.row_pos = self.positions.reindex(self.X.index.get_level_values("date")).to_numpy(dtype=int)
         self.date_pos = np.unique(self.row_pos)
@@ -121,33 +158,126 @@ class ModelData:
     def dates(self) -> list[pd.Timestamp]:
         return [self.calendar[p] for p in self.date_pos]
 
+    @property
+    def feature_names(self) -> list[str]:
+        return [str(c) for c in self.X.columns]
+
     def pos(self, d: pd.Timestamp) -> int:
         return int(self.positions[d])
 
     def predict(self, mask: np.ndarray, coef: np.ndarray) -> pd.Series:
-        return pd.Series(self.X_np[mask] @ coef, index=self.X.index[mask])
+        return pd.Series(self.X_np[mask].astype(np.float64) @ coef, index=self.X.index[mask])
+
+
+def prepare_features(
+    raw: Mapping[str, pd.DataFrame], sectors: pd.Series | None, neutral: bool
+) -> dict[str, pd.DataFrame]:
+    """Industry-neutralise every stock-level feature (sector features are industry averages already)."""
+    if sectors is None or not neutral:
+        return dict(raw)
+    return {
+        name: wide if name in feat.SECTOR_FEATURES else feat.neutralise(wide, sectors)
+        for name, wide in raw.items()
+    }
+
+
+def default_names(raw: Mapping[str, pd.DataFrame]) -> list[str]:
+    order = list(feat.all_features())
+    return [n for n in order if n in raw]
+
+
+def raw_features(
+    panel: feat.Panel,
+    *,
+    extra: Mapping[str, pd.DataFrame] | None = None,
+    sectors: pd.Series | None = None,
+    eligible: pd.DataFrame | None = None,
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame | None]:
+    """Every raw feature panel (price, extra, industry averages), blanked where a stock is not eligible.
+    Returns the panels and the aligned eligibility mask."""
+    close = panel.close
+    raw = feat.compute_features(panel)
+    for name, frame in (extra or {}).items():
+        raw[name] = frame.reindex(index=close.index, columns=close.columns)
+    mask = None
+    if eligible is not None:
+        mask = eligible.reindex(index=close.index, columns=close.columns).fillna(False).astype(bool)
+        raw = {k: v.where(mask) for k, v in raw.items()}
+    if sectors is not None:
+        raw.update(feat.sector_features(raw, sectors))
+    return raw, mask
 
 
 def build_data(
-    panel: feat.Panel, horizon: int, names: Sequence[str] | None = None, min_coverage: float = 0.9
+    panel: feat.Panel,
+    horizon: int,
+    names: Sequence[str] | None = None,
+    min_coverage: float = 0.9,
+    *,
+    extra: Mapping[str, pd.DataFrame] | None = None,
+    sectors: pd.Series | None = None,
+    eligible: pd.DataFrame | None = None,
+    neutral: bool = True,
 ) -> tuple[ModelData, dict[str, pd.DataFrame]]:
-    raw = feat.compute_features(panel)
-    X = feat.feature_matrix(raw, list(names or feat.FEATURES), min_coverage)
+    """Features, labels and positions for the walk-forward loop.
+
+    ``extra``: additional raw feature panels (earnings, fundamentals). ``sectors``: symbol → industry,
+    enabling industry features and industry-neutral features. ``eligible``: dates × symbols mask of
+    index membership; ineligible cells are excluded from every cross-section, label and evaluation.
+    Returns the data and the raw (un-neutralised, masked) feature panels."""
+    close = panel.close
+    raw, mask = raw_features(panel, extra=extra, sectors=sectors, eligible=eligible)
+    chosen = list(names) if names is not None else default_names(raw)
+    unknown = [n for n in chosen if n not in raw]
+    if unknown:
+        raise DomainError(f"features not available: {unknown}")
+    prepared = prepare_features({n: raw[n] for n in chosen}, sectors, neutral)
+    price_names = [n for n in chosen if n in feat.FEATURES]
+    X = feat.feature_matrix(
+        prepared, chosen, min_coverage, coverage_names=price_names or None, dtype=np.float32
+    )
     if X.empty:
         raise DomainError(f"no dates with enough feature history (the first {feat.WARMUP} days are warm-up)")
-    positions = pd.Series(np.arange(len(panel.close.index)), index=panel.close.index)
-    fwd = feat.forward_returns(panel.close, horizon)
+    positions = pd.Series(np.arange(len(close.index)), index=close.index)
+    # A listing that ends keeps its last price: the holder is cashed out rather than the stock vanishing
+    # from the evaluation (which would flatter every backtest).
+    fwd = feat.forward_returns(close.ffill(), horizon)
+    if mask is not None:
+        fwd = fwd.where(mask)
     bench_fwd = panel.benchmark.shift(-horizon) / panel.benchmark - 1
-    return ModelData(X=X, fwd=fwd, bench_fwd=bench_fwd, positions=positions, horizon=horizon), raw
+    data = ModelData(X=X, fwd=fwd, bench_fwd=bench_fwd, positions=positions, horizon=horizon, sectors=sectors)
+    return data, raw
 
 
-# ----------------------------------------------------------------------------- fitting
+# ----------------------------------------------------------------------------- learners
 def fit_ridge(X: np.ndarray, y: np.ndarray, lam: float) -> np.ndarray:
     """Ridge without intercept on standardised inputs: ``(XᵀX/n + λI)⁻¹ Xᵀy/n``."""
     n, p = X.shape
     if n == 0:
         raise DomainError("no training samples")
+    X = X.astype(np.float64, copy=False)
     return np.linalg.solve(X.T @ X / n + lam * np.eye(p), X.T @ y / n)
+
+
+@dataclass
+class Fitted:
+    """One trained learner: ridge coefficients or a tree ensemble, plus the chosen hyper-parameters."""
+
+    kind: str
+    params: tuple[float, ...]
+    coef: np.ndarray | None = None
+    model: Any = None
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.coef is not None:
+            return X.astype(np.float64, copy=False) @ self.coef
+        return np.asarray(self.model.predict(X), dtype=float)
+
+    @property
+    def label(self) -> str:
+        if self.kind == "ridge":
+            return f"λ={self.params[0]:g}"
+        return f"{int(self.params[0])} leaves × {int(self.params[1])} trees"
 
 
 def _mean_ic(pred: pd.Series, target_wide: pd.DataFrame) -> float:
@@ -158,76 +288,228 @@ def _mean_ic(pred: pd.Series, target_wide: pd.DataFrame) -> float:
     return float(ic.mean()) if len(ic) else float("nan")
 
 
-def _train(data: ModelData, lo: int, hi: int, config: ModelConfig) -> tuple[np.ndarray, float]:
-    """Fit on sample days with calendar position in ``(lo, hi]``; λ is chosen on a purged hold-out made
-    of the last 25% of those days, then the model is refitted on all of them."""
-    labelled = np.isfinite(data.y_np)
-    rows = (data.row_pos > lo) & (data.row_pos <= hi) & labelled
+def _window(data: ModelData, lo: int, hi: int) -> tuple[np.ndarray, np.ndarray]:
+    rows = (data.row_pos > lo) & (data.row_pos <= hi) & np.isfinite(data.y_np)
     days = data.date_pos[(data.date_pos > lo) & (data.date_pos <= hi)]
-    lam = sorted(config.lambdas)[len(config.lambdas) // 2]
+    return rows, days
+
+
+def _holdout(data: ModelData, rows: np.ndarray, days: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Purged split: the last 25% of the window validates; training labels overlapping it are dropped."""
     split = int(len(days) * 0.75)
-    if split >= 60 and len(days) - split >= 20:
-        val_start = int(days[split])
-        inner = rows & (data.row_pos + data.horizon <= val_start)
-        val = rows & (data.row_pos >= val_start)
-        if np.unique(data.row_pos[inner]).size >= 40:
-            Xi, yi = data.X_np[inner], data.y_np[inner]
-            scores = {
-                c: _mean_ic(data.predict(val, fit_ridge(Xi, yi, c)), data.y_wide) for c in config.lambdas
-            }
-            finite = {k: v for k, v in scores.items() if math.isfinite(v)}
-            if finite:  # ties go to the stronger penalty
-                lam = max(finite, key=lambda k: (round(finite[k], 6), k))
-    return fit_ridge(data.X_np[rows], data.y_np[rows], lam), lam
+    if split < 60 or len(days) - split < 20:
+        return None
+    val_start = int(days[split])
+    inner = rows & (data.row_pos + data.horizon <= val_start)
+    val = rows & (data.row_pos >= val_start)
+    if np.unique(data.row_pos[inner]).size < 40:
+        return None
+    return inner, val
+
+
+def _val_ic(data: ModelData, val: np.ndarray, pred: np.ndarray) -> float:
+    return _mean_ic(pd.Series(pred, index=data.X.index[val]), data.y_wide)
+
+
+def _best(scores: Mapping[Any, float], tie_break: Any) -> Any | None:
+    finite = {k: v for k, v in scores.items() if math.isfinite(v)}
+    if not finite:
+        return None
+    return max(finite, key=lambda k: (round(finite[k], 6), tie_break(k)))
+
+
+def train_ridge(data: ModelData, lo: int, hi: int, config: ModelConfig) -> Fitted:
+    """Fit on sample days with calendar position in ``(lo, hi]``; λ is chosen on the purged hold-out
+    (ties go to the stronger penalty), then the model is refitted on all of them."""
+    rows, days = _window(data, lo, hi)
+    lam = sorted(config.lambdas)[len(config.lambdas) // 2]
+    split = _holdout(data, rows, days)
+    if split is not None:
+        inner, val = split
+        Xi, yi, Xv = data.X_np[inner], data.y_np[inner], data.X_np[val].astype(np.float64)
+        scores = {c: _val_ic(data, val, Xv @ fit_ridge(Xi, yi, c)) for c in config.lambdas}
+        lam = _best(scores, lambda c: c) or lam
+    return Fitted("ridge", (lam,), coef=fit_ridge(data.X_np[rows], data.y_np[rows], lam))
+
+
+def _tree_model(params: tuple[float, ...], n_rows: int, seed: int) -> Any:
+    from sklearn.ensemble import HistGradientBoostingRegressor
+
+    leaves, trees = params
+    return HistGradientBoostingRegressor(
+        learning_rate=0.1,
+        max_iter=int(trees),
+        max_leaf_nodes=int(leaves),
+        min_samples_leaf=max(20, n_rows // 500),
+        l2_regularization=1.0,
+        max_bins=63,
+        early_stopping=False,
+        random_state=seed,
+    )
+
+
+def _sample(mask: np.ndarray, max_rows: int, rng: np.random.Generator) -> np.ndarray:
+    idx = np.flatnonzero(mask)
+    if idx.size > max_rows:
+        idx = np.sort(rng.choice(idx, max_rows, replace=False))
+    return idx
+
+
+def train_gbm(
+    data: ModelData, lo: int, hi: int, config: ModelConfig, params: tuple[float, ...] | None = None
+) -> Fitted:
+    """Gradient-boosted trees on at most ``gbm_max_rows`` sampled rows. Without ``params`` the tree size
+    is chosen from ``gbm_grid`` on the purged hold-out (ties go to the smaller model)."""
+    rows, days = _window(data, lo, hi)
+    if not rows.any():
+        raise DomainError("no training samples")
+    rng = np.random.default_rng(config.seed + max(hi, 0))
+    if params is None:
+        params = tuple(float(x) for x in config.gbm_grid[0])
+        split = _holdout(data, rows, days) if len(config.gbm_grid) > 1 else None
+        if split is not None:
+            inner, val = split
+            ii = _sample(inner, config.gbm_max_rows, rng)
+            Xv = data.X_np[val]
+            scores: dict[tuple[float, ...], float] = {}
+            for g in config.gbm_grid:
+                key = tuple(float(x) for x in g)
+                m = _tree_model(key, ii.size, config.seed).fit(data.X_np[ii], data.y_np[ii])
+                scores[key] = _val_ic(data, val, np.asarray(m.predict(Xv), dtype=float))
+            params = _best(scores, lambda k: -k[0] * k[1]) or params
+    idx = _sample(rows, config.gbm_max_rows, rng)
+    model = _tree_model(params, idx.size, config.seed).fit(data.X_np[idx], data.y_np[idx])
+    return Fitted("gbm", params, model=model)
+
+
+def _zs(v: np.ndarray, clip: float = 3.0) -> np.ndarray:
+    sd = float(np.std(v))
+    return np.clip((v - v.mean()) / sd, -clip, clip) if sd > 0 else np.zeros_like(v)
+
+
+@dataclass
+class FinalModel:
+    """The live model(s): trained on every label realised by the last date."""
+
+    kind: str
+    ridge: Fitted | None
+    gbm: Fitted | None
+
+    def score(self, X: np.ndarray) -> np.ndarray:
+        """Scores for one cross-section (the ensemble z-scores each learner within it)."""
+        if self.kind == "ridge" and self.ridge is not None:
+            return self.ridge.predict(X)
+        if self.kind == "gbm" and self.gbm is not None:
+            return self.gbm.predict(X)
+        if self.ridge is None or self.gbm is None:
+            raise DomainError("the ensemble needs both learners")
+        return (_zs(self.ridge.predict(X)) + _zs(self.gbm.predict(X))) / 2
+
+
+def combine(predictions: Sequence[pd.Series]) -> pd.Series:
+    """Average of per-date z-scores, on the dates every model predicted."""
+    zs = [feat.cross_sectional_z(p.unstack()) for p in predictions]
+    dates = zs[0].index
+    for z in zs[1:]:
+        dates = dates.intersection(z.index)
+    cols = zs[0].columns
+    total = sum(z.reindex(index=dates, columns=cols) for z in zs)
+    out = (total / len(zs)).stack(future_stack=True).dropna()
+    out.index.names = ["date", "symbol"]
+    return out
 
 
 @dataclass
 class WalkForward:
     predictions: pd.Series  # out-of-sample, (date, symbol)
-    fits: list[tuple[pd.Timestamp, float, np.ndarray]]  # (fit date, λ, coefficients)
+    fits: list[tuple[pd.Timestamp, Fitted]]  # (fit date, fitted learner)
 
 
-def walk_forward(data: ModelData, config: ModelConfig) -> WalkForward:
+Progress = Callable[[float, str], None]
+
+
+def walk_forward(
+    data: ModelData, config: ModelConfig, kind: str = "ridge", progress: Progress | None = None
+) -> WalkForward:
+    if kind not in ("ridge", "gbm"):
+        raise DomainError("walk_forward trains 'ridge' or 'gbm' learners")
     dp = data.date_pos
     h = data.horizon
-    fits: list[tuple[pd.Timestamp, float, np.ndarray]] = []
-    segments: list[tuple[int, np.ndarray]] = []  # (index into dp where the coefficients take over, coef)
+    every = config.retrain_every if kind == "ridge" else config.gbm_retrain_every
+    fits: list[tuple[pd.Timestamp, Fitted]] = []
+    segments: list[tuple[int, Fitted]] = []  # (index into dp where the learner takes over, learner)
     last_fit: int | None = None
+    params: tuple[float, ...] | None = None
     for k, p in enumerate(dp):
-        if last_fit is not None and k - last_fit < config.retrain_every:
+        if last_fit is not None and k - last_fit < every:
             continue
         cutoff = int(p) - h  # only labels realised by day p
         n_days = int(np.count_nonzero((dp <= cutoff) & (dp > cutoff - config.train_window)))
         if n_days < config.min_train:
             continue
-        coef, lam = _train(data, cutoff - config.train_window, cutoff, config)
-        fits.append((data.calendar[p], lam, coef))
-        segments.append((k, coef))
+        lo = cutoff - config.train_window
+        if kind == "ridge":
+            fitted = train_ridge(data, lo, cutoff, config)
+        else:
+            tune = params is None or len(fits) % config.gbm_tune_every == 0
+            fitted = train_gbm(data, lo, cutoff, config, None if tune else params)
+            params = fitted.params
+        fits.append((data.calendar[p], fitted))
+        segments.append((k, fitted))
         last_fit = k
+        if progress is not None:
+            progress(k / len(dp), f"training {MODEL_LABELS[kind].lower()} (refit {len(fits)})")
     if not fits:
         raise DomainError(
             f"not enough history: the model needs {config.min_train} labelled days after the "
             f"{feat.WARMUP}-day warm-up, plus the {h}-day label horizon"
         )
     preds = []
-    for i, (k0, coef) in enumerate(segments):
+    for i, (k0, fitted) in enumerate(segments):
         k1 = segments[i + 1][0] if i + 1 < len(segments) else len(dp)
         mask = (data.row_pos >= dp[k0]) & (data.row_pos <= dp[k1 - 1])
-        preds.append(data.predict(mask, coef))
+        preds.append(pd.Series(fitted.predict(data.X_np[mask]), index=data.X.index[mask]))
     out = pd.concat(preds)
     out.index.names = ["date", "symbol"]
     return WalkForward(predictions=out, fits=fits)
 
 
-def fit_final(data: ModelData, config: ModelConfig) -> tuple[np.ndarray, float, pd.Timestamp]:
-    """The live model: trained on every label realised by the last date (within the training window)."""
+def fit_final(data: ModelData, config: ModelConfig) -> tuple[FinalModel, pd.Timestamp]:
+    """The live model: every learner trained on each label realised by the last date (within the window)."""
     last = int(data.date_pos[-1])
     cutoff = last - data.horizon
     n_days = int(np.count_nonzero((data.date_pos <= cutoff) & (data.date_pos > cutoff - config.train_window)))
     if n_days < config.min_train:
         raise DomainError("not enough labelled history to fit the live model")
-    coef, lam = _train(data, cutoff - config.train_window, cutoff, config)
-    return coef, lam, data.calendar[last]
+    lo = cutoff - config.train_window
+    kinds = config.model_kinds
+    ridge = train_ridge(data, lo, cutoff, config) if "ridge" in kinds else None
+    gbm = train_gbm(data, lo, cutoff, config) if "gbm" in kinds else None
+    return FinalModel(config.model_type, ridge, gbm), data.calendar[last]
+
+
+def tree_importance(
+    data: ModelData, final: FinalModel, config: ModelConfig, max_rows: int = 20_000
+) -> dict[str, float]:
+    """Permutation importance of the live tree model on its most recent training rows: how much the
+    correlation between its predictions and the target drops when one feature is shuffled."""
+    if final.gbm is None:
+        return {}
+    last = int(data.date_pos[-1])
+    cutoff = last - data.horizon
+    rows, _ = _window(data, cutoff - config.train_window // 4, cutoff)
+    rng = np.random.default_rng(config.seed)
+    idx = _sample(rows, max_rows, rng)
+    if idx.size < 50:
+        return {}
+    X, y = data.X_np[idx], data.y_np[idx]
+    base = float(np.corrcoef(final.gbm.predict(X), y)[0, 1])
+    out: dict[str, float] = {}
+    for j, name in enumerate(data.feature_names):
+        Xp = X.copy()
+        Xp[:, j] = rng.permutation(Xp[:, j])
+        out[name] = base - float(np.corrcoef(final.gbm.predict(Xp), y)[0, 1])
+    return out
 
 
 # ----------------------------------------------------------------------------- evaluation
@@ -465,6 +747,25 @@ class LivePrediction:
 
 
 @dataclass
+class ModelEval:
+    """Out-of-sample results of one model type (or the baseline rule) on the common dates."""
+
+    name: str
+    predictions: pd.Series
+    oos: ICStats
+    ic_series: pd.Series
+    within_sector: ICStats | None
+    buckets: list[float | None]
+    backtest: Backtest
+    refits: int
+
+    @property
+    def spread(self) -> float | None:
+        lo, hi = self.buckets[0], self.buckets[-1]
+        return None if lo is None or hi is None else hi - lo
+
+
+@dataclass
 class AlphaRun:
     config: ModelConfig
     oos: ICStats
@@ -474,14 +775,20 @@ class AlphaRun:
     buckets: list[float | None]
     backtest: Backtest
     calibration: Calibration
-    importance: dict[str, tuple[float, float]]  # feature -> (mean coefficient, sign consistency)
-    fits: list[tuple[pd.Timestamp, float, np.ndarray]]
+    importance: dict[str, tuple[float, float]]  # feature -> (mean ridge coefficient, sign consistency)
+    tree_importance: dict[str, float]  # feature -> permutation importance in the live tree model
+    fits: dict[str, list[tuple[pd.Timestamp, Fitted]]]  # learner -> walk-forward refits
+    models: dict[str, ModelEval]  # every evaluated model type + "baseline"
+    within_sector: ICStats | None
+    final: FinalModel
     live_date: pd.Timestamp
     live: list[LivePrediction]
-    live_lambda: float
-    live_coef: np.ndarray
     oos_start: pd.Timestamp
     oos_end: pd.Timestamp
+
+    @property
+    def chosen(self) -> str:
+        return self.config.model_type
 
 
 def baseline_scores(data: ModelData) -> pd.Series:
@@ -492,29 +799,91 @@ def baseline_scores(data: ModelData) -> pd.Series:
     return pd.Series(data.X[cols].to_numpy(dtype=float) @ w, index=data.X.index)
 
 
-def run(data: ModelData, config: ModelConfig) -> AlphaRun:
-    wf = walk_forward(data, config)
-    pred_wide = wf.predictions.unstack()
+def evaluate(
+    name: str, predictions: pd.Series, data: ModelData, config: ModelConfig, refits: int = 0
+) -> ModelEval:
+    pred_wide = predictions.unstack()
     realized = data.fwd.reindex(index=pred_wide.index, columns=pred_wide.columns)
     oos, ic_series = ic_stats(pred_wide, realized, data.horizon)
-    base_wide = baseline_scores(data).unstack().reindex(index=pred_wide.index, columns=pred_wide.columns)
-    baseline, baseline_ic = ic_stats(base_wide, realized, data.horizon)
+    within = None
+    if data.sectors is not None:
+        try:
+            within, _ = ic_stats(pred_wide, feat.neutralise(realized, data.sectors), data.horizon)
+        except DomainError:
+            within = None
     bench = data.bench_fwd.reindex(pred_wide.index)
-    calibration = calibrate(pred_wide, realized, bench, config)
-    backtest = top_k_backtest(pred_wide, realized, bench, config, pd.DatetimeIndex(data.positions.index))
-    coefs = np.array([c for _, _, c in wf.fits])
-    mean_coef = coefs.mean(axis=0)
-    consistency = (np.sign(coefs) == np.sign(mean_coef)).mean(axis=0)
-    importance = {name: (float(mean_coef[i]), float(consistency[i])) for i, name in enumerate(data.X.columns)}
-    coef, lam, last = fit_final(data, config)
-    latest = data.predict(data.row_pos == data.pos(last), coef)
-    scores = pd.Series(latest.to_numpy(), index=latest.index.get_level_values("symbol"))
+    return ModelEval(
+        name=name,
+        predictions=predictions,
+        oos=oos,
+        ic_series=ic_series,
+        within_sector=within,
+        buckets=bucket_returns(pred_wide, realized, config.buckets),
+        backtest=top_k_backtest(pred_wide, realized, bench, config, pd.DatetimeIndex(data.positions.index)),
+        refits=refits,
+    )
+
+
+def run(data: ModelData, config: ModelConfig, progress: Progress | None = None) -> AlphaRun:
+    kinds = config.model_kinds
+    share = {"ridge": 0.3, "gbm": 0.55} if len(kinds) == 2 else {kinds[0]: 0.85}
+    walks: dict[str, WalkForward] = {}
+    offset = 0.0
+    for k in kinds:
+        sub = None
+        if progress is not None:
+            lo, width = offset, share[k]
+
+            def sub(f: float, stage: str, lo: float = lo, width: float = width) -> None:
+                progress(lo + width * f, stage)
+
+        walks[k] = walk_forward(data, config, k, sub)
+        offset += share[k]
+    if progress is not None:
+        progress(offset, "evaluating out of sample")
+    preds = {k: w.predictions for k, w in walks.items()}
+    if "ridge" in preds and "gbm" in preds:
+        preds["ensemble"] = combine([preds["ridge"], preds["gbm"]])
+    chosen = config.model_type
+    # Every model is judged on the same dates: those the chosen model predicted.
+    dates = preds[chosen].index.get_level_values("date").unique()
+    refits = {"ridge": len(walks["ridge"].fits) if "ridge" in walks else 0}
+    refits["gbm"] = len(walks["gbm"].fits) if "gbm" in walks else 0
+    refits["ensemble"] = refits["ridge"] + refits["gbm"]
+    models: dict[str, ModelEval] = {}
+    for name, p in preds.items():
+        on = p[p.index.get_level_values("date").isin(dates)]
+        models[name] = evaluate(name, on, data, config, refits[name])
+    base = baseline_scores(data)
+    base = base[base.index.get_level_values("date").isin(dates)]
+    models["baseline"] = evaluate("baseline", base, data, config)
+    main = models[chosen]
+
+    pred_wide = main.predictions.unstack()
+    realized = data.fwd.reindex(index=pred_wide.index, columns=pred_wide.columns)
+    calibration = calibrate(pred_wide, realized, data.bench_fwd.reindex(pred_wide.index), config)
+
+    importance: dict[str, tuple[float, float]] = {}
+    if "ridge" in walks:
+        coefs = np.array([f.coef for _, f in walks["ridge"].fits if f.coef is not None])
+        mean_coef = coefs.mean(axis=0)
+        consistency = (np.sign(coefs) == np.sign(mean_coef)).mean(axis=0)
+        importance = {
+            name: (float(mean_coef[i]), float(consistency[i])) for i, name in enumerate(data.feature_names)
+        }
+
+    if progress is not None:
+        progress(0.9, "fitting the live model")
+    final, last = fit_final(data, config)
+    latest = data.row_pos == data.pos(last)
+    symbols = data.X.index[latest].get_level_values("symbol")
+    scores = pd.Series(final.score(data.X_np[latest]), index=symbols)
     sd = float(scores.std(ddof=0))
     zs = (scores - scores.mean()) / sd if sd > 0 else scores * 0.0
     order = zs.sort_values(ascending=False)
     live = [
         LivePrediction(
-            symbol=s,
+            symbol=str(s),
             score=float(scores[s]),
             z=float(order[s]),
             rank=i + 1,
@@ -523,22 +892,24 @@ def run(data: ModelData, config: ModelConfig) -> AlphaRun:
         )
         for i, s in enumerate(order.index)
     ]
-    labelled = ic_series.index
+    labelled = main.ic_series.index
     return AlphaRun(
         config=config,
-        oos=oos,
-        ic_series=ic_series,
-        baseline=baseline,
-        baseline_ic_series=baseline_ic,
-        buckets=bucket_returns(pred_wide, realized, config.buckets),
-        backtest=backtest,
+        oos=main.oos,
+        ic_series=main.ic_series,
+        baseline=models["baseline"].oos,
+        baseline_ic_series=models["baseline"].ic_series,
+        buckets=main.buckets,
+        backtest=main.backtest,
         calibration=calibration,
         importance=importance,
-        fits=wf.fits,
+        tree_importance=tree_importance(data, final, config),
+        fits={k: w.fits for k, w in walks.items()},
+        models=models,
+        within_sector=main.within_sector,
+        final=final,
         live_date=last,
         live=live,
-        live_lambda=lam,
-        live_coef=coef,
         oos_start=labelled[0],
         oos_end=labelled[-1],
     )

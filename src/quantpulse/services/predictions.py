@@ -24,7 +24,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
@@ -40,9 +40,11 @@ from quantpulse.db import repositories as repo
 from quantpulse.db.models import PredictionRow
 from quantpulse.db.session import Database
 from quantpulse.schemas.common import DataStatus
+from quantpulse.schemas.forecast import StockForecast
 from quantpulse.schemas.market import PriceHistory
 from quantpulse.schemas.predictions import (
     CalibrationBucket,
+    LedgerCounts,
     LogResult,
     PredictionOut,
     ResolveResult,
@@ -55,8 +57,9 @@ from quantpulse.services.model import ModelService
 
 logger = logging.getLogger(__name__)
 
-FORECAST_VERSION = "garch-t-fhs/1"
-MODEL_VERSION = "ridge-walk-forward/1"
+FORECAST_VERSION = "garch-t-fhs/2"  # + "+earn" (earnings jumps) and "+iv" (options blend) when used
+MODEL_VERSION = "walk-forward/2"  # stored as "<model type>-walk-forward/2"
+LEDGER_MODEL_WAIT = 1800.0  # the ledger runs in the background and waits for today's model run
 FORECAST_HORIZONS = (5, 21)
 VOID_AFTER_DAYS = 10
 RESOLVE_EVERY = timedelta(minutes=15)
@@ -71,6 +74,14 @@ def last_completed_session(now: datetime) -> date:
     if is_trading_day(day) and local.time() >= regular_close(day):
         return day
     return previous_trading_day(day)
+
+
+def forecast_version(f: StockForecast) -> str:
+    """Which forecaster produced ``f``: the base model plus the extras it actually used."""
+    extras = ("+earn" if f.earnings is not None and f.earnings.events_used else "") + (
+        "+iv" if f.volatility.iv_weight > 0 else ""
+    )
+    return FORECAST_VERSION + extras
 
 
 def _close_on(history: PriceHistory, day: date) -> float | None:
@@ -105,6 +116,7 @@ def to_out(row: PredictionRow) -> PredictionOut:
         rank=row.rank,
         model_version=row.model_version,
         data_status=DataStatus(row.data_status),
+        origin="backfill" if row.origin == "backfill" else "live",
         status=row.status,
         resolved_at=row.resolved_at,
         realized_price=row.realized_price,
@@ -217,7 +229,7 @@ class PredictionService:
             async with sem:
                 try:
                     env = await self._forecast.forecast(
-                        symbol, FORECAST_HORIZONS, include_options=False, use_close=True
+                        symbol, FORECAST_HORIZONS, include_options=True, use_close=True
                     )
                     hist = await self._market.history(symbol, "1d", STANDARD_HISTORY_DAYS)
                 except DomainError as exc:
@@ -253,7 +265,7 @@ class PredictionService:
                         "q75": h.band.p75,
                         "q95": h.band.p95,
                         "rank": None,
-                        "model_version": FORECAST_VERSION,
+                        "model_version": forecast_version(f),
                         "data_status": f.data_status.value,
                         "status": "open",
                     }
@@ -287,7 +299,7 @@ class PredictionService:
         statuses: list[DataStatus],
     ) -> list[dict[str, Any]]:
         try:
-            live, report = await self._model.live_scores()
+            live, report = await self._model.live_scores(wait=LEDGER_MODEL_WAIT)
         except DomainError as exc:
             skipped["model"] = str(exc)
             return []
@@ -328,7 +340,7 @@ class PredictionService:
                     "q75": None,
                     "q95": None,
                     "rank": score.rank,
-                    "model_version": MODEL_VERSION,
+                    "model_version": f"{report.model_type}-{MODEL_VERSION}",
                     "data_status": report.data_status.value,
                     "status": "open",
                 }
@@ -399,17 +411,38 @@ class PredictionService:
         symbol: str | None = None,
         status: str | None = None,
         source: str | None = None,
+        origin: str | None = None,
         limit: int = 200,
     ) -> list[PredictionOut]:
         async with self._db.session() as session:
             rows = await repo.list_predictions(
-                session, symbol=symbol, status=status, source=source, limit=limit
+                session, symbol=symbol, status=status, source=source, origin=origin, limit=limit
             )
         return [to_out(r) for r in rows]
 
-    async def scorecard(self, symbol: str | None = None) -> Scorecard:
+    async def counts(self) -> Sequence[LedgerCounts]:
         async with self._db.session() as session:
-            rows = await repo.list_predictions(session, symbol=symbol, limit=None)
+            raw = await repo.prediction_counts(session)
+        keys = sorted({(o, src) for o, src, _ in raw})
+        return [
+            LedgerCounts(
+                origin="backfill" if o == "backfill" else "live",
+                source="model" if src == "model" else "forecast",
+                open=raw.get((o, src, "open"), 0),
+                resolved=raw.get((o, src, "resolved"), 0),
+                void=raw.get((o, src, "void"), 0),
+            )
+            for o, src in keys
+        ]
+
+    async def scorecard(
+        self, symbol: str | None = None, origin: Literal["live", "backfill", "all"] = "all"
+    ) -> Scorecard:
+        """Scores for live predictions, the backfilled replay, or both (``origin``)."""
+        async with self._db.session() as session:
+            rows = await repo.list_predictions(
+                session, symbol=symbol, origin=None if origin == "all" else origin, limit=None
+            )
         groups: dict[tuple[str, int], list[PredictionRow]] = defaultdict(list)
         for r in rows:
             groups[(r.source, r.horizon_days)].append(r)
@@ -464,7 +497,11 @@ class PredictionService:
                 )
         recent = sorted(rows, key=lambda r: (r.resolved_at or r.created_at, r.id), reverse=True)[:60]
         return Scorecard(
-            computed_at=self._clock.now(), symbol=symbol, sources=sources, recent=[to_out(r) for r in recent]
+            computed_at=self._clock.now(),
+            symbol=symbol,
+            origin=origin,
+            sources=sources,
+            recent=[to_out(r) for r in recent],
         )
 
     # ------------------------------------------------------------------ scheduler

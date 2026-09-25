@@ -108,7 +108,16 @@ class StockReportService:
                     "The stock model could not score this symbol (under a year of usable live history)."
                 )
                 return None
+            peers = [x for x in rep.live if score.sector and x.sector == score.sector and x.symbol != symbol]
+            industry_rank = industry_size = None
+            if peers:
+                industry_size = len(peers) + 1
+                industry_rank = 1 + sum(1 for x in peers if x.z > score.z)
             return ModelView(
+                model_label=rep.model_label,
+                sector_label=score.sector_label,
+                industry_rank=industry_rank,
+                industry_size=industry_size,
                 in_universe=symbol in rep.symbols,
                 rank=score.rank,
                 universe_size=len(rep.symbols) + (0 if symbol in rep.symbols else 1),

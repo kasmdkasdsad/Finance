@@ -9,9 +9,10 @@ from pydantic import AwareDatetime, Field
 from quantpulse.schemas.common import DataStatus, StrictModel
 
 FORECAST_DISCLAIMER = (
-    "Forecasts are probability ranges from a volatility model (GARCH-t with bootstrapped residuals) and a "
-    "CAPM drift. They describe uncertainty; they are not price targets. Stock direction over weeks is close to "
-    "a coin flip, so the useful part is the width of the range, not the midpoint. Not investment advice."
+    "Forecasts are probability ranges from a volatility model (GARCH-t with bootstrapped residuals, blended "
+    "with options-implied volatility when available), scheduled earnings jumps and a CAPM drift. They describe "
+    "uncertainty; they are not price targets. Stock direction over weeks is close to a coin flip, so the useful "
+    "part is the width of the range, not the midpoint. Not investment advice."
 )
 
 
@@ -73,6 +74,28 @@ class VolModelOut(StrictModel):
     long_run_vol_annual: float
     forecast_vol_annual_21d: float
     n_obs: int
+    earnings_days_excluded: int = Field(default=0, description="Earnings days left out of the GARCH fit")
+    garch_vol_annual_21d: float | None = Field(
+        default=None, description="21-day volatility from GARCH alone (ex earnings)"
+    )
+    implied_vol_annual_21d: float | None = Field(
+        default=None, description="Options-implied ATM volatility near 21 days (includes any earnings jump)"
+    )
+    blended_vol_annual_21d: float | None = Field(
+        default=None, description="Diffusive 21-day volatility used by the simulation after the blend"
+    )
+    iv_weight: float = 0.0
+    variance_premium: float | None = None
+
+
+class EarningsForecastOut(StrictModel):
+    next_date: date | None = Field(description="Next expected earnings reaction day")
+    source: str | None = Field(description="'scheduled' (vendor calendar) or 'estimated' (quarterly cadence)")
+    sessions_ahead: int | None = Field(description="Trading days until the reaction day (1 = next session)")
+    in_horizons: list[int] = Field(description="Forecast horizons that include the reaction day")
+    typical_move: float | None = Field(description="RMS of past earnings-day returns")
+    events_used: int = Field(description="Past reactions the jump size is drawn from")
+    modelled: bool = Field(description="Whether an earnings jump was simulated")
 
 
 class DriftOut(StrictModel):
@@ -113,6 +136,7 @@ class StockForecast(StrictModel):
     volatility: VolModelOut
     drift: DriftOut
     realized_vol: dict[str, float | None]
+    earnings: EarningsForecastOut | None = None
     calibration: CalibrationOut | None = None
     notes: list[str] = Field(default_factory=list)
     data_status: DataStatus

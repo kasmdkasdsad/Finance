@@ -82,6 +82,39 @@ class PicksService:
         out-of-sample skill, otherwise factors)."""
         universe = list(self._settings.picks_universe)
         top_n = top_n or self._settings.picks_top_n
+        notes: list[str] = []
+        live: dict[str, LiveScore] = {}
+        report = None
+        if method != "factors" and self.model is not None:
+            try:
+                live, report = await self.model.live_scores()
+            except DomainError as exc:
+                notes.append(f"Stock model unavailable ({exc}); ranked by the factor rule.")
+        used: str = "factors"
+        if report is not None:
+            if method == "auto":
+                used = "blend" if report.has_skill else "factors"
+                if not report.has_skill:
+                    notes.append(
+                        "The stock model has not shown reliable out-of-sample skill, so picks are ranked by the "
+                        "factor rule; the model's probabilities are shown for reference."
+                    )
+            else:
+                used = method
+        elif method in ("model", "blend"):
+            notes.append("No stock model is available; ranked by the factor rule.")
+        if used in ("model", "blend") and len(live) > len(universe):
+            # The model covers more stocks than the picks list (e.g. the whole S&P 500): its best-ranked names
+            # compete too, so the day's top pick can come from anywhere in the model's universe.
+            ranked = sorted(live.values(), key=lambda x: x.rank)
+            extra = [x.symbol for x in ranked[: 2 * top_n] if x.symbol not in universe]
+            if extra:
+                shown = ", ".join(extra[:8]) + ("…" if len(extra) > 8 else "")
+                notes.append(
+                    f"The stock model ranks {len(live)} stocks; its top-ranked names outside the picks list "
+                    f"({shown}) are screened too."
+                )
+                universe += extra
         sem = asyncio.Semaphore(4)
 
         async def load(symbol: str) -> tuple[Resolved[PriceHistory], Resolved[Quote]]:
@@ -108,27 +141,6 @@ class PicksService:
             info[symbol] = (quote_r, status)
 
         results = {r.symbol: r for r in screener.screen(raw)}
-        notes: list[str] = []
-        live: dict[str, LiveScore] = {}
-        report = None
-        if method != "factors" and self.model is not None:
-            try:
-                live, report = await self.model.live_scores()
-            except DomainError as exc:
-                notes.append(f"Stock model unavailable ({exc}); ranked by the factor rule.")
-        used: str = "factors"
-        if report is not None:
-            if method == "auto":
-                used = "blend" if report.has_skill else "factors"
-                if not report.has_skill:
-                    notes.append(
-                        "The stock model has not shown reliable out-of-sample skill, so picks are ranked by the "
-                        "factor rule; the model's probabilities are shown for reference."
-                    )
-            else:
-                used = method
-        elif method in ("model", "blend"):
-            notes.append("No stock model is available; ranked by the factor rule.")
 
         def combined(symbol: str) -> float:
             factor = results[symbol].standardized
@@ -174,6 +186,7 @@ class PicksService:
                     provider=quote_r.provenance.provider,
                     factor_rating=r.rating,
                     model_rank=score.rank if score else None,
+                    sector=score.sector_label if score else None,
                     prob_outperform=score.prob_outperform if score else None,
                     expected_excess_return=score.expected_excess_return if score else None,
                 )
@@ -221,13 +234,27 @@ class PicksService:
                 except DomainError:
                     return p
             h = env.data.horizons[0]
+            e = env.data.earnings
             return p.model_copy(
-                update={"prob_up_21d": h.prob_up, "low_21d": h.band.p05, "high_21d": h.band.p95}
+                update={
+                    "prob_up_21d": h.prob_up,
+                    "low_21d": h.band.p05,
+                    "high_21d": h.band.p95,
+                    "earnings_date": e.next_date if e else None,
+                    "earnings_in_sessions": e.sessions_ahead if e else None,
+                    "typical_earnings_move": e.typical_move if e else None,
+                }
             )
 
         out = await asyncio.gather(*(one(p) for p in picks))
         if any(p.low_21d is None for p in out):
             notes.append("Some 21-day price ranges could not be computed.")
+        soon = [p.symbol for p in out if p.earnings_in_sessions is not None and p.earnings_in_sessions <= 21]
+        if soon:
+            notes.append(
+                f"Earnings are due within the 21-day horizon for {', '.join(soon)}: expect a bigger move either way "
+                "(the ranges include the jump)."
+            )
         return list(out)
 
     async def email_digest(

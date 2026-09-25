@@ -30,7 +30,18 @@ FEATURE_LABELS = {
     "max_ret_21": "max daily gain 1m",
     "skew_63": "3m skew",
     "volume_trend": "volume trend",
+    "earn_reaction": "earnings reaction (drift)",
+    "sector_mom_6_1": "industry momentum",
+    "sector_ret_1m": "industry 1m return",
+    "earnings_yield": "earnings yield",
+    "fcf_yield": "free-cash-flow yield",
+    "book_to_market": "book-to-market",
+    "gross_profitability": "gross profitability",
+    "roe": "return on equity",
+    "asset_growth": "asset growth",
+    "accruals": "accruals",
 }
+GROUP_LABELS = {"price": "Price", "earnings": "Earnings", "sector": "Industry", "fundamental": "Fundamental"}
 
 
 def _ic_chart(m: dict[str, Any]) -> None:
@@ -136,8 +147,9 @@ def _calibration_chart(bins: list[dict[str, Any]], base: float, title: str, key:
 
 
 def _importance_chart(m: dict[str, Any]) -> None:
-    imp = sorted(m["importance"], key=lambda i: i["coefficient"])
     t = charts.theme()
+    left, right = st.columns(2, gap="large")
+    imp = sorted(m["importance"], key=lambda i: i["coefficient"])
     pos, neg = charts.DIVERGING_BLUE[-1], charts.DIVERGING_RED[0]
     fig = go.Figure(
         go.Bar(
@@ -145,19 +157,128 @@ def _importance_chart(m: dict[str, Any]) -> None:
             y=[FEATURE_LABELS.get(i["feature"], i["feature"]) for i in imp],
             orientation="h",
             marker={"color": [pos if i["coefficient"] >= 0 else neg for i in imp], "cornerradius": 4},
-            customdata=[i["sign_consistency"] for i in imp],
-            hovertemplate="%{y}: %{x:+.4f} (same sign in %{customdata:.0%} of refits)<extra></extra>",
-            name="Coefficient",
+            customdata=[[i["sign_consistency"], GROUP_LABELS.get(i["group"], i["group"])] for i in imp],
+            hovertemplate="%{y} (%{customdata[1]}): %{x:+.4f}, same sign in %{customdata[0]:.0%} of refits"
+            "<extra></extra>",
+            name="Weight",
         )
     )
-    charts.base_layout(
-        fig,
-        "What the model leans on (average coefficient; blue = higher is better)",
-        height=520,
-        showlegend=False,
-    )
+    charts.base_layout(fig, "Linear model weights (blue = higher is better)", height=640, showlegend=False)
     fig.update_xaxes(showgrid=True, gridcolor=t["grid"], zeroline=True, zerolinecolor=t["axis"])
-    charts.show(fig, key="lab_importance")
+    with left:
+        charts.show(fig, key="lab_importance")
+    trees = [i for i in m["importance"] if i.get("tree_importance") is not None]
+    if not trees:
+        return
+    trees.sort(key=lambda i: i["tree_importance"])
+    groups = list(GROUP_LABELS)
+    fig2 = go.Figure()
+    for gi, group in enumerate(groups):
+        part = [i for i in trees if i["group"] == group]
+        if not part:
+            continue
+        fig2.add_trace(
+            go.Bar(
+                x=[i["tree_importance"] for i in part],
+                y=[FEATURE_LABELS.get(i["feature"], i["feature"]) for i in part],
+                orientation="h",
+                name=GROUP_LABELS[group],
+                marker={"color": charts.series(gi), "cornerradius": 4},
+                hovertemplate="%{y}: fit drops by %{x:.4f} when shuffled<extra>"
+                + GROUP_LABELS[group]
+                + "</extra>",
+            )
+        )
+    order = [FEATURE_LABELS.get(i["feature"], i["feature"]) for i in trees]
+    charts.base_layout(fig2, "What the trees rely on (drop in fit when a feature is shuffled)", height=640)
+    fig2.update_yaxes(categoryorder="array", categoryarray=order)
+    fig2.update_xaxes(showgrid=True, gridcolor=t["grid"])
+    with right:
+        charts.show(fig2, key="lab_tree_importance")
+
+
+def _comparison(m: dict[str, Any]) -> None:
+    rows = m.get("comparison") or []
+    if not rows:
+        return
+    st.subheader("Model comparison (same out-of-sample dates)")
+    table = pd.DataFrame(
+        [
+            {
+                "model": ("● " if r["chosen"] else "") + r["label"],
+                "mean IC": r["mean_ic"],
+                "t-stat": r["t_stat"],
+                "hit rate": r["hit_rate"],
+                "IC within industries": r["within_sector_ic"],
+                "top − bottom quintile": r["spread"],
+                "top picks, annual": r["annual_return"],
+                "Sharpe": r["sharpe"],
+                "refits": r["refits"],
+            }
+            for r in rows
+        ]
+    )
+    st.dataframe(
+        table,
+        hide_index=True,
+        column_config={
+            "mean IC": st.column_config.NumberColumn(format="%+.3f"),
+            "t-stat": st.column_config.NumberColumn(format="%+.1f"),
+            "hit rate": st.column_config.NumberColumn(format="percent"),
+            "IC within industries": st.column_config.NumberColumn(
+                format="%+.3f", help="Skill at ranking stocks against their own industry peers"
+            ),
+            "top − bottom quintile": st.column_config.NumberColumn(format="percent"),
+            "top picks, annual": st.column_config.NumberColumn(format="percent"),
+            "Sharpe": st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+    st.caption(
+        "● marks the model behind the live rankings (QP_MODEL_TYPE). Choosing the best row after seeing this table "
+        "would itself be a form of overfitting; the ensemble is the default because averaging is robust."
+    )
+
+
+def _coverage(m: dict[str, Any]) -> None:
+    u, cov = m.get("universe"), m.get("coverage")
+    if not u or not cov:
+        return
+    with st.expander("Universe & data coverage", icon=":material/dataset:"):
+        c = st.columns(4)
+        c[0].metric("Stocks with prices", u["with_prices"], help=u["note"])
+        c[1].metric(
+            "Former members modelled",
+            "—" if u["former_members"] is None else u["former_members"],
+            help="Stocks that left the index during the window: kept to avoid survivorship bias",
+        )
+        c[2].metric("Earnings histories", cov["earnings_companies"])
+        c[3].metric(
+            "Fundamentals",
+            cov["fundamentals_companies"],
+            help=f"SEC XBRL frames available: {cov['frames_available']}/{cov['frames_requested']}",
+        )
+        st.caption(u["note"])
+        if cov["sectors"]:
+            fig = go.Figure(
+                go.Bar(
+                    x=list(cov["sectors"].values()),
+                    y=list(cov["sectors"]),
+                    orientation="h",
+                    marker={"color": charts.series(0), "cornerradius": 4},
+                    hovertemplate="%{y}: %{x} stocks<extra></extra>",
+                )
+            )
+            title = "Stocks per industry" + (
+                " (features compared within each industry)" if cov["sector_neutral"] else ""
+            )
+            charts.base_layout(fig, title, height=360, showlegend=False)
+            fig.update_yaxes(autorange="reversed")
+            charts.show(fig, key="lab_sectors")
+        if u["missing_count"]:
+            st.caption(f"{u['missing_count']} symbols have no usable prices (sample):")
+            st.dataframe(
+                pd.DataFrame([{"symbol": k, "reason": v} for k, v in u["missing"].items()]), hide_index=True
+            )
 
 
 def _model_view() -> None:
@@ -165,19 +286,28 @@ def _model_view() -> None:
     horizon = c[0].selectbox("Horizon (trading days)", [5, 10, 21, 42, 63], index=2, key="lab_horizon")
     top_k = c[1].number_input("Backtest holds", 1, 15, 5, key="lab_topk")
     refresh = c[2].toggle("Recompute", value=False, key="lab_refresh", help="Ignore today's cached run")
-    with st.spinner("Training walk-forward (a few seconds the first time each day)…"):
-        res = guarded(
-            lambda: api().get("/model/report", horizon=horizon, top_k=top_k, refresh=refresh), "model report"
-        )
+    res = guarded(
+        lambda: api().get("/model/report", horizon=horizon, top_k=top_k, refresh=refresh, wait=5),
+        "model report",
+    )
     if not res:
         return
     m = res["data"]
     composite_badges(res["meta"])
+    u = m.get("universe") or {}
+    if u:
+        members = (
+            f"{u['current_members']} current members + {u['former_members']} former members (point-in-time)"
+            if u.get("point_in_time")
+            else f"{u['with_prices']} stocks"
+        )
+        st.markdown(f"**{m['model_label']}** · universe: **{u['label']}** · {members}")
     for w in m["warnings"]:
         st.warning(w, icon=":material/warning:")
     (st.success if m["has_skill"] else st.info)(m["verdict"], icon=":material/model_training:")
     oos, base, bt = m["oos"], m["baseline"], m["backtest"]
-    k = st.columns(5)
+    within = m.get("within_sector")
+    k = st.columns(6)
     k[0].metric(
         "Mean IC (model)",
         f"{oos['mean_ic']:+.3f}",
@@ -186,23 +316,34 @@ def _model_view() -> None:
         delta_arrow="off",
     )
     k[1].metric(
+        "IC within industries",
+        "—" if within is None else f"{within['mean_ic']:+.3f}",
+        None if within is None else f"t = {num(within['t_stat'], 1)}",
+        delta_color="off",
+        delta_arrow="off",
+        help="Rank correlation with returns measured against each stock's industry average",
+    )
+    k[2].metric(
         "Mean IC (factor rule)",
         f"{base['mean_ic']:+.3f}",
         f"t = {num(base['t_stat'], 1)}",
         delta_color="off",
         delta_arrow="off",
     )
-    k[2].metric(
+    k[3].metric(
         "Hit rate vs median",
         pct(oos["hit_rate"], 1),
         help="Above-median calls that finished above the median",
     )
-    k[3].metric("Top picks, annual", pct(bt["strategy_metrics"]["annual_return"], 1))
-    k[4].metric("Universe, annual", pct(bt["universe_metrics"]["annual_return"], 1))
+    k[4].metric("Top picks, annual", pct(bt["strategy_metrics"]["annual_return"], 1))
+    k[5].metric("Universe, annual", pct(bt["universe_metrics"]["annual_return"], 1))
     st.caption(
-        f"Out-of-sample {m['oos_start']} → {m['oos_end']} over {len(m['symbols'])} stocks; {m['retrains']} monthly refits; "
-        f"{bt['periods']} non-overlapping {m['horizon']}-day holding periods; {bt['cost_bps']:.0f} bps per trade."
+        f"Out-of-sample {m['oos_start']} → {m['oos_end']}; {len(m['symbols'])} stocks ranked today; "
+        f"{m['retrains']} walk-forward refits; {bt['periods']} non-overlapping {m['horizon']}-day holding periods; "
+        f"{bt['cost_bps']:.0f} bps per trade."
     )
+    _comparison(m)
+    _coverage(m)
     left, right = st.columns(2, gap="large")
     with left:
         _ic_chart(m)
@@ -216,12 +357,19 @@ def _model_view() -> None:
             "lab_calibration",
         )
     _importance_chart(m)
-    st.subheader(f"Live rankings · {m['as_of']}")
+    st.subheader(f"Live rankings · close of {m['as_of']}")
     live = pd.DataFrame(m["live"])
+    if "sector_label" in live and live["sector_label"].notna().any():
+        industries = sorted(live["sector_label"].dropna().unique())
+        chosen = st.multiselect("Industries", industries, key="lab_industries", placeholder="All industries")
+        if chosen:
+            live = live[live["sector_label"].isin(chosen)]
+    cols = ["rank", "symbol", "sector_label", "rating", "prob_outperform", "expected_excess_return", "z"]
     st.dataframe(
-        live[["rank", "symbol", "rating", "prob_outperform", "expected_excess_return", "z"]],
+        live[[c for c in cols if c in live]],
         hide_index=True,
         column_config={
+            "sector_label": st.column_config.TextColumn("industry"),
             "rating": st.column_config.ProgressColumn("rating", min_value=0, max_value=10, format="%d/10"),
             "prob_outperform": st.column_config.NumberColumn(f"P(beat {m['benchmark']})", format="percent"),
             "expected_excess_return": st.column_config.NumberColumn("expected excess", format="percent"),
@@ -242,8 +390,7 @@ def _model_view() -> None:
 
 def _signals_view() -> None:
     horizon = st.selectbox("Quintile horizon (trading days)", [5, 21, 63], index=1, key="lab_signal_horizon")
-    with st.spinner("Measuring every signal…"):
-        res = guarded(lambda: api().get("/model/research", horizon=horizon), "signal research")
+    res = guarded(lambda: api().get("/model/research", horizon=horizon, wait=5), "signal research")
     if not res:
         return
     r = res["data"]
@@ -299,8 +446,10 @@ def _signals_view() -> None:
 def render() -> None:
     st.title("Model Lab")
     st.caption(
-        "The stock model is trained walk-forward: every number here comes from predictions made before the returns "
-        "they are scored on. If it shows no skill, the platform says so and falls back to the simple factor rule."
+        "The stock models are trained walk-forward: every number here comes from predictions made before the returns "
+        "they are scored on. With the S&P 500 universe each stock only counts while it was in the index, so the "
+        "history includes the companies that later failed or were taken over. If the model shows no skill, the "
+        "platform says so and falls back to the simple factor rule."
     )
     views = {"Stock model": _model_view, "Signal research": _signals_view}
     choice = st.segmented_control(

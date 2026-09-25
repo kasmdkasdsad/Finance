@@ -248,3 +248,65 @@ async def test_games_and_ratings(database):
     async with database.session() as s:
         games = await repo.completed_games(s, "nfl", [2026])
     assert len(games) == 1 and games[0].home_score == 27
+
+
+async def test_reference_data_round_trips(database):
+    from quantpulse.schemas.reference import CompanyEvents, CompanyProfile, FrameFact
+
+    profile = CompanyProfile(
+        symbol="AAPL",
+        cik="0000320193",
+        name="Apple Inc.",
+        sic="3571",
+        sector="BusEq",
+        sector_label="Business",
+    )
+    first = datetime(2025, 1, 30, 21, 30, tzinfo=UTC)
+    events = CompanyEvents(
+        profile=profile, earnings=[first, first + timedelta(days=91)], earnings_since=date(2020, 9, 1)
+    )
+    async with database.session() as s:
+        await repo.save_company_events(s, events, "sec_edgar")
+    later = events.model_copy(update={"earnings": [first + timedelta(days=91), first + timedelta(days=182)]})
+    async with database.session() as s:
+        await repo.save_company_events(s, later, "sec_edgar")  # overlapping releases are stored once
+    async with database.session() as s:
+        loaded, updated_at, provider = await repo.load_company_events(s, "AAPL")
+        assert await repo.load_company_events(s, "MSFT") is None
+    assert provider == "sec_edgar" and updated_at.tzinfo is not None
+    assert loaded.earnings == [first, first + timedelta(days=91), first + timedelta(days=182)]
+    assert loaded.profile.sector == "BusEq" and loaded.earnings_since == date(2020, 9, 1)
+
+    async with database.session() as s:
+        await repo.put_blob(s, "k", {"a": 1}, "wikipedia")
+        await repo.put_blob(s, "k", {"a": 2}, "wikipedia")
+        assert (await repo.get_blob(s, "k"))[0] == {"a": 2} and await repo.get_blob(s, "none") is None
+
+    facts = [
+        FrameFact(cik=320193, start=date(2023, 10, 1), end=date(2024, 9, 28), value=93.7e9, accn="a1"),
+        FrameFact(cik=789019, start=date(2023, 7, 1), end=date(2024, 6, 30), value=88.1e9, accn="a2"),
+    ]
+    async with database.session() as s:
+        assert await repo.save_frame(s, "NetIncomeLoss", "CY2024", facts) == 2
+        restated = [facts[0].model_copy(update={"value": 94.0e9, "accn": "a3"})]
+        await repo.save_frame(s, "NetIncomeLoss", "CY2024", restated)  # a restatement replaces the value
+    async with database.session() as s:
+        frame = {f.cik: f for f in await repo.load_frame(s, "NetIncomeLoss", "CY2024")}
+        rows = await repo.facts_for(s, [320193], ["NetIncomeLoss", "Assets"])
+    assert frame[320193].value == 94.0e9 and frame[789019].value == 88.1e9
+    assert [(r.cik, r.value) for r in rows] == [(320193, 94.0e9)]
+
+
+async def test_bulk_bar_reads(database):
+    async with database.session() as s:
+        await repo.upsert_bars(s, _history(4), "alpaca")
+        msft = _history(2).model_copy(update={"symbol": "MSFT"})
+        await repo.upsert_bars(s, msft, "alpaca")
+        rows = await repo.bar_frame(s, ["AAPL", "MSFT", "NONE"], "1d", T0 + timedelta(days=1))
+    assert [(r[0], r[1]) for r in rows] == [
+        ("AAPL", T0 + timedelta(days=1)),
+        ("AAPL", T0 + timedelta(days=2)),
+        ("AAPL", T0 + timedelta(days=3)),
+        ("MSFT", T0 + timedelta(days=1)),
+    ]
+    assert rows[0][5] == 101.0 and rows[0][7] == "alpaca" and len(rows[0]) == len(repo.BAR_COLUMNS)

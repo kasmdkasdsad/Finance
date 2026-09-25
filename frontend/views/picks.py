@@ -72,6 +72,14 @@ def render() -> None:
                 if p["low_21d"] is None
                 else f"${p['low_21d']:,.2f} – ${p['high_21d']:,.2f}",
                 "P(up, 1 mo)": p["prob_up_21d"],
+                "earnings": "—"
+                if p.get("earnings_in_sessions") is None
+                else (
+                    f"⚠ in {p['earnings_in_sessions']} sessions"
+                    if p["earnings_in_sessions"] <= 21
+                    else str(p["earnings_date"])
+                ),
+                "industry": p.get("sector") or "—",
                 "factor rating": p["factor_rating"],
                 "model rank": p["model_rank"],
                 "drivers": ", ".join(p["drivers"]),

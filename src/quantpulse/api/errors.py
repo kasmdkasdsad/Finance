@@ -13,6 +13,8 @@ from starlette.exceptions import HTTPException
 
 from quantpulse.core.errors import DomainError, NotFoundError, ProviderError
 from quantpulse.schemas.common import ErrorResponse
+from quantpulse.schemas.jobs import JobOut
+from quantpulse.services.model import ModelTraining
 from quantpulse.services.notifications import NotConfiguredError, NotificationError, SyntheticDataRefused
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,17 @@ def install_error_handlers(app: FastAPI) -> None:
             for e in exc.errors()
         ]
         return _respond(request, 422, "validation_error", errors)
+
+    @app.exception_handler(ModelTraining)
+    async def _training(request: Request, exc: ModelTraining) -> JSONResponse:
+        """Long computations answer 202 with the job's progress; clients poll ``/jobs/{id}``."""
+        now = request.app.state.container.clock.now()
+        body = JobOut.of(exc.job, now)
+        return JSONResponse(
+            status_code=202,
+            content=jsonable_encoder(body),
+            headers={"Retry-After": "5", "Location": f"/api/v1/jobs/{exc.job.id}"},
+        )
 
     @app.exception_handler(DomainError)
     async def _domain(request: Request, exc: DomainError) -> JSONResponse:

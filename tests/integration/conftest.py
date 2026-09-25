@@ -23,6 +23,7 @@ def make_settings(tmp_path, **overrides) -> Settings:
         market_providers=["yahoo"],
         sec_user_agent="QuantPulse Tests tests@example.com",
         log_level="WARNING",
+        model_sync_wait_seconds=600,  # deterministic: tests never get "still training" unless they ask
     )
     base.update(overrides)
     return Settings(**base)

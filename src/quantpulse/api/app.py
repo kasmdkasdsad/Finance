@@ -16,6 +16,7 @@ from quantpulse.api.middleware import RequestContextMiddleware
 from quantpulse.api.routers import (
     forecast,
     fundamentals,
+    jobs,
     market,
     model,
     options,
@@ -109,6 +110,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         forecast,
         stocks,
         predictions,
+        jobs,
     )
     for module in modules:
         app.include_router(module.router, prefix=API_PREFIX, dependencies=auth)

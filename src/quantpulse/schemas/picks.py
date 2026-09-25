@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal
 
 from pydantic import AwareDatetime, EmailStr, Field
@@ -50,6 +51,10 @@ class StockPick(StrictModel):
     )
     low_21d: float | None = Field(default=None, description="5th percentile of the 21-day price forecast")
     high_21d: float | None = Field(default=None, description="95th percentile of the 21-day price forecast")
+    sector: str | None = Field(default=None, description="Industry (Fama-French 12, from the SEC SIC code)")
+    earnings_date: date | None = Field(default=None, description="Next expected earnings reaction day")
+    earnings_in_sessions: int | None = Field(default=None, description="Trading days until that reaction day")
+    typical_earnings_move: float | None = Field(default=None, description="RMS of past earnings-day returns")
 
 
 class DailyPicks(StrictModel):

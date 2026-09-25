@@ -16,18 +16,23 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 from quantpulse.core.errors import ProviderNoData, ProviderParseError
 from quantpulse.core.http import HttpClient
+from quantpulse.domain.sectors import FF12_NAMES, ff12
 from quantpulse.providers.base import WireModel, parse_wire
 from quantpulse.schemas.fundamentals import CompanyFundamentals, Filing, FinancialStatement
+from quantpulse.schemas.reference import CompanyEvents, CompanyProfile, FrameFact
 
 NAME = "sec_edgar"
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+SUBMISSIONS_FILE_URL = "https://data.sec.gov/submissions/{name}"
+FRAMES_URL = "https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json"
+EARNINGS_ITEM = "2.02"  # Form 8-K item 2.02: Results of Operations and Financial Condition
 ARCHIVE_URL = "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accn_nodash}/{doc}"
 ANNUAL_FORMS = frozenset({"10-K", "10-K/A", "10-KT", "20-F", "20-F/A", "40-F", "40-F/A"})
 FILING_FORMS = frozenset({"10-K", "10-Q", "8-K", "20-F", "40-F", "6-K", "10-K/A", "10-Q/A", "DEF 14A", "S-1"})
@@ -145,6 +150,69 @@ class _Filings(WireModel):
 class _Submissions(WireModel):
     name: str | None = None
     filings: _Filings
+
+
+class _EventArrays(WireModel):
+    """The parallel arrays of a submissions page (the ``recent`` block, or an older ``files`` page)."""
+
+    filingDate: list[date] = []
+    acceptanceDateTime: list[str] = []
+    form: list[str] = []
+    items: list[str] = []
+
+
+class _SubmissionFile(WireModel):
+    name: str
+    filingFrom: date
+    filingTo: date
+
+
+class _EventFilings(WireModel):
+    recent: _EventArrays
+    files: list[_SubmissionFile] = []
+
+
+class _EventSubmissions(WireModel):
+    name: str | None = None
+    sic: str | None = None
+    sicDescription: str | None = None
+    filings: _EventFilings
+
+
+class _FrameRow(WireModel):
+    accn: str
+    cik: int
+    start: date | None = None
+    end: date
+    val: float
+
+
+class _Frame(WireModel):
+    data: list[_FrameRow]
+
+
+def earnings_times(arrays: _EventArrays, since: date) -> list[datetime]:
+    """Acceptance times (UTC) of 8-K filings carrying item 2.02, on or after ``since``."""
+    out: set[datetime] = set()
+    for i, form in enumerate(arrays.form):
+        if form != "8-K" or i >= len(arrays.filingDate):
+            continue
+        items = arrays.items[i] if i < len(arrays.items) else ""
+        if EARNINGS_ITEM not in {x.strip() for x in items.split(",")}:
+            continue
+        filed = arrays.filingDate[i]
+        if filed < since:
+            continue
+        raw = arrays.acceptanceDateTime[i] if i < len(arrays.acceptanceDateTime) else ""
+        try:
+            accepted = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if accepted.tzinfo is None:
+                accepted = accepted.replace(tzinfo=UTC)
+        except ValueError:
+            # No timestamp: assume an after-close release (the most common timing).
+            accepted = datetime(filed.year, filed.month, filed.day, 20, 30, tzinfo=UTC)
+        out.add(accepted.astimezone(UTC))
+    return sorted(out)
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +424,49 @@ class SecEdgar:
         if key not in self._tickers:
             raise ProviderNoData(NAME, f"{symbol} is not an SEC-registered ticker")
         return self._tickers[key]
+
+    async def company_events(self, symbol: str, since: date) -> CompanyEvents:
+        """Profile (SIC → Fama-French sector) and earnings-release times since ``since``.
+
+        Large filers push older filings into extra ``files`` pages; those are read until ``since``."""
+        cik, title = await self.resolve_cik(symbol)
+        payload = await self._http.get_json(NAME, SUBMISSIONS_URL.format(cik=cik), headers=self._headers)
+        sub = parse_wire(NAME, _EventSubmissions, payload)
+        earnings = earnings_times(sub.filings.recent, since)
+        for page in sub.filings.files:
+            if page.filingTo < since:
+                continue
+            older = await self._http.get_json(
+                NAME, SUBMISSIONS_FILE_URL.format(name=page.name), headers=self._headers
+            )
+            earnings.extend(earnings_times(parse_wire(NAME, _EventArrays, older), since))
+        sector = ff12(sub.sic)
+        return CompanyEvents(
+            profile=CompanyProfile(
+                symbol=symbol,
+                cik=cik,
+                name=sub.name or title,
+                sic=sub.sic or None,
+                sic_description=sub.sicDescription or None,
+                sector=sector,
+                sector_label=FF12_NAMES[sector],
+            ),
+            earnings=sorted(set(earnings)),
+            earnings_since=since,
+        )
+
+    async def frame(self, taxonomy: str, tag: str, unit: str, period: str) -> list[FrameFact]:
+        """One XBRL concept for every filer in one period (e.g. ``CY2023`` or ``CY2023Q4I``)."""
+        payload = await self._http.get_json(
+            NAME,
+            FRAMES_URL.format(taxonomy=taxonomy, tag=tag, unit=unit, period=period),
+            headers=self._headers,
+            timeout=60.0,
+        )
+        rows = parse_wire(NAME, _Frame, payload).data
+        if not rows:
+            raise ProviderNoData(NAME, f"empty frame {tag} {period}")
+        return [FrameFact(cik=r.cik, start=r.start, end=r.end, value=r.val, accn=r.accn) for r in rows]
 
     async def fundamentals(self, symbol: str) -> CompanyFundamentals:
         cik, title = await self.resolve_cik(symbol)

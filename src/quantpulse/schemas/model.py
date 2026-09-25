@@ -57,8 +57,12 @@ class CalibrationBinOut(StrictModel):
 class ImportanceOut(StrictModel):
     feature: str
     description: str
-    coefficient: float
+    group: str = Field(description="price, earnings, sector or fundamental")
+    coefficient: float = Field(description="Average ridge weight across walk-forward refits")
     sign_consistency: float
+    tree_importance: float | None = Field(
+        default=None, description="Drop in the live tree model's fit when this feature is shuffled"
+    )
 
 
 class ICPoint(StrictModel):
@@ -78,6 +82,64 @@ class LiveScore(StrictModel):
         description="Calibrated probability of beating the benchmark over the horizon."
     )
     expected_excess_return: float
+    sector: str | None = None
+    sector_label: str | None = None
+
+
+class ModelCompareOut(StrictModel):
+    name: str
+    label: str
+    chosen: bool
+    mean_ic: float
+    t_stat: float | None
+    hit_rate: float | None
+    within_sector_ic: float | None
+    spread: float | None = Field(description="Top minus bottom quintile realised return")
+    annual_return: float | None
+    sharpe: float | None
+    refits: int
+
+
+class UniverseOut(StrictModel):
+    kind: str = Field(description="sp500, picks or custom")
+    label: str
+    point_in_time: bool = Field(description="Membership is applied as of each date (no survivorship bias)")
+    requested: int
+    with_prices: int
+    current_members: int | None = None
+    former_members: int | None = Field(
+        default=None, description="Stocks that left the index during the window and are still modelled"
+    )
+    missing: dict[str, str] = Field(
+        default_factory=dict, description="Symbols without usable prices (sample)"
+    )
+    missing_count: int = 0
+    membership_status: DataStatus | None = None
+    note: str
+
+
+class UniverseInfo(StrictModel):
+    setting: str = Field(description="QP_MODEL_UNIVERSE as configured")
+    kind: str = Field(description="What it resolves to now: sp500, picks or custom")
+    label: str
+    bulk_prices: bool = Field(description="A multi-symbol price vendor (Alpaca) is configured")
+    current_members: int
+    membership_status: DataStatus | None = None
+    membership_as_of: date | None = None
+    changes_logged: int | None = None
+    history_from: date | None = Field(default=None, description="Earliest index change in the membership log")
+
+
+class CoverageOut(StrictModel):
+    sectors: dict[str, int] = Field(description="Industry (Fama-French 12) -> number of stocks")
+    sector_neutral: bool
+    earnings_companies: int
+    earnings_status: DataStatus | None
+    fundamentals_companies: int
+    fundamentals_status: DataStatus | None
+    frames_available: int = 0
+    frames_requested: int = 0
+    features: list[str]
 
 
 class ModelReport(StrictModel):
@@ -102,6 +164,13 @@ class ModelReport(StrictModel):
     live: list[LiveScore]
     retrains: int
     lambdas: list[float]
+    model_type: str = "ridge"
+    model_label: str = "Ridge regression"
+    comparison: list[ModelCompareOut] = Field(default_factory=list)
+    within_sector: ICOut | None = None
+    tree_sizes: list[str] = Field(default_factory=list)
+    universe: UniverseOut | None = None
+    coverage: CoverageOut | None = None
     data_status: DataStatus
     warnings: list[str] = Field(default_factory=list)
     disclaimer: str = MODEL_DISCLAIMER

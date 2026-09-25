@@ -51,6 +51,22 @@ def render() -> None:
             + ("" if s["live_data_enabled"] else " — live data is disabled (QP_ENABLE_LIVE_DATA=false)")
             + "."
         )
+    st.subheader("Background jobs")
+    jobs = guarded(lambda: api().get("/jobs"), "jobs")
+    if jobs:
+        st.dataframe(
+            pd.DataFrame(jobs)[
+                ["id", "description", "status", "progress", "stage", "elapsed_seconds", "error"]
+            ],
+            hide_index=True,
+            column_config={
+                "progress": st.column_config.ProgressColumn(
+                    "progress", min_value=0.0, max_value=1.0, format="percent"
+                )
+            },
+        )
+    elif jobs is not None:
+        st.caption("No model runs or replays have been started since the API started.")
     a, b = st.columns(2)
     with a:
         st.subheader("Cache")

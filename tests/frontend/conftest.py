@@ -2,6 +2,7 @@ import socket
 import threading
 import time
 
+import httpx
 import pytest
 import uvicorn
 
@@ -37,6 +38,12 @@ def api_server(tmp_path_factory):
         if time.time() > deadline:
             raise RuntimeError("API server did not start")
         time.sleep(0.05)
-    yield f"http://127.0.0.1:{port}"
+    url = f"http://127.0.0.1:{port}"
+    # Train today's model and research once, so page tests exercise rendering rather than the background wait
+    # (the progress display for a model that is still training has its own test).
+    with httpx.Client(base_url=url, timeout=600) as client:
+        for path in ("/api/v1/model/report", "/api/v1/model/research"):
+            client.get(path, params={"wait": 600}).raise_for_status()
+    yield url
     server.should_exit = True
     thread.join(timeout=10)

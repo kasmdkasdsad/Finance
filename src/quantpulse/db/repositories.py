@@ -7,7 +7,7 @@ data gateway's archive fallback expects — or ``None`` when nothing is stored.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 
 from sqlalchemy import Table, delete, func, select
@@ -17,11 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from quantpulse.core.clock import utcnow
 from quantpulse.core.errors import NotFoundError
 from quantpulse.db.models import (
+    CompanyProfileRow,
     CompanyRow,
+    EarningsEventRow,
     EstimateSnapshotRow,
     FinancialStatementRow,
     FuelLogRow,
     FuelPriceRow,
+    FundamentalFactRow,
     HoldingRow,
     IngestionEventRow,
     MaintenanceRecordRow,
@@ -30,6 +33,7 @@ from quantpulse.db.models import (
     PredictionRow,
     PriceBarRow,
     QuoteSnapshotRow,
+    ReferenceBlobRow,
     SandboxAccountRow,
     SandboxEquityRow,
     SandboxJournalRow,
@@ -42,6 +46,7 @@ from quantpulse.db.models import (
     VehicleRow,
     YieldCurvePointRow,
 )
+from quantpulse.domain.sectors import FF12_NAMES
 from quantpulse.schemas.fundamentals import (
     AnalystEstimates,
     CompanyFundamentals,
@@ -50,6 +55,7 @@ from quantpulse.schemas.fundamentals import (
 )
 from quantpulse.schemas.market import Bar, PriceHistory, Quote
 from quantpulse.schemas.options import OptionChain, OptionContract, YieldCurve, YieldPoint
+from quantpulse.schemas.reference import CompanyEvents, CompanyProfile, FrameFact
 from quantpulse.schemas.sports import Game, PowerRating
 
 STATEMENT_FIELDS = [
@@ -139,6 +145,27 @@ async def load_bars(
     ]
     latest = max(rows, key=lambda r: r.ingested_at)
     return PriceHistory(symbol=symbol, interval=interval, bars=bars), rows[-1].ts, latest.provider
+
+
+BAR_COLUMNS = ("symbol", "ts", "open", "high", "low", "close", "volume", "provider", "ingested_at")
+_IN_CHUNK = 500  # SQLite limits the number of bound parameters per statement
+
+
+async def bar_frame(
+    session: AsyncSession, symbols: Sequence[str], interval: str, since: datetime
+) -> list[tuple[Any, ...]]:
+    """Stored bars for many symbols as plain tuples in :data:`BAR_COLUMNS` order (fast bulk read)."""
+    out: list[tuple[Any, ...]] = []
+    cols = [getattr(PriceBarRow, c) for c in BAR_COLUMNS]
+    for i in range(0, len(symbols), _IN_CHUNK):
+        chunk = list(symbols[i : i + _IN_CHUNK])
+        result = await session.execute(
+            select(*cols)
+            .where(PriceBarRow.symbol.in_(chunk), PriceBarRow.interval == interval, PriceBarRow.ts >= since)
+            .order_by(PriceBarRow.symbol, PriceBarRow.ts)
+        )
+        out.extend(tuple(r) for r in result.all())
+    return out
 
 
 async def insert_quote(session: AsyncSession, quote: Quote, provider: str) -> None:
@@ -852,8 +879,47 @@ async def insert_predictions(session: AsyncSession, rows: Sequence[Mapping[str, 
     return inserted
 
 
+async def insert_predictions_bulk(session: AsyncSession, rows: Sequence[Mapping[str, Any]]) -> int:
+    """Insert many predictions at once (backfills), keeping any row already stored for the same key.
+
+    Returns the number of rows actually inserted (``RETURNING`` reports only the rows written, which is
+    exact even while other sessions write concurrently)."""
+    if not rows:
+        return 0
+    table = cast(Table, PredictionRow.__table__)
+    stmt = (
+        sqlite_insert(table)
+        .on_conflict_do_nothing(index_elements=["symbol", "source", "horizon_days", "made_on"])
+        .returning(table.c.id)
+    )
+    inserted = 0
+    for i in range(0, len(rows), 2000):
+        result = await session.execute(stmt, [dict(r) for r in rows[i : i + 2000]])
+        inserted += len(result.all())
+    return inserted
+
+
+async def delete_backfill(session: AsyncSession, source: str | None = None) -> int:
+    query = delete(PredictionRow).where(PredictionRow.origin == "backfill")
+    if source is not None:
+        query = query.where(PredictionRow.source == source)
+    result = await session.execute(query)
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+
+async def prediction_counts(session: AsyncSession) -> dict[tuple[str, str, str], int]:
+    """(origin, source, status) -> rows."""
+    query = select(
+        PredictionRow.origin, PredictionRow.source, PredictionRow.status, func.count(PredictionRow.id)
+    ).group_by(PredictionRow.origin, PredictionRow.source, PredictionRow.status)
+    return {(o, src, st): int(n) for o, src, st, n in (await session.execute(query)).all()}
+
+
 async def predictions_logged_on(session: AsyncSession, made_on: date) -> int:
-    query = select(func.count(PredictionRow.id)).where(PredictionRow.made_on == made_on)
+    """Live predictions already logged for ``made_on`` (backfilled history does not count)."""
+    query = select(func.count(PredictionRow.id)).where(
+        PredictionRow.made_on == made_on, PredictionRow.origin == "live"
+    )
     return int((await session.execute(query)).scalar_one())
 
 
@@ -873,10 +939,13 @@ async def list_predictions(
     status: str | None = None,
     source: str | None = None,
     horizon: int | None = None,
+    origin: str | None = None,
     limit: int | None = 200,
 ) -> list[PredictionRow]:
     """Newest first."""
     query = select(PredictionRow)
+    if origin is not None:
+        query = query.where(PredictionRow.origin == origin)
     if symbol is not None:
         query = query.where(PredictionRow.symbol == symbol)
     if status is not None:
@@ -889,3 +958,131 @@ async def list_predictions(
     if limit is not None:
         query = query.limit(limit)
     return list((await session.execute(query)).scalars())
+
+
+# ----------------------------------------------------------------------------- reference data
+async def save_company_events(session: AsyncSession, events: CompanyEvents, provider: str) -> None:
+    p = events.profile
+    row = (
+        await session.execute(select(CompanyProfileRow).where(CompanyProfileRow.symbol == p.symbol))
+    ).scalar_one_or_none()
+    if row is None:
+        row = CompanyProfileRow(symbol=p.symbol)
+        session.add(row)
+    row.cik, row.name, row.sic, row.sic_description = p.cik, p.name[:200], p.sic, p.sic_description
+    row.sector, row.earnings_since, row.provider, row.updated_at = (
+        p.sector,
+        events.earnings_since,
+        provider,
+        utcnow(),
+    )
+    table = cast(Table, EarningsEventRow.__table__)
+    if events.earnings:
+        stmt = sqlite_insert(table).on_conflict_do_nothing(index_elements=["symbol", "announced_at"])
+        await session.execute(stmt, [{"symbol": p.symbol, "announced_at": at} for at in events.earnings])
+    await session.flush()
+
+
+async def load_company_events(
+    session: AsyncSession, symbol: str
+) -> tuple[CompanyEvents, datetime, str] | None:
+    row = (
+        await session.execute(select(CompanyProfileRow).where(CompanyProfileRow.symbol == symbol))
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    times = (
+        await session.execute(
+            select(EarningsEventRow.announced_at)
+            .where(
+                EarningsEventRow.symbol == symbol,
+                EarningsEventRow.announced_at >= datetime.combine(row.earnings_since, time.min, UTC),
+            )
+            .order_by(EarningsEventRow.announced_at)
+        )
+    ).scalars()
+    events = CompanyEvents(
+        profile=CompanyProfile(
+            symbol=row.symbol,
+            cik=row.cik,
+            name=row.name,
+            sic=row.sic,
+            sic_description=row.sic_description,
+            sector=row.sector,
+            sector_label=FF12_NAMES.get(row.sector, row.sector),
+        ),
+        earnings=list(times),
+        earnings_since=row.earnings_since,
+    )
+    return events, row.updated_at, row.provider
+
+
+async def put_blob(session: AsyncSession, key: str, payload: Mapping[str, Any], provider: str) -> None:
+    row = await session.get(ReferenceBlobRow, key)
+    if row is None:
+        session.add(ReferenceBlobRow(key=key, payload=dict(payload), provider=provider, fetched_at=utcnow()))
+    else:
+        row.payload, row.provider, row.fetched_at = dict(payload), provider, utcnow()
+    await session.flush()
+
+
+async def get_blob(session: AsyncSession, key: str) -> tuple[dict[str, Any], datetime, str] | None:
+    row = await session.get(ReferenceBlobRow, key)
+    return None if row is None else (row.payload, row.fetched_at, row.provider)
+
+
+async def save_frame(session: AsyncSession, tag: str, frame: str, facts: Sequence[FrameFact]) -> int:
+    if not facts:
+        return 0
+    table = cast(Table, FundamentalFactRow.__table__)
+    rows = [
+        {
+            "tag": tag,
+            "frame": frame,
+            "cik": f.cik,
+            "period_start": f.start,
+            "period_end": f.end,
+            "value": f.value,
+            "accn": f.accn[:25],
+        }
+        for f in facts
+    ]
+    stmt = sqlite_insert(table)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["tag", "frame", "cik"],
+        set_={c: stmt.excluded[c] for c in ("period_start", "period_end", "value", "accn")},
+    )
+    await session.execute(stmt, rows)
+    return len(rows)
+
+
+async def load_frame(session: AsyncSession, tag: str, frame: str) -> list[FrameFact]:
+    rows = (
+        await session.execute(
+            select(FundamentalFactRow).where(FundamentalFactRow.tag == tag, FundamentalFactRow.frame == frame)
+        )
+    ).scalars()
+    return [
+        FrameFact(cik=r.cik, start=r.period_start, end=r.period_end, value=r.value, accn=r.accn) for r in rows
+    ]
+
+
+async def facts_for(
+    session: AsyncSession, ciks: Iterable[int], tags: Iterable[str]
+) -> list[FundamentalFactRow]:
+    ids, names = list(ciks), list(tags)
+    if not ids or not names:
+        return []
+    out: list[FundamentalFactRow] = []
+    for i in range(0, len(ids), 500):  # keep SQL parameter lists small
+        chunk = ids[i : i + 500]
+        out.extend(
+            (
+                await session.execute(
+                    select(FundamentalFactRow).where(
+                        FundamentalFactRow.cik.in_(chunk), FundamentalFactRow.tag.in_(names)
+                    )
+                )
+            ).scalars()
+        )
+    return out

@@ -16,6 +16,9 @@ from datetime import UTC, date, datetime, time, timedelta
 import numpy as np
 
 from quantpulse.core.market_calendar import NEW_YORK, is_trading_day, previous_trading_day
+from quantpulse.domain.earnings import reaction_day
+from quantpulse.domain.fundamental_factors import CompanyFacts, Fact
+from quantpulse.domain.sectors import FF12_NAMES
 from quantpulse.quant.black_scholes import bsm_price
 from quantpulse.quant.vol_surface import years_to_expiry
 from quantpulse.schemas.fundamentals import (
@@ -26,6 +29,7 @@ from quantpulse.schemas.fundamentals import (
 )
 from quantpulse.schemas.market import Bar, Interval, PriceHistory, Quote
 from quantpulse.schemas.options import OptionChain, OptionContract, YieldCurve, YieldPoint
+from quantpulse.schemas.reference import CompanyEvents, CompanyProfile
 from quantpulse.schemas.sports import Game, League, MarketLine, TeamRef, TeamScore
 from quantpulse.schemas.vehicle import FuelPrice, FuelPriceSeries
 
@@ -91,7 +95,57 @@ def _log_return(symbol: str, day: date) -> float:
     _, beta, idio = symbol_profile(symbol)
     market = _market_shock(day) * MARKET_VOL / math.sqrt(252) + MARKET_DRIFT / 252
     own = _normal("ret", symbol, day) * idio / math.sqrt(252)
+    if day in _earnings_reaction_days(symbol):
+        own += _normal("earn-jump", symbol, day) * 0.03 * (0.6 + _unit("earn-size", symbol))
     return beta * market + own
+
+
+# ----------------------------------------------------------------------------- company events
+EARNINGS_EPOCH = date(2000, 1, 3)
+EARNINGS_CYCLE_DAYS = 91
+
+
+def _synthetic_earnings(symbol: str) -> list[datetime]:
+    """Quarterly releases (±3 days of jitter) from 2000 to 2035, before the open or after the close."""
+    if symbol in ("SPY", "QQQ", "^GSPC"):
+        return []
+    before_open = _unit("earn-time", symbol) < 0.4
+    first = EARNINGS_EPOCH + timedelta(days=int(_unit("earn-offset", symbol) * EARNINGS_CYCLE_DAYS))
+    out: list[datetime] = []
+    k = 0
+    while True:
+        d = first + timedelta(days=k * EARNINGS_CYCLE_DAYS + round(_normal("earn-jitter", symbol, k) * 2))
+        if d.year > 2035:
+            return out
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        at = time(7, 0) if before_open else time(16, 30)
+        out.append(datetime.combine(d, at, NEW_YORK).astimezone(UTC))
+        k += 1
+
+
+@functools.lru_cache(maxsize=4096)
+def _earnings_reaction_days(symbol: str) -> frozenset[date]:
+    return frozenset(reaction_day(e) for e in _synthetic_earnings(symbol))
+
+
+def synthetic_company_events(symbol: str, since: date, now: datetime) -> CompanyEvents:
+    codes = [c for c in FF12_NAMES if c != "Other"]
+    sector = codes[int(_unit("sector", symbol) * len(codes))]
+    events = [e for e in _synthetic_earnings(symbol) if e.date() >= since and e <= now]
+    return CompanyEvents(
+        profile=CompanyProfile(
+            symbol=symbol,
+            cik=f"{_seed('cik', symbol) % 10**9:010d}",
+            name=f"{symbol} (synthetic)",
+            sic=None,
+            sic_description=None,
+            sector=sector,
+            sector_label=FF12_NAMES[sector],
+        ),
+        earnings=events,
+        earnings_since=since,
+    )
 
 
 def _closes(symbol: str, days: list[date]) -> np.ndarray:
@@ -391,6 +445,36 @@ def synthetic_fundamentals(symbol: str, today: date) -> CompanyFundamentals:
         shares_as_of=today,
         statements=statements,
     )
+
+
+def synthetic_company_facts(symbol: str, now: datetime) -> CompanyFacts:
+    """Six years of annual facts with year-to-year noise, and a public float marked to synthetic prices."""
+    base_rev = 5e9 + 395e9 * _unit("rev", symbol)
+    growth = 0.03 + 0.12 * _unit("growth", symbol)
+    margin = 0.12 + 0.18 * _unit("margin", symbol)
+    anchor_price, _, _ = symbol_profile(symbol)
+    shares = base_rev * (3 + 5 * _unit("ps", symbol)) / anchor_price
+    last = now.astimezone(NEW_YORK).year - 1
+    first_price_day = _anchor_day(now) - timedelta(days=CACHED_SPAN_DAYS)
+    days, closes = daily_closes(symbol, first_price_day, now)
+    facts = CompanyFacts()
+    for y in range(last - 5, last + 1):
+        noise = [_normal(tag, symbol, y) for tag in ("rev", "margin", "cash", "assets")]
+        rev = base_rev / (1 + growth) ** (last - y) * math.exp(0.05 * noise[0])
+        m = max(0.02, margin + 0.03 * noise[1])
+        ni = rev * m * 0.8
+        start, end = date(y, 1, 1), date(y, 12, 31)
+        facts.net_income.append(Fact(end, ni, start))
+        facts.operating_cash_flow.append(Fact(end, ni * (1.1 + 0.2 * noise[2]), start))
+        facts.capex.append(Fact(end, rev * 0.05, start))
+        facts.gross_profit.append(Fact(end, rev * (m + 0.25), start))
+        facts.assets.append(Fact(end, rev * 1.3 * math.exp(0.05 * noise[3])))
+        facts.equity.append(Fact(end, rev * 0.6))
+        float_day = date(y, 6, 30)
+        if days and days[0] <= float_day:
+            i = bisect.bisect_right(days, float_day) - 1
+            facts.public_float.append(Fact(float_day, shares * float(closes[i]) * 0.9))
+    return facts
 
 
 def synthetic_estimates(symbol: str, today: date) -> AnalystEstimates:

@@ -88,6 +88,15 @@ async def test_forecast_endpoint_offline(api):
     v = f["volatility"]
     assert v["method"] == "garch" and 0 < v["persistence"] < 1 and v["current_vol_annual"] > 0
     assert f["drift"]["beta"] is not None and f["drift"]["risk_free"] > 0
+    # Earnings: past reactions are left out of the GARCH fit and the next one is simulated as a jump.
+    e = f["earnings"]
+    assert v["earnings_days_excluded"] >= 8 and e["events_used"] == v["earnings_days_excluded"]
+    assert e["source"] == "estimated" and e["next_date"] > "2026-09-25" and e["typical_move"] > 0
+    assert e["in_horizons"] == [h for h in (5, 21, 63) if h >= e["sessions_ahead"]]
+    assert e["modelled"] is bool(e["in_horizons"])
+    # Options (synthetic here, like the prices) are blended into the volatility.
+    assert v["iv_weight"] == 0.5 and v["variance_premium"] == 1.1 and v["implied_vol_annual_21d"] > 0
+    assert v["garch_vol_annual_21d"] > 0 and v["blended_vol_annual_21d"] > 0
     cal = f["calibration"]
     assert cal["horizon"] == 21 and cal["n"] > 50 and 0 <= cal["coverage_90"] <= 1
     assert sum(cal["pit_histogram"]) == pytest.approx(1.0)
@@ -112,12 +121,32 @@ async def test_model_report_research_and_regime_offline(api):
     assert probs == sorted(probs)  # monotone by construction
     bt = m["backtest"]
     assert len(bt["dates"]) == len(bt["strategy"]) == bt["periods"] + 1 and bt["strategy"][0] == 1.0
-    assert len(m["importance"]) == 18 and m["retrains"] >= 3
+    groups = {i["group"] for i in m["importance"]}
+    assert len(m["importance"]) == 28 and groups == {"price", "earnings", "sector", "fundamental"}
+    assert m["retrains"] >= 3 and len(m["lambdas"]) >= 3 and m["tree_sizes"]
+    assert any(i["tree_importance"] is not None for i in m["importance"])
+    # every model type is scored on the same out-of-sample dates; the configured one is live
+    assert m["model_type"] == "ensemble" and m["model_label"] == "Ensemble (ridge + trees)"
+    names = [c["name"] for c in m["comparison"]]
+    assert names == ["ensemble", "ridge", "gbm", "baseline"]
+    assert [c["chosen"] for c in m["comparison"]] == [True, False, False, False]
+    assert m["comparison"][0]["mean_ic"] == pytest.approx(m["oos"]["mean_ic"])
+    assert m["comparison"][3]["mean_ic"] == pytest.approx(m["baseline"]["mean_ic"])
+    assert m["within_sector"] is not None and m["within_sector"]["n_dates"] == m["oos"]["n_dates"]
+    # a fixed ticker list is flagged for survivorship bias; industries, earnings and fundamentals are used
+    u = m["universe"]
+    assert u["kind"] == "custom" and u["point_in_time"] is False and u["with_prices"] == len(UNIVERSE)
+    assert any("survivorship" in w for w in m["warnings"])
+    cov = m["coverage"]
+    assert cov["sector_neutral"] is True and sum(cov["sectors"].values()) == len(UNIVERSE)
+    assert cov["earnings_companies"] == len(UNIVERSE) and cov["fundamentals_companies"] == len(UNIVERSE)
+    assert all(x["sector"] and x["sector_label"] for x in m["live"])
     again = (await api.get("/api/v1/model/report", params={"symbols": ",".join(UNIVERSE)})).json()["data"]
-    assert again["computed_at"] == m["computed_at"]  # served from today's cache
+    assert again["computed_at"] == m["computed_at"]  # served from the cached run for this close
 
     res = (await api.get("/api/v1/model/research", params={"symbols": ",".join(UNIVERSE)})).json()["data"]
-    assert res["horizons"] == [1, 5, 21, 63] and len(res["signals"]) == 18
+    assert res["horizons"] == [1, 5, 21, 63] and len(res["signals"]) == 28
+    assert {"earn_reaction", "sector_mom_6_1", "book_to_market"} <= {x["feature"] for x in res["signals"]}
     assert res["correlation"]["mom_3m"]["mom_3m"] == pytest.approx(1.0)
 
     reg = (await api.get("/api/v1/market/regime")).json()["data"]
@@ -238,3 +267,89 @@ async def test_ledger_scheduler(tmp_path, mock_net):
         assert await api.container.poller.run_predictions() == "idle"
     async for api in _client(make_settings(tmp_path / "off", predictions_enabled=False), clock):
         assert await api.container.predictions.run_scheduled() == "disabled"
+
+
+async def test_backfill_replays_history_point_in_time(tmp_path, mock_net):
+    clock = FakeClock(FRIDAY_AFTER_CLOSE)
+    async for api in feed_client(tmp_path, clock):
+        r = await api.post("/api/v1/predictions/backfill", params={"wait": 600})
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert out["forecast_rows"] > 12 * 100 and out["model_rows"] > 12 * 20, out
+        assert out["last_date"] < "2026-09-25" and not out["skipped"]
+
+        rows = (
+            await api.get(
+                "/api/v1/predictions", params={"origin": "backfill", "source": "forecast", "limit": 2000}
+            )
+        ).json()
+        assert rows and all(p["origin"] == "backfill" and p["status"] == "resolved" for p in rows)
+        assert all(p["model_version"].startswith("garch-t-fhs/2") for p in rows)
+        feed = ConsistentFeed(clock)
+        for p in rows[:: max(1, len(rows) // 25)]:
+            h = await feed.history(p["symbol"], "1d", clock.now() - timedelta(days=2000), clock.now())
+            closes = {b.timestamp.astimezone(UTC).date().isoformat(): b.close for b in h.bars}
+            assert p["reference_price"] == pytest.approx(closes[p["made_on"]])
+            assert p["realized_price"] == pytest.approx(
+                closes[p["target_date"]]
+            )  # graded against what happened
+            assert p["in_90"] == (p["q05"] <= p["realized_price"] <= p["q95"])
+            assert p["q05"] < p["q25"] < p["q50"] < p["q75"] < p["q95"]
+
+        model_rows = (
+            await api.get(
+                "/api/v1/predictions", params={"origin": "backfill", "source": "model", "limit": 2000}
+            )
+        ).json()
+        by_day: dict[str, list] = {}
+        for p in model_rows:
+            by_day.setdefault(p["made_on"], []).append(p)
+        for day in by_day.values():
+            assert sorted(p["rank"] for p in day) == list(range(1, len(day) + 1))
+            probs = [p["prob_outperform"] for p in sorted(day, key=lambda p: p["rank"])]
+            assert probs == sorted(
+                probs, reverse=True
+            )  # monotone calibration, better rank -> higher probability
+
+        live = (await api.get("/api/v1/predictions/scorecard", params={"origin": "live"})).json()
+        replay = (await api.get("/api/v1/predictions/scorecard", params={"origin": "backfill"})).json()
+        assert live["sources"] == [] and replay["origin"] == "backfill"
+        by = {(s["source"], s["horizon_days"]): s for s in replay["sources"]}
+        assert by[("forecast", 21)]["resolved"] > 100 and 0.5 < by[("forecast", 21)]["coverage_90"] <= 1
+        assert by[("model", 21)]["resolved"] == out["model_rows"] and by[("model", 21)]["brier"] is not None
+
+        # Idempotent, replaceable, and it never blocks today's live logging.
+        again = (await api.post("/api/v1/predictions/backfill", params={"wait": 600})).json()
+        assert again["forecast_rows"] == 0 and again["model_rows"] == 0
+        redo = (
+            await api.post(
+                "/api/v1/predictions/backfill", params={"wait": 600, "replace": True, "sources": "model"}
+            )
+        ).json()
+        assert redo["replaced"] == out["model_rows"] and redo["model_rows"] == out["model_rows"]
+        logged = (await api.post("/api/v1/predictions/log")).json()
+        assert logged["logged"] == len(UNIVERSE) * 3, logged
+        status = (await api.get("/api/v1/predictions/backfill")).json()
+        assert status["job"]["status"] == "done" and status["result"]["model_rows"] == out["model_rows"]
+        counts = {(c["origin"], c["source"]): c for c in status["counts"]}
+        assert counts[("backfill", "forecast")]["resolved"] == out["forecast_rows"]
+        assert counts[("live", "forecast")]["open"] == len(UNIVERSE) * 2
+
+
+async def test_model_warmup_backs_off_after_a_failed_run(api, clock, monkeypatch):
+    from quantpulse.core.errors import DomainError
+
+    model = api.container.model
+
+    async def broken(*args, **kwargs):
+        raise DomainError("not enough history")
+
+    monkeypatch.setattr(model, "_compute", broken)
+    assert await model.warm() == "started"
+    job = model.model_job()
+    with pytest.raises(DomainError):
+        await api.container.jobs.wait(job, 10)
+    assert job.status == "failed" and job.error == "not enough history"
+    assert (await model.warm()).startswith("last run failed")  # no restart loop every five minutes
+    clock.advance(31 * 60)
+    assert await model.warm() == "started"

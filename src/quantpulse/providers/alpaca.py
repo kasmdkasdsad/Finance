@@ -37,6 +37,8 @@ TIMEFRAME: dict[str, str] = {
     "1mo": "1Month",
 }
 MAX_PAGES = 10
+BATCH_SYMBOLS = 50  # symbols per multi-symbol bars request (a page holds at most 10,000 bars)
+BATCH_MAX_PAGES = 200
 
 
 class _Trade(WireModel):
@@ -71,6 +73,11 @@ class _StockSnapshot(WireModel):
 
 class _BarsResponse(WireModel):
     bars: list[_Bar] | None = None
+    next_page_token: str | None = None
+
+
+class _MultiBarsResponse(WireModel):
+    bars: dict[str, list[_Bar] | None] | None = None
     next_page_token: str | None = None
 
 
@@ -173,6 +180,46 @@ class Alpaca:
             params["page_token"] = page.next_page_token
         require(bool(bars), NAME, f"no bars for {symbol}")
         return PriceHistory(symbol=symbol, interval=interval, bars=bars)
+
+    async def histories(
+        self, symbols: Sequence[str], interval: Interval, start: datetime, end: datetime
+    ) -> dict[str, PriceHistory]:
+        """Bars for many symbols through the multi-symbol endpoint (one paginated request per batch of
+        ``BATCH_SYMBOLS``). Symbols the feed does not know are simply absent from the result."""
+        out: dict[str, PriceHistory] = {}
+        for i in range(0, len(symbols), BATCH_SYMBOLS):
+            chunk = list(symbols[i : i + BATCH_SYMBOLS])
+            ours = {vendor_symbol(s): s for s in chunk}
+            params: dict[str, object] = {
+                "symbols": ",".join(ours),
+                "timeframe": TIMEFRAME[interval],
+                "start": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                "end": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                "limit": 10000,
+                "adjustment": "all",
+                "feed": self._stock_feed,
+                "sort": "asc",
+            }
+            collected: dict[str, list[Bar]] = {}
+            for _ in range(BATCH_MAX_PAGES):
+                payload = await self._http.get_json(
+                    NAME, f"{self._base}/v2/stocks/bars", params=params, headers=self._headers()
+                )
+                page = parse_wire(NAME, _MultiBarsResponse, payload)
+                for vendor, rows in (page.bars or {}).items():
+                    symbol = ours.get(vendor.upper(), vendor.upper())
+                    bucket = collected.setdefault(symbol, [])
+                    for b in rows or []:
+                        bar = Bar.sanitized(b.t, b.o, b.h, b.l, b.c, b.v)
+                        if bar is not None:
+                            bucket.append(bar)
+                if not page.next_page_token:
+                    break
+                params["page_token"] = page.next_page_token
+            for symbol, bars in collected.items():
+                if bars:
+                    out[symbol] = PriceHistory(symbol=symbol, interval=interval, bars=bars)
+        return out
 
     async def option_chain(
         self, symbol: str, expirations: Sequence[date] | None, max_expirations: int = 8

@@ -23,6 +23,7 @@ from quantpulse.core.circuit_breaker import CircuitBreaker
 from quantpulse.core.clock import Clock, SystemClock
 from quantpulse.core.errors import (
     ProviderError,
+    ProviderNoData,
     ProviderNotConfigured,
     ProviderRateLimited,
 )
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 FALLBACK_MEMO_SECONDS = 30.0
+NO_DATA_PREFIX = "no data: "
 
 
 @dataclass(slots=True)
@@ -52,6 +54,15 @@ class Resolved(Generic[T]):
     @property
     def status(self) -> DataStatus:
         return self.provenance.status
+
+
+@dataclass(slots=True)
+class LiveCall(Generic[T]):
+    """Outcome of :meth:`DataGateway.try_live`: the value, or why there is none."""
+
+    value: T | None
+    attempt: ProviderAttempt
+    no_data: bool = False  # the provider answered but had nothing for this request
 
 
 @dataclass(slots=True)
@@ -316,6 +327,26 @@ class DataGateway:
         )
         return Resolved(value, prov)
 
+    async def try_live(self, source: Source[T]) -> LiveCall[T]:
+        """One guarded live call outside the keyed cache (bulk loaders that do their own caching).
+
+        The call goes through the provider's circuit breaker and health tracking like any other."""
+        if not self.live_enabled:
+            return LiveCall(
+                None,
+                ProviderAttempt(
+                    provider=source.name, ok=False, error="live data disabled (QP_ENABLE_LIVE_DATA=false)"
+                ),
+            )
+        attempts: list[ProviderAttempt] = []
+        result = await self._try_source(source, attempts)
+        attempt = attempts[-1]
+        return LiveCall(
+            None if result is None else result[0],
+            attempt,
+            no_data=result is None and attempt.error is not None and attempt.error.startswith(NO_DATA_PREFIX),
+        )
+
     async def _try_source(self, source: Source[T], attempts: list[ProviderAttempt]) -> tuple[T, float] | None:
         if not source.configured:
             attempts.append(
@@ -336,6 +367,19 @@ class DataGateway:
             value = await source.fetch()
         except ProviderNotConfigured as exc:
             attempts.append(ProviderAttempt(provider=source.name, ok=False, error=exc.message))
+            return None
+        except ProviderNoData as exc:
+            latency = (time.perf_counter() - started) * 1000
+            breaker.record_success()  # the provider answered; it just has nothing for this request
+            health.record(True, latency, self._clock.now())
+            attempts.append(
+                ProviderAttempt(
+                    provider=source.name,
+                    ok=False,
+                    error=f"{NO_DATA_PREFIX}{exc.message}",
+                    latency_ms=round(latency, 1),
+                )
+            )
             return None
         except ProviderRateLimited as exc:
             latency = (time.perf_counter() - started) * 1000

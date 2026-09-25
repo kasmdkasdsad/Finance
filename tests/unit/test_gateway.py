@@ -177,3 +177,33 @@ async def test_fallback_is_memoised_briefly_but_never_blocks_recovery():
     await gw.resolve("other", bad, synth, ttl=300)
     await gw.resolve("other", bad, synth, ttl=300)
     assert len(generated) == 2
+
+
+async def test_no_data_answers_do_not_open_the_breaker():
+    from quantpulse.core.errors import ProviderNoData
+
+    gw, _ = make_gateway(failure_threshold=2)
+    for symbol in ("DEAD1", "DEAD2", "DEAD3"):
+        r = await gw.resolve(
+            f"k:{symbol}", [Source("p1", fail(ProviderNoData("p1", "no bars")))], lambda: "s", ttl=10
+        )
+        assert r.status is DataStatus.SYNTHETIC
+    assert gw.breaker("p1").allow()  # "this ticker does not exist" is an answer, not an outage
+    live = await gw.resolve("k:AAPL", [Source("p1", ok("v"))], lambda: "s", ttl=10)
+    assert live.status is DataStatus.LIVE
+
+
+async def test_try_live_is_guarded_and_reports_no_data():
+    from quantpulse.core.errors import ProviderNoData
+
+    gw, _ = make_gateway(failure_threshold=1)
+    good = await gw.try_live(Source("bulk", ok({"AAPL": 1})))
+    assert good.value == {"AAPL": 1} and good.attempt.ok and not good.no_data
+    empty = await gw.try_live(Source("bulk", fail(ProviderNoData("bulk", "nothing"))))
+    assert empty.value is None and empty.no_data and gw.breaker("bulk").allow()
+    broken = await gw.try_live(Source("bulk", fail(ProviderHTTPError("bulk", 500, "boom"))))
+    assert broken.value is None and not broken.no_data and "HTTP 500" in broken.attempt.error
+    skipped = await gw.try_live(Source("bulk", ok({})))
+    assert skipped.value is None and "circuit open" in skipped.attempt.error
+    off, _ = make_gateway(live_enabled=False)
+    assert (await off.try_live(Source("bulk", ok(1)))).attempt.error.startswith("live data disabled")

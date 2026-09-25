@@ -149,8 +149,9 @@ def _horizon_table(report: dict[str, Any]) -> None:
         },
     )
     st.caption(
-        "Model ranges come from a GARCH volatility model with bootstrapped historical shocks and a CAPM drift. "
-        "Options columns are risk-neutral (they include the price of insurance), from the expiry nearest each horizon."
+        "Model ranges come from a GARCH volatility model with bootstrapped historical shocks (blended with options-"
+        "implied volatility when available), the next earnings jump and a CAPM drift. Options columns are "
+        "risk-neutral (they include the price of insurance), from the expiry nearest each horizon."
     )
 
 
@@ -198,6 +199,61 @@ def _calibration(symbol: str) -> None:
         f"{cal['start']} → {cal['end']}; forecasts every 5 days overlap, so this is about {cal['effective_n']:.0f} "
         "independent tests. A flat histogram means the ranges were honest; a U shape means they were too narrow."
     )
+
+
+def _earnings(symbol: str, fc: dict[str, Any]) -> None:
+    st.subheader("Earnings")
+    e = fc.get("earnings")
+    res = guarded(lambda: api().get(f"/stocks/{symbol}/earnings"), "earnings history")
+    if not e and not res:
+        st.caption("No earnings history is available for this ticker.")
+        return
+    k = st.columns(4)
+    if e and e["next_date"]:
+        when = f"{e['next_date']}" + (f" (in {e['sessions_ahead']} sessions)" if e["sessions_ahead"] else "")
+        k[0].metric("Next reaction day", when, e["source"], delta_color="off", delta_arrow="off")
+    else:
+        k[0].metric("Next reaction day", "—")
+    k[1].metric(
+        "Typical earnings move",
+        pct(e["typical_move"] if e else None, 1),
+        help="Root-mean-square of past earnings-day returns",
+    )
+    k[2].metric("Past releases used", e["events_used"] if e else 0)
+    k[3].metric(
+        "In the forecast",
+        "jump simulated" if e and e["modelled"] else "not in horizon" if e else "—",
+        help="Earnings days are left out of the volatility model and added back as jumps on the day they are due",
+    )
+    if res and res["data"]["reactions"]:
+        rx = pd.DataFrame(res["data"]["reactions"])
+        fig = go.Figure()
+        fig.add_trace(
+            go.Bar(
+                x=rx["reaction_date"],
+                y=rx["stock_return"] * 100,
+                name="Stock",
+                marker={"color": charts.series(0), "cornerradius": 3},
+                hovertemplate="%{x}: %{y:+.1f}%<extra>stock</extra>",
+            )
+        )
+        if rx["abnormal_return"].notna().any():
+            fig.add_trace(
+                go.Bar(
+                    x=rx["reaction_date"],
+                    y=rx["abnormal_return"] * 100,
+                    name="vs market",
+                    marker={"color": charts.series(1), "cornerradius": 3},
+                    hovertemplate="%{x}: %{y:+.1f}%<extra>vs market</extra>",
+                )
+            )
+        charts.reference_line(fig, 0.0)
+        charts.base_layout(fig, "Price reaction on each earnings day", height=300)
+        fig.update_yaxes(title="Return (%)", ticksuffix="%")
+        charts.show(fig, key="stock_earnings")
+        st.caption(
+            "Release times come from SEC 8-K filings (item 2.02); a release after the close is priced the next day."
+        )
 
 
 def render() -> None:
@@ -292,9 +348,30 @@ def render() -> None:
             f"Realised 1-month volatility: close-to-close {pct(rv['close_to_close_21d'], 0)} · "
             f"Parkinson {pct(rv['parkinson_21d'], 0)} · Garman-Klass {pct(rv['garman_klass_21d'], 0)}"
         )
+        if v.get("iv_weight"):
+            k = st.columns(3)
+            k[0].metric(
+                "GARCH, 1 month", pct(v["garch_vol_annual_21d"], 0), help="Ex-earnings historical model"
+            )
+            k[1].metric(
+                "Options, 1 month",
+                pct(v["implied_vol_annual_21d"], 0),
+                help="At-the-money implied volatility near 21 sessions (includes any earnings in the option's life)",
+            )
+            k[2].metric(
+                "Used by the forecast",
+                pct(v["blended_vol_annual_21d"], 0),
+                help=f"{v['iv_weight']:.0%} options (ex earnings, divided by a {v['variance_premium']:.2f} variance "
+                "risk premium) + the rest GARCH",
+            )
     with right:
         st.subheader("Stock model")
         if model:
+            if model.get("sector_label"):
+                industry = model["sector_label"]
+                if model.get("industry_rank"):
+                    industry += f" · {model['industry_rank']} of {model['industry_size']} in its industry"
+                st.caption(f"{model.get('model_label') or 'Model'} · industry: {industry}")
             k = st.columns(3)
             k[0].metric("Rank", f"{model['rank']} / {model['universe_size']}")
             k[1].metric("Model rating", f"{model['rating']}/10")
@@ -308,6 +385,8 @@ def render() -> None:
             )
         else:
             st.info("The stock model was not included or could not score this ticker.")
+
+    _earnings(symbol, fc)
 
     st.subheader("Technicals")
     table = _technicals_table(tech)

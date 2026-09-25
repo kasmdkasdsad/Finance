@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 import streamlit as st
 
-from frontend.api_client import ApiClient, ApiError
+from frontend.api_client import ApiClient, ApiError, Pending
 
 T = TypeVar("T")
 
@@ -85,10 +86,41 @@ def composite_badges(meta: dict[str, Any]) -> None:
             status_badge(prov, label=name)
 
 
+def job_progress(job: dict[str, Any]) -> None:
+    """Live progress for a background job; the page reruns itself when the job finishes."""
+
+    @st.fragment(run_every=2)
+    def poll() -> None:
+        current = job
+        with contextlib.suppress(ApiError):  # a restarted API forgets jobs: keep showing the last state
+            current = api().get(f"/jobs/{job['id']}")
+        if current["status"] == "done":
+            st.rerun()
+        elif current["status"] == "failed":
+            st.error(f"{current['description']} failed: {current.get('error')}", icon=":material/error:")
+            return
+        st.progress(
+            float(current["progress"]),
+            text=f"{current['description']} · {current['progress']:.0%} · {current['stage']} "
+            f"({current['elapsed_seconds']:.0f}s)",
+        )
+
+    st.info(
+        "This runs in the background: the first run for a large universe downloads years of prices and SEC data, "
+        "later ones take about a minute. The page updates by itself when it is ready.",
+        icon=":material/hourglass_top:",
+    )
+    poll()
+
+
 def guarded(fn: Callable[[], T], what: str = "request") -> T | None:
-    """Run an API call and turn failures into an inline, actionable error (never a stack trace)."""
+    """Run an API call and turn failures into an inline, actionable error (never a stack trace).
+    A request the API is still computing (202) shows the job's live progress instead."""
     try:
         return fn()
+    except Pending as pending:
+        job_progress(pending.job)
+        return None
     except ApiError as exc:
         if exc.status == 0:
             st.error(

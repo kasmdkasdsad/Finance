@@ -427,6 +427,7 @@ class PredictionRow(Base):
     rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model_version: Mapped[str] = mapped_column(String(40))
     data_status: Mapped[str] = mapped_column(String(10))
+    origin: Mapped[str] = mapped_column(String(10), default="live", server_default="live")
     status: Mapped[str] = mapped_column(String(10), default="open")
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     realized_price: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -437,3 +438,59 @@ class PredictionRow(Base):
     outcome_outperform: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     in_50: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     in_90: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class CompanyProfileRow(Base):
+    """SEC registrant profile (SIC and Fama-French sector) plus the scan window of its earnings events."""
+
+    __tablename__ = "company_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), unique=True)
+    cik: Mapped[str] = mapped_column(String(10))
+    name: Mapped[str] = mapped_column(String(200))
+    sic: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    sic_description: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    sector: Mapped[str] = mapped_column(String(8))
+    earnings_since: Mapped[date] = mapped_column(Date)
+    provider: Mapped[str] = mapped_column(String(32))
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class EarningsEventRow(Base):
+    __tablename__ = "earnings_events"
+    __table_args__ = (UniqueConstraint("symbol", "announced_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    announced_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class ReferenceBlobRow(Base):
+    """Small reference datasets stored whole (e.g. the S&P 500 constituents and change log)."""
+
+    __tablename__ = "reference_blobs"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    provider: Mapped[str] = mapped_column(String(32))
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class FundamentalFactRow(Base):
+    """One XBRL value from an SEC frame: (tag, calendar frame, company) → value for the period."""
+
+    __tablename__ = "fundamental_facts"
+    __table_args__ = (
+        UniqueConstraint("tag", "frame", "cik"),
+        Index("ix_fundamental_facts_cik_tag", "cik", "tag"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tag: Mapped[str] = mapped_column(String(96))
+    frame: Mapped[str] = mapped_column(String(12))
+    cik: Mapped[int] = mapped_column(Integer)
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date] = mapped_column(Date)
+    value: Mapped[float] = mapped_column(Float)
+    accn: Mapped[str] = mapped_column(String(25))

@@ -8,9 +8,11 @@ from typing import Literal
 from pydantic import AwareDatetime, Field
 
 from quantpulse.schemas.common import DataStatus, StrictModel
+from quantpulse.schemas.jobs import JobOut
 
 PredictionSource = Literal["forecast", "model"]
 PredictionStatus = Literal["open", "resolved", "void"]
+PredictionOrigin = Literal["live", "backfill"]
 
 
 class PredictionOut(StrictModel):
@@ -34,6 +36,7 @@ class PredictionOut(StrictModel):
     rank: int | None
     model_version: str
     data_status: DataStatus
+    origin: PredictionOrigin = "live"
     status: PredictionStatus
     resolved_at: AwareDatetime | None
     realized_price: float | None
@@ -77,6 +80,7 @@ class SourceScore(StrictModel):
 class Scorecard(StrictModel):
     computed_at: AwareDatetime
     symbol: str | None
+    origin: Literal["live", "backfill", "all"] = "all"
     sources: list[SourceScore]
     recent: list[PredictionOut]
     note: str = (
@@ -97,3 +101,30 @@ class ResolveResult(StrictModel):
     resolved: int
     voided: int
     pending: int
+
+
+class BackfillOut(StrictModel):
+    forecast_rows: int = Field(description="Backfilled forecast predictions inserted (already graded)")
+    model_rows: int = Field(description="Backfilled model rankings inserted (already graded)")
+    replaced: int = Field(description="Earlier backfilled rows removed first")
+    first_date: date | None
+    last_date: date | None
+    skipped: dict[str, str] = Field(default_factory=dict)
+
+
+class LedgerCounts(StrictModel):
+    origin: PredictionOrigin
+    source: PredictionSource
+    open: int
+    resolved: int
+    void: int
+
+
+class BackfillStatus(StrictModel):
+    job: JobOut | None
+    result: BackfillOut | None
+    counts: list[LedgerCounts]
+    note: str = (
+        "Backfilled predictions replay history point-in-time (each uses only data available on its date) and "
+        "are kept apart from the live record. They use today's risk-free rate and dividend yield and no options."
+    )

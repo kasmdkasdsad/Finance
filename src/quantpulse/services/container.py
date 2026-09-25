@@ -14,6 +14,7 @@ from quantpulse.core.cache import TTLCache
 from quantpulse.core.clock import Clock, SystemClock
 from quantpulse.core.gateway import DataGateway
 from quantpulse.core.http import HttpClient
+from quantpulse.core.jobs import JobRegistry
 from quantpulse.core.market_calendar import next_open, session_at
 from quantpulse.core.rate_limit import TokenBucket
 from quantpulse.db import migrate
@@ -26,8 +27,11 @@ from quantpulse.providers.fueleconomy import FuelEconomyGov
 from quantpulse.providers.odds_api import OddsAPI
 from quantpulse.providers.polygon import Polygon
 from quantpulse.providers.sec_edgar import SecEdgar
+from quantpulse.providers.sp500 import SP500Wikipedia
 from quantpulse.providers.treasury import Treasury
 from quantpulse.providers.yahoo import YahooFinance
+from quantpulse.services.backfill import BackfillService
+from quantpulse.services.facts import FactsService
 from quantpulse.services.forecast import ForecastService
 from quantpulse.services.fundamentals import FundamentalsService
 from quantpulse.services.market import MarketService
@@ -38,6 +42,7 @@ from quantpulse.services.picks import PicksService
 from quantpulse.services.portfolio import PortfolioService
 from quantpulse.services.predictions import PredictionService
 from quantpulse.services.rates import RatesService
+from quantpulse.services.reference import ReferenceService
 from quantpulse.services.sandbox import SandboxService
 from quantpulse.services.sports import SportsService
 from quantpulse.services.stocks import StockReportService
@@ -68,6 +73,7 @@ def build_http(
         "fueleconomy_gov": (2.0, 4, 2),
         "espn": (8.0, 16, 4),
         "odds_api": (1.0, 2, 1),
+        "wikipedia": (1.0, 2, 1),
     }
     return HttpClient(
         timeout=settings.http_timeout_seconds,
@@ -102,6 +108,7 @@ class Container:
         # Rate limiting is about real elapsed time, so limiters always use the system clock.
         self.http = http or build_http(settings, SystemClock(), transport)
         self.db = Database(settings.database_url)
+        self.jobs = JobRegistry(self.clock)
 
         # providers
         self.yahoo = YahooFinance(self.http)
@@ -116,6 +123,7 @@ class Container:
         )
         self.treasury = Treasury(self.http)
         self.sec = SecEdgar(self.http, settings.sec_user_agent)
+        self.wikipedia = SP500Wikipedia(self.http, settings.sec_user_agent)
         self.fmp = FinancialModelingPrep(self.http, _secret(settings.fmp_api_key))
         self.eia = EIA(self.http, _secret(settings.eia_api_key))
         self.fueleconomy = FuelEconomyGov(self.http)
@@ -143,16 +151,26 @@ class Container:
         self.sports = SportsService(settings, self.gateway, self.db, self.clock, self.espn, self.odds)
         self.picks = PicksService(settings, self.clock, self.market)
         self.sandbox = SandboxService(settings, self.db, self.clock, self.market, self.rates)
-        self.model = ModelService(settings, self.clock, self.cache, self.market, self.rates)
+        self.reference = ReferenceService(
+            settings, self.gateway, self.db, self.clock, self.market, self.sec, self.wikipedia, self.fmp
+        )
+        self.facts = FactsService(settings, self.db, self.clock, self.sec)
+        self.model = ModelService(
+            settings, self.clock, self.cache, self.market, self.rates, self.reference, self.facts, self.jobs
+        )
         self.forecast = ForecastService(
             settings, self.clock, self.cache, self.market, self.rates, self.options
         )
         self.forecast.model = self.model
+        self.forecast.reference = self.reference
         self.sandbox.model = self.model
         self.picks.model = self.model
         self.picks.forecast = self.forecast
         self.predictions = PredictionService(
             settings, self.db, self.clock, self.market, self.forecast, self.model
+        )
+        self.backfill = BackfillService(
+            settings, self.db, self.clock, self.market, self.rates, self.forecast, self.model, self.jobs
         )
         self.stocks = StockReportService(
             settings, self.clock, self.market, self.forecast, self.model, self.valuation, self.predictions
@@ -172,6 +190,7 @@ class Container:
 
     async def shutdown(self) -> None:
         await self.poller.stop()
+        await self.jobs.shutdown()
         await self.http.aclose()
         await self.db.dispose()
 

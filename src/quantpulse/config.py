@@ -124,6 +124,16 @@ class Settings(BaseSettings):
     ttl_season_results: float = 1800.0
     ttl_odds: float = 900.0
     ttl_model: float = Field(default=21600.0, gt=0, description="How long a stock-model run is reused.")
+    ttl_reference: float = Field(
+        default=604800.0,
+        gt=0,
+        description="S&P membership, SEC profiles and earnings dates are refreshed weekly.",
+    )
+    ttl_fundamentals_frames: float = Field(
+        default=604800.0,
+        gt=0,
+        description="How long SEC XBRL frames (cross-company fundamentals) are reused.",
+    )
     stale_grace_seconds: float = Field(
         default=86400.0, ge=0, description="How long an expired cache entry may still be served as STALE."
     )
@@ -178,6 +188,47 @@ class Settings(BaseSettings):
         default="16:05", description="HH:MM, America/New_York: when every account is marked to market."
     )
 
+    # --- Stock model -----------------------------------------------------------------------------
+    model_universe: str = Field(
+        default="auto",
+        description=(
+            "'sp500' (every stock that was in the S&P 500 during the window, point-in-time), 'picks' "
+            "(QP_PICKS_UNIVERSE), a comma-separated list of tickers, or 'auto': the S&P 500 when a "
+            "bulk price source (Alpaca) is configured, otherwise the picks list."
+        ),
+    )
+    model_type: Literal["ensemble", "ridge", "gbm"] = Field(
+        default="ensemble", description="Which walk-forward model produces the live rankings."
+    )
+    model_sector_neutral: bool = Field(
+        default=True, description="Compare each stock with its industry peers (sector-neutral features)."
+    )
+    model_sync_wait_seconds: float = Field(
+        default=25.0,
+        ge=0,
+        description="How long a request waits for a model run before it continues in the background.",
+    )
+    model_warmup: bool = Field(
+        default=True, description="Let the poller keep today's model run warm in the background."
+    )
+
+    # --- Forecasts ---------------------------------------------------------------------------------
+    forecast_iv_weight: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="Weight of options-implied volatility in forecast volatility (0 = GARCH only).",
+    )
+    forecast_variance_premium: float = Field(
+        default=1.1,
+        ge=1,
+        le=2,
+        description="Implied variance is divided by this before blending (options usually overprice risk).",
+    )
+    forecast_earnings_jumps: bool = Field(
+        default=True, description="Add earnings-day jumps (from past reactions) to price forecasts."
+    )
+
     # --- Prediction ledger ------------------------------------------------------------------------
     predictions_enabled: bool = Field(
         default=True, description="Log forecasts and model predictions after each close and grade them later."
@@ -198,6 +249,19 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_csv(cls, value: object) -> object:
         return _split_csv(value)
+
+    @field_validator("model_universe")
+    @classmethod
+    def _validate_universe(cls, value: str) -> str:
+        v = value.strip()
+        if v.lower() in ("auto", "sp500", "picks"):
+            return v.lower()
+        symbols = [s.strip().upper() for s in v.split(",") if s.strip()]
+        if len(symbols) < 3:
+            raise ValueError(
+                "model_universe must be auto, sp500, picks or at least 3 comma-separated tickers"
+            )
+        return ",".join(dict.fromkeys(symbols))
 
     @field_validator("watchlist", "picks_universe")
     @classmethod

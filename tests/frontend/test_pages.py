@@ -150,6 +150,8 @@ def test_prediction_pages_interactions(api_server):
     assert_clean(at)
     assert any(m.label == "P(higher in 1 month)" for m in at.metric)
     assert len(at.get("plotly_chart")) >= 1 and any("SYNTHETIC" in w.value for w in at.warning)
+    assert any(m.label == "Typical earnings move" for m in at.metric)  # the earnings section
+    assert any(m.label == "Used by the forecast" for m in at.metric)  # GARCH + options blend
     next(b for b in at.button if b.label == "Test the forecaster on this stock's history").click().run()
     assert_clean(at)
     assert any(m.label == "Inside 90% range" for m in at.metric)
@@ -157,7 +159,14 @@ def test_prediction_pages_interactions(api_server):
     at = page("model_lab", api_server)
     at.run()
     assert_clean(at)
-    assert any(m.label == "Mean IC (model)" for m in at.metric) and len(at.get("plotly_chart")) == 5
+    labels = {m.label for m in at.metric}
+    assert {"Mean IC (model)", "IC within industries", "Former members modelled", "Fundamentals"} <= labels
+    # IC, backtest, buckets, calibration, linear weights, tree importance, stocks per industry
+    assert len(at.get("plotly_chart")) == 7
+    assert any("Ensemble" in str(df.value) for df in at.dataframe)  # the model comparison table
+    industries = at.multiselect(key="lab_industries")
+    industries.set_value(industries.options[:1]).run()
+    assert_clean(at)
     at.segmented_control(key="lab_view").set_value("Signal research").run()
     assert_clean(at)
     assert len(at.get("plotly_chart")) == 1
@@ -165,10 +174,32 @@ def test_prediction_pages_interactions(api_server):
     at = page("track_record", api_server)
     at.run()
     assert_clean(at)
-    assert any("No predictions logged yet" in i.value for i in at.info)
+    assert any("No predictions in this record yet" in i.value for i in at.info)
+    next(b for b in at.button if b.label == "Run the replay").click().run()
+    assert_clean(at)
+    at.segmented_control(key="track_origin").set_value("Historical replay").run()
+    assert_clean(at)
 
     at = page("picks", api_server)
     at.run()
     at.segmented_control(key="picks_method").set_value("model").run()
     assert_clean(at)
     assert any("Ranked by the stock model" in c.value for c in at.caption)
+
+
+def test_training_progress_is_shown_while_a_job_runs(api_server):
+    at = AppTest.from_string(
+        f"""
+import streamlit as st
+st.session_state.setdefault("api_url", {api_server!r})
+from frontend.components import job_progress
+job_progress({{"id": "model-999", "kind": "model", "description": "Stock model (sp500)", "status": "running",
+    "progress": 0.42, "stage": "downloading prices (120/600)", "elapsed_seconds": 12.0}})
+""",
+        default_timeout=60,
+    )
+    at.run()
+    assert not at.exception
+    bars = at.get("progress")
+    assert bars and "downloading prices" in bars[0].proto.text and bars[0].proto.value == 42
+    assert any("runs in the background" in i.value for i in at.info)

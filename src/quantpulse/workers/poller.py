@@ -10,7 +10,9 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
 * the paper-trading sandbox — auto-trading agents rebalance once per trading day after
   ``sandbox_trade_time`` and every account is marked to market after ``sandbox_mark_time``;
 * the prediction ledger — forecasts and model predictions are logged after ``predictions_log_time`` on
-  trading days and graded when their target date's close is in.
+  trading days and graded when their target date's close is in;
+* the stock model — the run for the latest close is started in the background (every few minutes it
+  checks whether one is cached or running), so pages and the ledger rarely wait for it.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 PICKS_CHECK_SECONDS = 60.0
 SANDBOX_CHECK_SECONDS = 60.0
 PREDICTIONS_CHECK_SECONDS = 60.0
+MODEL_WARM_SECONDS = 300.0
 
 
 @dataclass
@@ -86,6 +89,7 @@ class Poller:
             asyncio.create_task(
                 self._loop("predictions", lambda: PREDICTIONS_CHECK_SECONDS, self.run_predictions)
             ),
+            asyncio.create_task(self._loop("model", lambda: MODEL_WARM_SECONDS, self.warm_model)),
         ]
         logger.info("poller started (%d jobs)", len(self._tasks))
 
@@ -178,6 +182,12 @@ class Poller:
 
     async def run_predictions(self) -> str:
         return await self._c.predictions.run_scheduled()
+
+    async def warm_model(self) -> str:
+        """Keep the latest close's model run computed, so pages and the ledger never wait for it."""
+        if not self._c.settings.model_warmup:
+            return "disabled"
+        return await self._c.model.warm()
 
     async def _already_sent(self, key: str) -> bool:
         async with self._c.db.session() as session:

@@ -120,6 +120,12 @@ def test_model_finds_a_planted_signal():
     coef = {name: c for name, (c, _) in res.importance.items()}
     assert max(coef, key=lambda k: abs(coef[k])) == "mom_12_1"
     assert res.importance["mom_12_1"][1] == 1.0  # same sign in every refit
+    assert max(res.tree_importance, key=res.tree_importance.get) == "mom_12_1"
+    assert set(res.models) == {"ridge", "gbm", "ensemble", "baseline"} and res.chosen == "ensemble"
+    for name in ("ridge", "gbm", "ensemble"):
+        assert res.models[name].oos.mean_ic > 0.25, name
+        assert res.models[name].oos.n_dates == res.oos.n_dates  # judged on the same dates
+    assert res.models["baseline"].oos.mean_ic < res.oos.mean_ic  # the rule only half-uses the signal
     probs = [b.probability for b in res.calibration.bins]
     assert probs == sorted(probs) and probs[-1] > 0.6 and probs[0] < 0.4
     assert res.buckets == sorted(res.buckets)  # higher predictions, higher realised returns
@@ -175,3 +181,79 @@ def test_end_to_end_on_a_price_panel():
     assert res.oos.n_dates > 50 and abs(res.oos.mean_ic) < 0.2
     assert len(res.backtest.strategy) == len(res.backtest.dates) == len(res.backtest.period_returns) + 1
     assert res.backtest.dates == sorted(res.backtest.dates)
+
+
+# ----------------------------------------------------------------------------- earnings & industries
+def test_earnings_reaction_is_known_after_the_window_and_carried():
+    panel = random_panel(n_days=300, n_sym=3)
+    close = panel.close.copy()
+    day = close.index[200]
+    close.iloc[200:, 0] *= 1.10  # a 10% jump on the reaction day
+    bench = panel.benchmark
+    f = feat.earnings_reaction(close, bench, {"S00": [day], "S01": []}, hold=63)
+    s = f["S00"]
+    assert s.iloc[:201].isna().all()  # only known after the close following the reaction day
+    assert s.iloc[201:264].notna().all() and s.iloc[264:].isna().all()
+    assert s.iloc[201] > 2  # a large positive surprise in volatility units
+    assert f["S01"].isna().all() and f["S02"].isna().all()
+
+
+def test_industry_features_and_neutralisation():
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    wide = pd.DataFrame(
+        {"A": [1.0, 2, 3], "B": [3.0, 4, 5], "C": [5.0, 6, 7], "D": [10.0, 10, 10], "E": [0.0, 0, np.nan]},
+        index=dates,
+    )
+    sectors = pd.Series({"A": "tech", "B": "tech", "C": "tech", "D": "banks", "E": "banks"})
+    n = feat.neutralise(wide, sectors)
+    assert n.loc[dates[0], ["A", "B", "C"]].tolist() == [-2.0, 0.0, 2.0]  # vs the tech average
+    assert n.loc[dates[0], "D"] == pytest.approx(10 - wide.loc[dates[0]].mean())  # banks too small: market
+    assert np.isnan(n.loc[dates[2], "E"])
+    raw = {"mom_6_1": wide, "ret_1m": wide * 2}
+    sf = feat.sector_features(raw, sectors)
+    assert sf["sector_mom_6_1"].loc[dates[1], "A"] == 4.0 and np.isnan(
+        sf["sector_mom_6_1"].loc[dates[1], "D"]
+    )
+    assert sf["sector_ret_1m"].loc[dates[1], "C"] == 8.0
+
+
+def test_membership_mask_and_delistings_shape_the_data():
+    panel = random_panel(n_days=500, n_sym=8)
+    close = panel.close.copy()
+    close.iloc[400:, 7] = np.nan  # S07 is delisted after day 399
+    panel = feat.Panel(
+        close=close, high=panel.high, low=panel.low, volume=panel.volume, benchmark=panel.benchmark
+    )
+    eligible = pd.DataFrame(True, index=close.index, columns=close.columns)
+    eligible.iloc[:300, 0] = False  # S00 joins the index on day 300
+    eligible.iloc[395:, 7] = False  # S07 leaves on day 395
+    sectors = pd.Series({s: "g1" if i < 4 else "g2" for i, s in enumerate(close.columns)})
+    data, raw = am.build_data(panel, 21, sectors=sectors, eligible=eligible)
+    rows = data.X.index
+    s00_dates = rows[rows.get_level_values("symbol") == "S00"].get_level_values("date")
+    assert s00_dates.min() >= close.index[300]
+    assert raw["mom_3m"]["S00"].iloc[:300].isna().all()
+    # S07's last eligible date still has a label: it is cashed out at its last price.
+    d = close.index[390]
+    assert data.fwd.loc[d, "S07"] == pytest.approx(close.iloc[399, 7] / close.iloc[390, 7] - 1)
+    assert np.isnan(data.fwd.loc[close.index[396], "S07"])
+    assert {"sector_mom_6_1", "sector_ret_1m"} <= set(data.feature_names)
+    assert data.X_np.dtype == np.float32
+
+
+def test_ensemble_combines_z_scores_and_is_scored_within_industries():
+    data = planted_data(n_dates=600, seed=4)
+    data.sectors = pd.Series({s: f"g{i % 3}" for i, s in enumerate(data.fwd.columns)})
+    cfg = am.ModelConfig(horizon=5, train_window=300, min_train=150, retrain_every=20, gbm_retrain_every=60)
+    res = am.run(data, cfg)
+    ens = res.models["ensemble"].predictions.unstack()
+    ridge = feat.cross_sectional_z(res.models["ridge"].predictions.unstack())
+    gbm = feat.cross_sectional_z(res.models["gbm"].predictions.unstack())
+    d = ens.index[10]
+    assert ens.loc[d].to_numpy() == pytest.approx(((ridge.loc[d] + gbm.loc[d]) / 2).to_numpy())
+    assert res.within_sector is not None and res.within_sector.mean_ic > 0.3  # the signal is stock-specific
+    assert res.final.kind == "ensemble" and res.final.ridge is not None and res.final.gbm is not None
+    labels = {f.label for _, f in res.fits["gbm"]}
+    assert labels <= {"7 leaves × 100 trees", "31 leaves × 60 trees"}
+    with pytest.raises(DomainError):
+        am.ModelConfig(model_type="forest")

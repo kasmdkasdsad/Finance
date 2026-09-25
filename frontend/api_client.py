@@ -28,6 +28,14 @@ class ApiError(Exception):
         return str(self.detail or self.error)
 
 
+class Pending(Exception):
+    """The API accepted the request and is computing it in the background (HTTP 202)."""
+
+    def __init__(self, job: dict[str, Any]) -> None:
+        super().__init__(f"{job.get('description')}: {job.get('progress', 0):.0%}")
+        self.job = job
+
+
 class ApiClient:
     def __init__(self, base_url: str | None = None, token: str | None = None, timeout: float = 90.0) -> None:
         self.base_url = (base_url or os.environ.get("QP_API_URL") or DEFAULT_URL).rstrip("/")
@@ -38,6 +46,8 @@ class ApiClient:
     def _handle(self, response: httpx.Response) -> Any:
         if response.status_code == 204:
             return None
+        if response.status_code == 202:
+            raise Pending(response.json())
         try:
             body = response.json()
         except ValueError:

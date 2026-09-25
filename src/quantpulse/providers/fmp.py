@@ -45,6 +45,11 @@ class _Target(WireModel):
     targetConsensus: float | None = None
 
 
+class _EarningsRow(WireModel):
+    date: date
+    eps_actual: float | None = Field(default=None, validation_alias=AliasChoices("epsActual", "eps"))
+
+
 class FinancialModelingPrep:
     name = NAME
 
@@ -95,3 +100,18 @@ class FinancialModelingPrep:
             analyst_count=max(counts) if counts else None,
             periods=periods,
         )
+
+    async def next_earnings(self, symbol: str, today: date) -> date | None:
+        """The next scheduled earnings date from FMP's per-symbol earnings calendar (``None`` if none)."""
+        if not self._key:
+            raise ProviderNotConfigured(NAME, "QP_FMP_API_KEY not set")
+        payload = await self._http.get_json(
+            NAME, f"{BASE}/earnings", params={"symbol": symbol, "limit": 12, "apikey": self._key}
+        )
+        require(isinstance(payload, list), NAME, f"unexpected earnings payload for {symbol}")
+        upcoming = sorted(
+            r.date
+            for r in (parse_wire(NAME, _EarningsRow, item) for item in payload)
+            if r.date >= today and r.eps_actual is None
+        )
+        return upcoming[0] if upcoming else None

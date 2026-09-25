@@ -475,3 +475,43 @@ async def test_alpaca_snapshots_bars_and_options(http):
 async def test_alpaca_requires_both_keys(http):
     with pytest.raises(ProviderNotConfigured):
         await Alpaca(http, "ID", None).quote("AAPL")
+
+
+@respx.mock
+async def test_alpaca_multi_symbol_bars_paginate_and_map_class_shares(http, monkeypatch):
+    from datetime import UTC, datetime
+
+    import quantpulse.providers.alpaca as alpaca_mod
+
+    pages = [
+        {
+            "bars": {
+                "AAPL": [{"t": "2026-09-23T04:00:00Z", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10}],
+                "BRK.B": [{"t": "2026-09-23T04:00:00Z", "o": 400, "h": 402, "l": 399, "c": 401, "v": 5}],
+            },
+            "next_page_token": "p2",
+        },
+        {
+            "bars": {"AAPL": [{"t": "2026-09-24T04:00:00Z", "o": 1.5, "h": 2, "l": 1, "c": 1.8, "v": 12}]},
+            "next_page_token": None,
+        },
+        {"bars": {"MSFT": [{"t": "2026-09-24T04:00:00Z", "o": 5, "h": 6, "l": 4, "c": 5.5, "v": 7}]}},
+    ]
+    seen = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json=pages[len(seen) - 1])
+
+    respx.get("https://data.alpaca.markets/v2/stocks/bars").mock(side_effect=handler)
+    monkeypatch.setattr(alpaca_mod, "BATCH_SYMBOLS", 3)  # force a second batch
+    out = await Alpaca(http, "ID", "SECRET").histories(
+        ["AAPL", "BRK-B", "DELISTED", "MSFT"],
+        "1d",
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 25, tzinfo=UTC),
+    )
+    assert seen[0]["symbols"] == "AAPL,BRK.B,DELISTED" and seen[0]["adjustment"] == "all"
+    assert seen[1]["page_token"] == "p2" and seen[2]["symbols"] == "MSFT"
+    assert sorted(out) == ["AAPL", "BRK-B", "MSFT"]  # unknown tickers are simply absent
+    assert [b.close for b in out["AAPL"].bars] == [1.5, 1.8] and out["BRK-B"].symbol == "BRK-B"

@@ -102,7 +102,7 @@ def factor_research(
         results.append(
             FeatureResearch(
                 name=name,
-                description=feat.FEATURES[name],
+                description=feat.all_features().get(name, name),
                 by_horizon=by_h,
                 quintile_returns=_quintiles(signal, forward[main_horizon]),
                 ic_series=feat.row_spearman(signal, forward[main_horizon]).dropna(),

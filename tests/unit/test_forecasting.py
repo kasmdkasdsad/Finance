@@ -1,3 +1,4 @@
+import itertools
 import math
 
 import numpy as np
@@ -188,3 +189,93 @@ def test_implied_move():
     assert expected_abs == pytest.approx(sd * 0.7978845608)
     with pytest.raises(DomainError):
         implied.implied_move(0.0, 1.0)
+
+
+# ----------------------------------------------------------------------------- earnings jumps
+def with_earnings(n=1500, size=0.08, seed=5):
+    """GARCH returns plus a large earnings reaction every 63 sessions (flags mark those returns)."""
+    rng = np.random.default_rng(seed)
+    r = simulate_garch(n, seed=seed)
+    flags = np.zeros(n, dtype=bool)
+    flags[40::63] = True
+    r[flags] = size * rng.choice([-1.0, 1.0], size=int(flags.sum())) * rng.uniform(0.7, 1.3, int(flags.sum()))
+    return r, flags
+
+
+def test_garch_neutralises_earnings_days():
+    r, flags = with_earnings()
+    naive = vol.fit_garch(r)
+    aware = vol.fit_garch(r, jumps=flags)
+    clean = vol.fit_garch(np.where(flags, 0.0, r))
+    assert aware.jump_days == int(flags.sum()) and aware.std_residuals.size == r.size - int(flags.sum())
+    # Jumps inflate the naive long-run volatility; the jump-aware fit sees the quiet-day volatility.
+    assert math.sqrt(naive.long_run_variance * 252) > 1.1 * math.sqrt(aware.long_run_variance * 252)
+    assert math.sqrt(aware.long_run_variance * 252) == pytest.approx(0.25, rel=0.2)
+    assert aware.alpha == pytest.approx(clean.alpha, abs=0.04)
+    ewma = vol.fit_ewma(r, jumps=flags)
+    assert ewma.std_residuals.size == r.size - int(flags.sum())
+    with pytest.raises(DomainError):
+        vol.fit_garch(r, jumps=flags[:-1])
+
+
+def test_simulated_jump_lands_on_its_day_with_the_right_size():
+    fit = vol.fit_garch(simulate_garch(1500, seed=2))
+    sample = np.array([0.06, -0.09, 0.07, -0.05, 0.08])
+    jumps = fc.JumpSpec(days=(3,), sample=sample)
+    base = fc.simulate_log_returns(fit, 10, 0.0, n_paths=20000, seed=1)
+    jumped = fc.simulate_log_returns(fit, 10, 0.0, n_paths=20000, seed=1, jumps=jumps)
+    day3 = np.unique(np.round(np.diff(jumped, axis=1)[:, 1], 10))  # the return on day 3
+    assert day3.size <= 2 * sample.size  # a pure jump: no diffusion that day
+    centre = (day3.max() + day3.min()) / 2  # the drift correction shifts every path equally
+    assert np.allclose(np.sort(np.unique(np.round(np.abs(day3 - centre), 8))), np.sort(np.abs(sample)))
+    extra = jumped[:, -1].var() - base[:, -1].var()
+    assert extra == pytest.approx(jumps.variance - fit.next_variance, rel=0.25)
+    assert abs(np.mean(np.exp(jumped[:, -1])) - 1) < 1e-9  # the drift correction still holds exactly
+    assert np.allclose(jumped[:, :2], base[:, :2])  # nothing changes before the release
+
+
+def test_variance_scale_blends_towards_ex_earnings_implied_variance():
+    fit = vol.fit_garch(simulate_garch(1500, seed=3))
+    garch21 = fit.variance_term_structure(21).sum()
+    iv = 0.40
+    plain = fc.variance_scale(fit, 21, [(21, iv)], weight=1.0, premium=1.0)
+    implied21 = iv**2 * 21 / 252
+    assert (plain * fit.variance_term_structure(21)).sum() == pytest.approx(
+        min(implied21, 4 * garch21), rel=1e-6
+    )
+    half = fc.variance_scale(fit, 21, [(21, iv)], weight=0.5, premium=1.1)
+    target = 0.5 * implied21 / 1.1 + 0.5 * garch21
+    assert (half * fit.variance_term_structure(21)).sum() == pytest.approx(target, rel=1e-6)
+    # An option that spans earnings prices the jump; the diffusive blend takes it out.
+    jumps = fc.JumpSpec(days=(10,), sample=np.array([0.08, -0.08, 0.08, -0.08]))
+    ex = fc.variance_scale(fit, 21, [(21, iv)], weight=1.0, premium=1.0, jumps=jumps)
+    assert (ex * fit.variance_term_structure(21)).sum() == pytest.approx(
+        max(implied21 - 0.0064, 0.25 * garch21), rel=1e-6
+    )
+    assert fc.variance_scale(fit, 21, [], weight=0.5) is None
+    assert fc.variance_scale(fit, 21, [(21, iv)], weight=0.0) is None
+    wild = fc.variance_scale(fit, 21, [(21, 5.0)], weight=1.0, premium=1.0)
+    assert wild.max() == 4.0  # multipliers are bounded
+
+
+def test_calibration_improves_when_earnings_are_modelled():
+    r, flags = with_earnings(n=2200, size=0.10, seed=8)
+    closes = prices_from(r)
+    naive = fc.evaluate_forecasts(closes, 21, step=5, min_obs=500, n_paths=1500)
+    aware = fc.evaluate_forecasts(closes, 21, step=5, min_obs=500, n_paths=1500, jump_flags=flags)
+    assert abs(aware.volatility_ratio() - 1) < abs(naive.volatility_ratio() - 1) + 0.02
+    assert abs(aware.coverage(90) - 0.9) <= abs(naive.coverage(90) - 0.9) + 0.02
+    assert 0.8 <= aware.coverage(90) <= 0.97
+    origins = [t for t, _ in fc.replay(closes, [5, 21], step=21, min_obs=500, n_paths=500, jump_flags=flags)]
+    assert origins[0] == 500 and all(b - a == 21 for a, b in itertools.pairwise(origins))
+
+
+def test_warm_started_refits_agree_with_cold_fits():
+    r = simulate_garch(2000, seed=9)
+    cold = vol.fit_garch(r[:1800])
+    warm = vol.fit_garch(r, warm=cold)
+    fresh = vol.fit_garch(r)
+    assert warm.log_likelihood == pytest.approx(fresh.log_likelihood, abs=0.5)
+    assert warm.alpha == pytest.approx(fresh.alpha, abs=0.01) and warm.beta == pytest.approx(
+        fresh.beta, abs=0.01
+    )

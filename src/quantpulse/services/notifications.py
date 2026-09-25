@@ -12,7 +12,7 @@ from email.utils import formatdate, make_msgid
 from quantpulse.config import Settings
 from quantpulse.core.errors import QuantPulseError
 from quantpulse.schemas.common import DataStatus
-from quantpulse.schemas.picks import DailyPicks
+from quantpulse.schemas.picks import DailyPicks, StockPick
 
 
 class NotificationError(QuantPulseError):
@@ -43,6 +43,12 @@ def _range(lo: float | None, hi: float | None) -> str:
     return "—" if lo is None or hi is None else f"{lo:,.2f}–{hi:,.2f}"
 
 
+def _earnings(p: StockPick) -> str:
+    if p.earnings_in_sessions is None:
+        return "—"
+    return f"in {p.earnings_in_sessions}d" if p.earnings_in_sessions <= 21 else str(p.earnings_date or "—")
+
+
 def render_picks_email(picks: DailyPicks) -> tuple[str, str, str]:
     """Return ``(subject, plain_text, html)`` for a picks digest."""
     synthetic = picks.data_status is DataStatus.SYNTHETIC
@@ -60,12 +66,14 @@ def render_picks_email(picks: DailyPicks) -> tuple[str, str, str]:
         lines += ["WARNING: live market data was unavailable; these numbers are SYNTHETIC and not real.", ""]
     beat = f"P(beat {picks.benchmark})"
     lines.append(
-        f"{'#':>2}  {'Symbol':<7} {'Rating':>6}  {'Price':>10} {'Day':>7}  {beat:>13}  {'1-month 90% range':>21}  Drivers"
+        f"{'#':>2}  {'Symbol':<7} {'Rating':>6}  {'Price':>10} {'Day':>7}  {beat:>13}  {'1-month 90% range':>21}  "
+        f"{'Earnings':>10}  Drivers"
     )
     for p in picks.picks:
         lines.append(
             f"{p.rank:>2}  {p.symbol:<7} {p.rating:>4}/10  {p.price:>10,.2f} {_pct(p.change_percent):>7}  "
-            f"{_prob(p.prob_outperform):>13}  {_range(p.low_21d, p.high_21d):>21}  {', '.join(p.drivers) or '—'}"
+            f"{_prob(p.prob_outperform):>13}  {_range(p.low_21d, p.high_21d):>21}  {_earnings(p):>10}  "
+            f"{', '.join(p.drivers) or '—'}"
         )
     lines.append("")
     lines += [f"Note: {n}" for n in picks.notes]
@@ -80,6 +88,7 @@ def render_picks_email(picks: DailyPicks) -> tuple[str, str, str]:
         f"<td style='text-align:right'>{_pct(p.change_percent)}</td>"
         f"<td style='text-align:right'>{_prob(p.prob_outperform)}</td>"
         f"<td style='text-align:right'>{_range(p.low_21d, p.high_21d)}</td>"
+        f"<td style='text-align:right'>{html.escape(_earnings(p))}</td>"
         f"<td style='text-align:right'>{_factor_pct(p.factors.momentum_12_1)}</td>"
         f"<td>{html.escape(', '.join(p.drivers) or '—')}</td><td>{p.data_status.value}</td></tr>"
         for p in picks.picks
@@ -95,7 +104,7 @@ def render_picks_email(picks: DailyPicks) -> tuple[str, str, str]:
 <p style="margin-top:0;color:#57606a">Data status: <b>{picks.data_status.value.upper()}</b> · screened {picks.screened} of {picks.universe_size} symbols</p>
 {banner}
 <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:14px" border="1" bordercolor="#d0d7de">
-<thead style="background:#f6f8fa"><tr><th>#</th><th>Symbol</th><th>Rating</th><th>Price</th><th>Day</th><th>P(beat {html.escape(picks.benchmark)}, 1 mo)</th><th>1-month 90% range</th><th>12-1 mom.</th><th>Drivers</th><th>Data</th></tr></thead>
+<thead style="background:#f6f8fa"><tr><th>#</th><th>Symbol</th><th>Rating</th><th>Price</th><th>Day</th><th>P(beat {html.escape(picks.benchmark)}, 1 mo)</th><th>1-month 90% range</th><th>Earnings</th><th>12-1 mom.</th><th>Drivers</th><th>Data</th></tr></thead>
 <tbody>{rows}</tbody></table>
 {"".join(f'<p style="font-size:13px;color:#57606a">{html.escape(n)}</p>' for n in picks.notes)}
 {f'<p style="font-size:13px"><b>Stock model:</b> {html.escape(picks.model_verdict)}</p>' if picks.model_verdict else ""}
