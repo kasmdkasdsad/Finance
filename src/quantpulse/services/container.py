@@ -20,6 +20,7 @@ from quantpulse.core.rate_limit import TokenBucket
 from quantpulse.db import migrate
 from quantpulse.db.session import Database
 from quantpulse.providers.alpaca import Alpaca
+from quantpulse.providers.alpaca_trading import AlpacaPaperBroker
 from quantpulse.providers.eia import EIA
 from quantpulse.providers.espn import ESPN
 from quantpulse.providers.fmp import FinancialModelingPrep
@@ -46,6 +47,8 @@ from quantpulse.services.reference import ReferenceService
 from quantpulse.services.sandbox import SandboxService
 from quantpulse.services.sports import SportsService
 from quantpulse.services.stocks import StockReportService
+from quantpulse.services.trading import TradingService
+from quantpulse.services.trading_data import TradingDataLoader
 from quantpulse.services.valuation import ValuationService
 from quantpulse.services.vehicle import VehicleService
 
@@ -93,6 +96,7 @@ class Container:
         clock: Clock | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         http: HttpClient | None = None,
+        broker: AlpacaPaperBroker | None = None,
     ) -> None:
         self.settings = settings
         self.clock = clock or SystemClock()
@@ -176,6 +180,20 @@ class Container:
             settings, self.clock, self.market, self.forecast, self.model, self.valuation, self.predictions
         )
         self.notifier = EmailNotifier(settings)
+        # Alpaca paper trading: the broker is always built with paper=True (see providers/alpaca_trading.py).
+        self.broker = broker or AlpacaPaperBroker(
+            _secret(settings.alpaca_api_key_id),
+            _secret(settings.alpaca_api_secret_key),
+            timeout=settings.http_timeout_seconds,
+        )
+        self.trading = TradingService(
+            settings,
+            self.db,
+            self.clock,
+            self.broker,
+            TradingDataLoader(settings, self.clock, self.market, self.model, self.options, self.reference),
+            self.jobs,
+        )
 
         from quantpulse.workers.poller import Poller  # local import avoids a cycle
 
@@ -217,6 +235,7 @@ class Container:
                 "fmp": s.has_credentials("fmp"),
                 "eia": s.has_credentials("eia"),
                 "odds_api": s.has_credentials("odds_api"),
+                "alpaca_paper_trading": self.broker.configured(),
                 "smtp": s.smtp_configured,
                 "sec_user_agent_customised": "set QP_SEC_USER_AGENT" not in s.sec_user_agent,
             },
@@ -226,4 +245,11 @@ class Container:
             "rate_limiters": {n: b.snapshot() for n, b in self.http.limiters.items()},
             "odds_api_quota": {"remaining": self.odds.requests_remaining, "used": self.odds.requests_used},
             "poller": self.poller.snapshot(),
+            "trading": {
+                "paper_only": True,
+                "endpoint": self.broker.base_url,
+                "enabled": s.alpaca_trading_enabled,
+                "dry_run": s.trading_dry_run,
+                "can_submit": s.trading_can_submit,
+            },
         }

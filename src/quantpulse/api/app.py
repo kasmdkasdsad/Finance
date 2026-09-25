@@ -28,6 +28,7 @@ from quantpulse.api.routers import (
     sports,
     stocks,
     system,
+    trading,
     vehicle,
 )
 from quantpulse.config import Settings, get_settings
@@ -37,6 +38,9 @@ from quantpulse.services.container import Container
 API_PREFIX = "/api/v1"
 DESCRIPTION = """
 **QuantPulse Terminal** — quantitative finance & executive intelligence API.
+
+**Alpaca paper trading** (`/trading`) runs against Alpaca's *paper* API only — simulated money. There is no
+live-money path.
 
 Every data payload carries provenance (`meta.status` = `live` | `cached` | `stale` | `synthetic`) so clients
 can always tell real-time data from fallbacks. Analytics that combine several feeds return a composite
@@ -80,6 +84,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
                 "model",
                 "stocks",
                 "predictions",
+                "trading",
             )
         ],
     )
@@ -110,6 +115,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         forecast,
         stocks,
         predictions,
+        trading,
         jobs,
     )
     for module in modules:

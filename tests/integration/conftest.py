@@ -41,12 +41,15 @@ def mock_net():
         yield router
 
 
-async def _client(settings: Settings, clock: FakeClock):
-    container = Container(settings, clock=clock, http=HttpClient(timeout=5, max_retries=0, backoff_base=0.0))
+async def _client(settings: Settings, clock: FakeClock, client_host: str = "127.0.0.1", **container_kwargs):
+    container = Container(
+        settings, clock=clock, http=HttpClient(timeout=5, max_retries=0, backoff_base=0.0), **container_kwargs
+    )
     app = create_app(container=container)
+    transport = httpx.ASGITransport(app=app, client=(client_host, 50123))
     async with (
         app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client,
+        httpx.AsyncClient(transport=transport, base_url="http://testserver") as client,
     ):
         client.container = container  # type: ignore[attr-defined]
         yield client

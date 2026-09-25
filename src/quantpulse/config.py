@@ -6,14 +6,45 @@ Secrets are held as :class:`pydantic.SecretStr` so they never leak into logs or 
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 MarketProviderName = Literal["polygon", "alpaca", "yahoo"]
+TradingOrderType = Literal["marketable_limit", "limit", "market"]
+
+# Liquid ETFs the paper-trading strategy ranks next to the stock universe (index, size and sector exposure).
+DEFAULT_TRADING_ETFS = ("SPY", "QQQ", "IWM", "DIA", "XLF", "XLK", "XLE", "SMH")
+# Weights of the opportunity-score components (each component is a cross-sectional z-score).
+DEFAULT_SIGNAL_WEIGHTS: dict[str, float] = {
+    "momentum": 0.25,
+    "trend": 0.20,
+    "volume": 0.10,
+    "volatility": 0.10,
+    "fundamental": 0.10,
+    "model": 0.20,
+    "regime": 0.05,
+}
+# Share of the maximum long exposure the strategy may deploy in each market regime.
+DEFAULT_REGIME_EXPOSURE: dict[str, float] = {
+    "bullish": 1.0,
+    "neutral": 0.8,
+    "high_volatility": 0.6,
+    "bearish": 0.4,
+    "risk_off": 0.15,
+}
+# Extra opportunity score (z) a new position needs in each regime ("stop opening weak positions").
+DEFAULT_REGIME_ENTRY_PENALTY: dict[str, float] = {
+    "bullish": 0.0,
+    "neutral": 0.15,
+    "high_volatility": 0.3,
+    "bearish": 0.5,
+    "risk_off": 1.0,
+}
 
 DEFAULT_SEC_USER_AGENT = "QuantPulse Terminal (set QP_SEC_USER_AGENT to 'Your Name your@email.com')"
 DEFAULT_PICKS_UNIVERSE = (
@@ -56,6 +87,33 @@ def _split_csv(value: object) -> object:
     return value
 
 
+def _parse_mapping(value: object) -> object:
+    """``{"a": 1}`` (JSON) or ``a=1,b=2`` from an environment variable; dicts pass through."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return {}
+    if text.startswith("{"):
+        return json.loads(text)
+    out: dict[str, str] = {}
+    for part in text.split(","):
+        key, sep, raw = part.partition("=")
+        if not sep:
+            raise ValueError(f"expected name=value pairs, got {part!r}")
+        out[key.strip()] = raw.strip()
+    return out
+
+
+def _unit_mapping(value: dict[str, float], allowed: tuple[str, ...], what: str) -> dict[str, float]:
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise ValueError(f"unknown {what} {unknown}; expected some of {list(allowed)}")
+    if any(v < 0 for v in value.values()):
+        raise ValueError(f"{what} values must be non-negative")
+    return {k: float(value[k]) for k in allowed if k in value}
+
+
 class Settings(BaseSettings):
     """Runtime configuration for the API, providers, caching, and domain defaults."""
 
@@ -65,6 +123,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         validate_default=True,
+        populate_by_name=True,
     )
 
     # --- Runtime -----------------------------------------------------------------------------
@@ -87,8 +146,18 @@ class Settings(BaseSettings):
     # --- Provider credentials (all optional) ---------------------------------------------------
     polygon_api_key: SecretStr | None = None
     polygon_base_url: str = "https://api.polygon.io"
-    alpaca_api_key_id: SecretStr | None = None
-    alpaca_api_secret_key: SecretStr | None = None
+    # Alpaca paper keys serve both market data and the paper-trading API. The SDK's own variable names
+    # (APCA_API_KEY_ID / APCA_API_SECRET_KEY) are accepted too.
+    alpaca_api_key_id: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("QP_ALPACA_API_KEY_ID", "APCA_API_KEY_ID", "ALPACA_API_KEY_ID"),
+    )
+    alpaca_api_secret_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "QP_ALPACA_API_SECRET_KEY", "APCA_API_SECRET_KEY", "ALPACA_API_SECRET_KEY"
+        ),
+    )
     alpaca_data_url: str = "https://data.alpaca.markets"
     alpaca_stock_feed: Literal["iex", "sip", "delayed_sip"] = "iex"
     alpaca_options_feed: Literal["indicative", "opra"] = "indicative"
@@ -229,6 +298,142 @@ class Settings(BaseSettings):
         default=True, description="Add earnings-day jumps (from past reactions) to price forecasts."
     )
 
+    # --- Alpaca paper trading (Alpaca's real *paper* API: simulated money only) --------------------
+    # Nothing is ever sent to Alpaca unless QP_ALPACA_TRADING_ENABLED=true AND QP_TRADING_DRY_RUN=false.
+    # There is deliberately no setting that points QuantPulse at a live-money account.
+    alpaca_trading_enabled: bool = Field(
+        default=False,
+        description="Allow orders to be sent to the Alpaca paper account (also needs QP_TRADING_DRY_RUN=false).",
+    )
+    alpaca_paper: bool = Field(
+        default=True, description="Must stay true: QuantPulse only ever trades the Alpaca paper account."
+    )
+    trading_dry_run: bool = Field(
+        default=True, description="Compute signals, targets, trades and risk checks, but submit nothing."
+    )
+    trading_kill_switch: bool = Field(
+        default=False, description="Refuse every new order (the dashboard has a runtime kill switch too)."
+    )
+    trading_scheduler_enabled: bool = Field(
+        default=True,
+        description="Let the poller run strategy cycles during market hours (dry runs included).",
+    )
+    trading_time: str = Field(default="10:00", description="HH:MM New York: the first cycle of each day.")
+    trading_rebalance_interval_minutes: int = Field(default=30, ge=5, le=390)
+    trading_stop_minutes_before_close: int = Field(
+        default=15, ge=0, le=120, description="No scheduled cycle starts this close to the closing bell."
+    )
+    # universe
+    trading_universe: str = Field(
+        default="auto",
+        description=(
+            "'auto' (the stock model's universe — the S&P 500 with Alpaca data — plus QP_TRADING_ETFS, "
+            "narrowed to the most liquid names) or a comma-separated list of tickers."
+        ),
+    )
+    trading_universe_size: int = Field(default=120, ge=10, le=600)
+    trading_etfs: Annotated[list[str], NoDecode] = list(DEFAULT_TRADING_ETFS)
+    # position and portfolio limits
+    trading_max_position_pct: float = Field(default=0.30, gt=0, le=1)
+    trading_max_total_exposure_pct: float = Field(default=0.95, gt=0, le=1)
+    trading_max_order_notional: float = Field(default=15_000.0, gt=0)
+    trading_min_order_notional: float = Field(default=100.0, ge=1)
+    trading_max_positions: int = Field(default=8, ge=1, le=50)
+    trading_min_position_pct: float = Field(
+        default=0.03, ge=0, lt=1, description="Target weights below this are dropped (no tiny positions)."
+    )
+    trading_cash_buffer_pct: float = Field(default=0.02, ge=0, lt=1)
+    trading_max_daily_loss_pct: float = Field(default=0.04, gt=0, lt=1)
+    trading_daily_loss_action: Literal["halt", "flatten"] = Field(
+        default="halt",
+        description="When the daily loss limit is hit: 'halt' stops new positions; 'flatten' also sells everything.",
+    )
+    trading_max_position_loss_pct: float = Field(
+        default=0.08, gt=0, lt=1, description="Stop-loss: a position down this much is closed."
+    )
+    trading_take_profit_pct: float = Field(
+        default=0.25, gt=0, description="A position up this much has part of the gain locked in."
+    )
+    trading_take_profit_fraction: float = Field(default=0.5, gt=0, le=1)
+    trading_allow_shorts: bool = Field(
+        default=False, description="Must stay false: the strategy is long-only."
+    )
+    trading_require_live_data: bool = Field(
+        default=True, description="Refuse orders unless the quote is live (never synthetic, never stale)."
+    )
+    trading_max_quote_age_seconds: float = Field(default=600.0, gt=0)
+    # liquidity
+    trading_min_price: float = Field(default=5.0, ge=0)
+    trading_min_dollar_volume: float = Field(
+        default=25_000_000.0, ge=0, description="Minimum 20-day average daily dollar volume."
+    )
+    trading_max_spread_bps: float = Field(default=30.0, gt=0)
+    trading_max_adv_pct: float = Field(
+        default=0.01, gt=0, le=1, description="A position may not exceed this share of average dollar volume."
+    )
+    # execution
+    trading_order_type: TradingOrderType = "marketable_limit"
+    trading_limit_offset_bps: float = Field(
+        default=10.0,
+        ge=0,
+        le=500,
+        description="How far through the quote a marketable limit order is priced.",
+    )
+    trading_order_timeout_minutes: float = Field(
+        default=20.0, gt=0, description="Unfilled strategy orders older than this are canceled next cycle."
+    )
+    trading_fill_wait_seconds: float = Field(
+        default=15.0, ge=0, le=120, description="How long a cycle waits for sells to fill before buying."
+    )
+    # signal and turnover controls
+    trading_entry_threshold: float = Field(
+        default=0.75, description="Opportunity score (cross-sectional z) a new position needs."
+    )
+    trading_exit_threshold: float = Field(
+        default=0.0, description="A held position whose score falls below this is sold."
+    )
+    trading_incumbent_bonus: float = Field(
+        default=0.35, ge=0, description="Score head start for holdings when ranking (limits churn)."
+    )
+    trading_min_weight_change: float = Field(
+        default=0.02, ge=0, lt=1, description="Smallest target-weight change worth trading."
+    )
+    trading_cooldown_minutes: float = Field(
+        default=120.0,
+        ge=0,
+        description="No discretionary trade reversing a symbol's last trade (buy after sell, sell after buy) this soon.",
+    )
+    trading_max_cycle_turnover_pct: float = Field(
+        default=0.6, gt=0, le=2, description="Discretionary trading per cycle, as a share of equity."
+    )
+    trading_position_vol_budget: float = Field(
+        default=0.12, gt=0, le=1, description="Cap on weight × annual volatility for any one position."
+    )
+    trading_vol_floor: float = Field(
+        default=0.12, gt=0, le=1, description="Volatility assumed at least this high when sizing."
+    )
+    trading_earnings_blackout_days: int = Field(
+        default=2, ge=0, le=10, description="No new position this many days before an earnings release."
+    )
+    trading_use_implied_vol: bool = Field(
+        default=True, description="Use options-implied volatility for the leading candidates when available."
+    )
+    trading_model_wait_seconds: float = Field(
+        default=5.0, ge=0, description="How long a cycle waits for the stock model (it uses the last run)."
+    )
+    trading_signal_weights: Annotated[dict[str, float], NoDecode] = Field(
+        default_factory=lambda: dict(DEFAULT_SIGNAL_WEIGHTS),
+        description="Opportunity-score weights, JSON or name=value pairs.",
+    )
+    trading_regime_exposure: Annotated[dict[str, float], NoDecode] = Field(
+        default_factory=lambda: dict(DEFAULT_REGIME_EXPOSURE),
+        description="Share of maximum exposure deployed per regime.",
+    )
+    trading_regime_entry_penalty: Annotated[dict[str, float], NoDecode] = Field(
+        default_factory=lambda: dict(DEFAULT_REGIME_ENTRY_PENALTY),
+        description="Extra entry score required per regime.",
+    )
+
     # --- Prediction ledger ------------------------------------------------------------------------
     predictions_enabled: bool = Field(
         default=True, description="Log forecasts and model predictions after each close and grade them later."
@@ -244,11 +449,101 @@ class Settings(BaseSettings):
     polygon_requests_per_minute: float = Field(default=5.0, gt=0, description="Free tier: 5/min.")
 
     @field_validator(
-        "cors_origins", "watchlist", "market_providers", "picks_universe", "picks_recipients", mode="before"
+        "cors_origins",
+        "watchlist",
+        "market_providers",
+        "picks_universe",
+        "picks_recipients",
+        "trading_etfs",
+        mode="before",
     )
     @classmethod
     def _parse_csv(cls, value: object) -> object:
         return _split_csv(value)
+
+    @field_validator(
+        "api_token",
+        "polygon_api_key",
+        "alpaca_api_key_id",
+        "alpaca_api_secret_key",
+        "fmp_api_key",
+        "eia_api_key",
+        "odds_api_key",
+        "smtp_password",
+        mode="before",
+    )
+    @classmethod
+    def _blank_secret(cls, value: object) -> object:
+        """``QP_X=`` (as copied from .env.example) means "not set", not an empty credential."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("alpaca_paper")
+    @classmethod
+    def _paper_only(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError(
+                "QuantPulse only supports Alpaca PAPER trading; live-money trading is intentionally not "
+                "implemented. Set QP_ALPACA_PAPER=true."
+            )
+        return value
+
+    @field_validator("trading_allow_shorts")
+    @classmethod
+    def _long_only(cls, value: bool) -> bool:
+        if value:
+            raise ValueError(
+                "short selling is not implemented: the strategy is long-only (QP_TRADING_ALLOW_SHORTS=false)"
+            )
+        return value
+
+    @field_validator(
+        "trading_signal_weights", "trading_regime_exposure", "trading_regime_entry_penalty", mode="before"
+    )
+    @classmethod
+    def _parse_mappings(cls, value: object) -> object:
+        return _parse_mapping(value)
+
+    @field_validator("trading_signal_weights")
+    @classmethod
+    def _validate_signal_weights(cls, value: dict[str, float]) -> dict[str, float]:
+        from quantpulse.domain.trading_signals import COMPONENTS
+
+        weights = _unit_mapping(value, COMPONENTS, "signal components")
+        if sum(weights.values()) <= 0:
+            raise ValueError("at least one signal weight must be positive")
+        return weights
+
+    @field_validator("trading_regime_exposure", "trading_regime_entry_penalty")
+    @classmethod
+    def _validate_regime_mapping(cls, value: dict[str, float]) -> dict[str, float]:
+        from quantpulse.domain.trading_regime import LABELS
+
+        return _unit_mapping(value, LABELS, "market regimes")
+
+    @field_validator("trading_regime_exposure")
+    @classmethod
+    def _exposure_share(cls, value: dict[str, float]) -> dict[str, float]:
+        if any(v > 1 for v in value.values()):
+            raise ValueError("regime exposure shares must be between 0 and 1")
+        return {**DEFAULT_REGIME_EXPOSURE, **value}
+
+    @field_validator("trading_regime_entry_penalty")
+    @classmethod
+    def _entry_defaults(cls, value: dict[str, float]) -> dict[str, float]:
+        return {**DEFAULT_REGIME_ENTRY_PENALTY, **value}
+
+    @field_validator("trading_universe")
+    @classmethod
+    def _validate_trading_universe(cls, value: str) -> str:
+        v = value.strip()
+        if v.lower() == "auto":
+            return "auto"
+        symbols = [s.strip().upper() for s in v.split(",") if s.strip()]
+        if not symbols:
+            raise ValueError("trading_universe must be 'auto' or a comma-separated list of tickers")
+        return ",".join(dict.fromkeys(symbols))
 
     @field_validator("model_universe")
     @classmethod
@@ -263,7 +558,7 @@ class Settings(BaseSettings):
             )
         return ",".join(dict.fromkeys(symbols))
 
-    @field_validator("watchlist", "picks_universe")
+    @field_validator("watchlist", "picks_universe", "trading_etfs")
     @classmethod
     def _normalise_symbols(cls, value: list[str]) -> list[str]:
         out: list[str] = []
@@ -281,7 +576,9 @@ class Settings(BaseSettings):
         adapter = TypeAdapter(EmailStr)
         return [adapter.validate_python(v) for v in value]
 
-    @field_validator("picks_send_time", "sandbox_trade_time", "sandbox_mark_time", "predictions_log_time")
+    @field_validator(
+        "picks_send_time", "sandbox_trade_time", "sandbox_mark_time", "predictions_log_time", "trading_time"
+    )
     @classmethod
     def _validate_time(cls, value: str) -> str:
         from datetime import datetime as _dt
@@ -292,6 +589,17 @@ class Settings(BaseSettings):
     @property
     def smtp_configured(self) -> bool:
         return bool(self.smtp_host and self.email_from)
+
+    @property
+    def trading_can_submit(self) -> bool:
+        """Whether settings allow real paper orders (the runtime kill switch is checked separately)."""
+        return (
+            self.alpaca_trading_enabled
+            and self.alpaca_paper
+            and not self.trading_dry_run
+            and not self.trading_kill_switch
+            and self.has_credentials("alpaca")
+        )
 
     @property
     def sqlite_path(self) -> Path | None:

@@ -45,6 +45,20 @@ async def test_bars_upsert_is_idempotent_and_timezone_safe(database):
         assert await repo.load_bars(s, "MSFT", "1d") is None
 
 
+async def test_a_longer_download_backfills_older_bars(database):
+    """Regression: a short window stored first must not stop a later, longer download from adding the
+    older history (the revision-window shortcut used to drop every bar before it)."""
+    full = _history(40)
+    recent = full.model_copy(update={"bars": full.bars[25:]})
+    async with database.session() as s:
+        assert await repo.upsert_bars(s, recent, "alpaca") == 15
+    async with database.session() as s:
+        assert await repo.upsert_bars(s, full, "alpaca") == 25 + 8  # 25 older bars + the revision window
+    async with database.session() as s:
+        history, _, _ = await repo.load_bars(s, "AAPL", "1d")
+    assert len(history.bars) == 40 and history.bars[0].timestamp == T0
+
+
 async def test_bars_upsert_writes_only_new_bars_unless_history_was_readjusted(database):
     async with database.session() as s:
         assert await repo.upsert_bars(s, _history(30), "yahoo") == 30

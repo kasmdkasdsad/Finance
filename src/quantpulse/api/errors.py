@@ -12,10 +12,12 @@ from pydantic import ValidationError
 from starlette.exceptions import HTTPException
 
 from quantpulse.core.errors import DomainError, NotFoundError, ProviderError
+from quantpulse.providers.alpaca_trading import BrokerError, BrokerNotConfigured, OrderRejected
 from quantpulse.schemas.common import ErrorResponse
 from quantpulse.schemas.jobs import JobOut
 from quantpulse.services.model import ModelTraining
 from quantpulse.services.notifications import NotConfiguredError, NotificationError, SyntheticDataRefused
+from quantpulse.services.trading import TradingCycleRunning
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +49,8 @@ def install_error_handlers(app: FastAPI) -> None:
         return _respond(request, 422, "validation_error", errors)
 
     @app.exception_handler(ModelTraining)
-    async def _training(request: Request, exc: ModelTraining) -> JSONResponse:
+    @app.exception_handler(TradingCycleRunning)
+    async def _training(request: Request, exc: ModelTraining | TradingCycleRunning) -> JSONResponse:
         """Long computations answer 202 with the job's progress; clients poll ``/jobs/{id}``."""
         now = request.app.state.container.clock.now()
         body = JobOut.of(exc.job, now)
@@ -83,6 +86,19 @@ def install_error_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:  # should be absorbed by the gateway
         logger.warning("provider error escaped the gateway: %s", exc)
         return _respond(request, 502, "upstream_error", str(exc))
+
+    @app.exception_handler(BrokerNotConfigured)
+    async def _broker_not_configured(request: Request, exc: BrokerNotConfigured) -> JSONResponse:
+        return _respond(request, 503, "not_configured", str(exc))
+
+    @app.exception_handler(OrderRejected)
+    async def _order_rejected(request: Request, exc: OrderRejected) -> JSONResponse:
+        return _respond(request, 422, "order_rejected", str(exc))
+
+    @app.exception_handler(BrokerError)
+    async def _broker(request: Request, exc: BrokerError) -> JSONResponse:
+        logger.warning("Alpaca paper broker error: %s", exc)
+        return _respond(request, 502, "broker_error", str(exc))
 
     @app.exception_handler(HTTPException)
     async def _http(request: Request, exc: HTTPException) -> JSONResponse:

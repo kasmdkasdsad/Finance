@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import AwareDatetime
+from pydantic import AwareDatetime, Field
 
 from quantpulse.schemas.common import StrictModel
 
@@ -30,6 +30,9 @@ class SystemStatus(StrictModel):
     rate_limiters: dict[str, Any]
     odds_api_quota: dict[str, Any]
     poller: dict[str, Any]
+    trading: dict[str, Any] = Field(
+        default_factory=dict, description="Alpaca paper trading: paper-only endpoint, enabled, dry run"
+    )
 
 
 class IngestionEvent(StrictModel):

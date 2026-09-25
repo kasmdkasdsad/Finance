@@ -27,6 +27,7 @@ class Quote(StrictModel):
     day_high: float | None = Field(default=None, gt=0)
     day_low: float | None = Field(default=None, gt=0)
     volume: float | None = Field(default=None, ge=0)
+    vwap: float | None = Field(default=None, gt=0, description="Today's volume-weighted average price")
     currency: str = "USD"
     exchange: str | None = None
     name: str | None = None

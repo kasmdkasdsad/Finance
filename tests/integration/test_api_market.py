@@ -254,7 +254,13 @@ async def test_sse_stream_emits_quote_events(api):
 
 
 async def test_system_status_hides_secrets(tmp_path, clock):
-    settings = make_settings(tmp_path, polygon_api_key="SECRET-POLYGON-KEY", smtp_password="SMTP-PASS")
+    settings = make_settings(
+        tmp_path,
+        polygon_api_key="SECRET-POLYGON-KEY",
+        smtp_password="SMTP-PASS",
+        alpaca_api_key_id="PK-ALPACA-KEY-ID",
+        alpaca_api_secret_key="ALPACA-SECRET-VALUE",
+    )
     container = Container(settings, clock=clock, http=HttpClient())
     app = create_app(container=container)
     async with (
@@ -266,9 +272,18 @@ async def test_system_status_hides_secrets(tmp_path, clock):
         session = (await c.get("/api/v1/market/session")).json()
     body = r.json()
     assert r.status_code == 200
-    assert body["credentials"]["polygon"] is True and body["credentials"]["alpaca"] is False
-    assert body["database"]["revision"] == body["database"]["head"] == "0009"
-    assert "SECRET-POLYGON-KEY" not in r.text and "SMTP-PASS" not in r.text
+    assert body["credentials"]["polygon"] is True and body["credentials"]["alpaca"] is True
+    assert body["credentials"]["alpaca_paper_trading"] is True
+    assert body["trading"] == {
+        "paper_only": True,
+        "endpoint": "https://paper-api.alpaca.markets",
+        "enabled": False,
+        "dry_run": True,
+        "can_submit": False,
+    }
+    assert body["database"]["revision"] == body["database"]["head"] == "0010"
+    for secret in ("SECRET-POLYGON-KEY", "SMTP-PASS", "PK-ALPACA-KEY-ID", "ALPACA-SECRET-VALUE"):
+        assert secret not in r.text
     assert session["session"] == "regular" and session["is_trading_day"] is True
 
 

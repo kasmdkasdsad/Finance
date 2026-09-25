@@ -20,12 +20,15 @@ synthetic data with a visible status badge.
 | **Prediction ledger** | Logs every forecast and model call after the close from live data only, grades each on its target date, and keeps a Brier / hit-rate / coverage scorecard; a **point-in-time historical replay** fills it with years of graded predictions on day one | Market providers |
 | **Daily picks** | Ranks a stock universe (factor rule, stock model, or both) with a **1-10 rating**, P(beat SPY), 1-month ranges, industry and an upcoming-earnings warning, plus an email digest | Market providers · SMTP |
 | **Trading sandbox** | Paper-trading accounts with simulated money, run by a **self-learning agent** that re-weights its factors from its own results; walk-forward training on history | Market providers · Treasury |
+| **Alpaca paper trading** | An automated strategy on your **Alpaca paper account**. It ranks a liquid universe on momentum, trend, volume, volatility, fundamentals, the stock model and the market regime. It sizes a concentrated portfolio by conviction and volatility and exits on stops, reversals and deteriorating signals. Every order passes a risk engine and duplicate-proof order management, and fills are reconciled against Alpaca. Dry run by default; paper only, with no live-money path | Alpaca paper API (alpaca-py) · market providers |
 
 > **Disclaimer.** Analytics, valuations, forecasts, model rankings, win probabilities, daily picks and the
 > sandbox agent are model outputs for research and education. They are not investment, betting or
 > mechanical advice. Nobody can reliably predict individual stock prices; the platform's job is to give
 > honest probability ranges and to **measure** its own predictions against what happened (see the Track
-> Record page). The trading sandbox is paper trading only: it cannot place a real order.
+> Record page). The trading sandbox simulates its own fills and cannot place an order anywhere. Alpaca
+> paper trading sends orders only to Alpaca's **paper** API (simulated money). QuantPulse has no
+> live-money trading path.
 
 ---
 
@@ -41,12 +44,13 @@ synthetic data with a visible status badge.
 8. [Predictions: forecasts, the stock model and the track record](#predictions-forecasts-the-stock-model-and-the-track-record)
 9. [Daily picks and the email digest](#daily-picks-and-the-email-digest)
 10. [Trading sandbox (paper trading)](#trading-sandbox-paper-trading)
-11. [Vehicle module reference data](#vehicle-module-reference-data)
-12. [Database and migrations](#database-and-migrations)
-13. [Testing and quality gates](#testing-and-quality-gates)
-14. [Project layout](#project-layout)
-15. [Security and operations](#security-and-operations)
-16. [Known limitations](#known-limitations)
+11. [Alpaca paper trading (automated strategy)](#alpaca-paper-trading-automated-strategy)
+12. [Vehicle module reference data](#vehicle-module-reference-data)
+13. [Database and migrations](#database-and-migrations)
+14. [Testing and quality gates](#testing-and-quality-gates)
+15. [Project layout](#project-layout)
+16. [Security and operations](#security-and-operations)
+17. [Known limitations](#known-limitations)
 
 ---
 
@@ -70,6 +74,20 @@ such.
 ```bash
 cp .env.example .env
 docker compose up --build    # api on :8000, ui on :8501; SQLite lives in the `quantpulse-data` volume
+```
+
+### Windows (PowerShell)
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[frontend,dev]" -c constraints.txt
+copy .env.example .env           # then edit .env (API keys, trading switches)
+quantpulse-migrate
+uvicorn --factory quantpulse.api.app:app_factory --host 127.0.0.1 --port 8000
+# second PowerShell window (activate the venv again):
+streamlit run frontend/app.py
+python -m pytest                 # the test suite
 ```
 
 ### Without make
@@ -103,7 +121,8 @@ flowchart LR
     CB --> PR[providers<br/>strict wire schemas]
     PR --> HTTP[HttpClient<br/>token buckets · retries · concurrency caps]
     HTTP --> EXT[(Yahoo · Polygon · Alpaca · Treasury · SEC · FMP · EIA · fueleconomy.gov · ESPN · Odds API)]
-    G --> WH[(SQLite warehouse<br/>Alembic 0001-0008)]
+    G --> WH[(SQLite warehouse<br/>Alembic 0001-0010)]
+    S --> BRK[Alpaca paper broker<br/>alpaca-py, paper=True]
     G --> SYN[synthetic generators]
 ```
 
@@ -208,6 +227,7 @@ which would include query-string API keys, is suppressed.
 | Stock model | `QP_MODEL_UNIVERSE` (`auto`, `sp500`, `picks` or a ticker list), `QP_MODEL_TYPE` (`ensemble`, `ridge` or `gbm`), `QP_MODEL_SECTOR_NEUTRAL` (default on), `QP_MODEL_SYNC_WAIT_SECONDS` (how long a request waits before the run continues in the background, default 25), `QP_MODEL_WARMUP` (the poller keeps the latest close's run computed), `QP_TTL_MODEL` |
 | Forecasts | `QP_FORECAST_IV_WEIGHT` (weight of options-implied volatility, default 0.5), `QP_FORECAST_VARIANCE_PREMIUM` (implied variance is divided by this, default 1.1), `QP_FORECAST_EARNINGS_JUMPS` (default on) |
 | Reference data | `QP_TTL_REFERENCE` (S&P membership, SEC profiles and earnings dates, default 7 days), `QP_TTL_FUNDAMENTALS_FRAMES` (SEC XBRL frames, default 7 days) |
+| Alpaca paper trading | `QP_ALPACA_TRADING_ENABLED` (default off), `QP_TRADING_DRY_RUN` (default on), `QP_ALPACA_PAPER` (must be true), `QP_TRADING_KILL_SWITCH`, `QP_TRADING_TIME`, `QP_TRADING_REBALANCE_INTERVAL_MINUTES`, `QP_TRADING_MAX_*` limits, `QP_TRADING_ORDER_TYPE`, `QP_TRADING_SIGNAL_WEIGHTS`, `QP_TRADING_REGIME_*` — see [Alpaca paper trading](#alpaca-paper-trading-automated-strategy) and `.env.example` |
 | Predictions | `QP_PREDICTIONS_ENABLED`, `QP_PREDICTIONS_LOG_TIME` (default 16:20 ET), `QP_PREDICTIONS_ALLOW_SYNTHETIC` (default off) |
 
 The Streamlit app reads `QP_API_URL` (default `http://127.0.0.1:8000`) and `QP_API_TOKEN`. Both can
@@ -221,7 +241,8 @@ Every route is under `/api/v1` except `/health`. When `QP_API_TOKEN` is set, eve
 `X-API-Key`. WebSocket clients may pass `?api_key=` instead. Errors always use the same shape:
 `{"error": "...", "detail": ..., "request_id": "..."}`. Validation errors return 422, unknown entities
 404, a refusal to act on synthetic prices (emailing picks, filling a paper order) 409, missing SMTP
-settings 503, and SMTP delivery failures 502. Long computations (a model run over the S&P 500, the
+settings 503, and SMTP delivery failures 502. Paper trading answers 503 without Alpaca keys, 422 for an
+order Alpaca refuses and 502 for other broker failures. Long computations (a model run over the S&P 500, the
 historical replay) answer **202 Accepted** with the background job's progress and a `Location` header;
 poll `GET /jobs/{id}` and ask again when it is done.
 Every response carries `X-Request-ID` and `X-Response-Time-ms` headers.
@@ -261,6 +282,8 @@ Every response carries `X-Request-ID` and `X-Response-Time-ms` headers.
 | `GET/POST /sandbox/accounts` · `GET/PATCH/DELETE /sandbox/accounts/{id}` | Paper accounts · summary marked to live prices |
 | `POST /sandbox/accounts/{id}/step?force=` · `…/train` · `…/orders` · `…/reset?keep_learning=` | Run the agent · walk-forward training · manual paper order · start over |
 | `GET /sandbox/accounts/{id}/trades` · `…/equity` · `…/journal` | Fills · equity snapshots · what the agent did and learned |
+| `GET /trading/status` · `/account` · `/positions` · `/orders` · `/proposed` · `/risk` · `/cycles` · `/events` · `/performance` | Alpaca **paper** trading: account (authoritative), strategy cycles, risk and records — see [Alpaca paper trading](#alpaca-paper-trading-automated-strategy) |
+| `POST /trading/run` · `/reconcile` · `/kill-switch` · `/cancel-all` · `/close-all` | Run a cycle · reconcile · kill switch · cancel orders · close positions (confirmation required) |
 
 Examples:
 
@@ -692,6 +715,263 @@ does not predict future returns.
 
 ---
 
+## Alpaca paper trading (automated strategy)
+
+QuantPulse can run an automated, fairly aggressive strategy against your **Alpaca paper account**
+(Alpaca's paper-trading API: simulated money, real market data, real order handling). This is separate
+from the [Trading sandbox](#trading-sandbox-paper-trading). The sandbox simulates its own fills inside
+QuantPulse. Here, **Alpaca is authoritative** for equity, cash, buying power, positions, orders and fills,
+and QuantPulse keeps a reconciled record of everything it did. In the UI it is under
+**Alpaca Paper Trading → Paper Trading (Alpaca)**.
+
+**Paper only, by construction.**
+
+* The broker (`providers/alpaca_trading.py`) always builds `TradingClient(key, secret, paper=True)` and
+  never overrides the URL.
+* After construction it checks that the client points at `https://paper-api.alpaca.markets` and refuses
+  to work otherwise.
+* `QP_ALPACA_PAPER` must be `true` (anything else stops the app at start-up).
+* No setting, endpoint or UI control selects a live-money account.
+
+### Turning it on
+
+The defaults compute everything and send nothing:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `QP_ALPACA_API_KEY_ID` / `QP_ALPACA_API_SECRET_KEY` | — | Your Alpaca **paper** keys (also used for market data). `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` work too |
+| `QP_ALPACA_TRADING_ENABLED` | `false` | QuantPulse may change the paper account (orders, cancels) |
+| `QP_TRADING_DRY_RUN` | `true` | Signals, targets, trades and risk checks are computed and recorded; **nothing is submitted** |
+| `QP_ALPACA_PAPER` | `true` | Must stay true |
+| `QP_TRADING_KILL_SWITCH` | `false` | Refuses every new order (the dashboard has a runtime switch as well) |
+
+To inspect the strategy first, set only the keys: every 30 minutes the scheduler records a **dry-run**
+cycle, and **Run strategy now** does the same on demand. When you are ready for the strategy to trade
+the paper account:
+
+```env
+QP_ALPACA_TRADING_ENABLED=true
+QP_ALPACA_PAPER=true
+QP_TRADING_DRY_RUN=false
+```
+
+### How one cycle works
+
+```
+Alpaca (reconcile orders, read account / positions / open orders / clock)
+  → data: liquid universe, daily bars (warehouse-first), live snapshots, stock model, VIX, implied vol, earnings dates
+  → market regime → opportunity scores → target portfolio → proposed trades (exits first)
+  → risk engine (every order) → order manager (deterministic client order id) → Alpaca paper API
+  → wait for sell fills → re-check buys against the new cash → reconcile fills → record the cycle
+```
+
+The scheduler starts a cycle at `QP_TRADING_TIME` (10:00 New York) and then every
+`QP_TRADING_REBALANCE_INTERVAL_MINUTES` (30) until 15 minutes before the close. Early closes are
+handled. A slot that was missed (the app was down) is not run late. Each slot runs once, even across
+restarts: the cycle key is unique in the database.
+
+**Universe.** `QP_TRADING_UNIVERSE=auto` takes the stock model's universe (today's S&P 500 members when
+Alpaca data is configured) plus the liquid ETFs in `QP_TRADING_ETFS`, and keeps the
+`QP_TRADING_UNIVERSE_SIZE` (120) names with the highest 20-day dollar volume. Current holdings always
+stay in. A comma-separated ticker list works too.
+
+**Opportunity score.** Every symbol gets seven component scores. Each is a cross-sectional z-score
+(winsorised at ±3), so no signal dominates because of its scale. The weighted average
+(`QP_TRADING_SIGNAL_WEIGHTS`) is standardised again: +1 means one standard deviation better than the
+average candidate.
+
+| Component (default weight) | Built from |
+|---|---|
+| Momentum (25%) | 12-1 and 6-1 month returns, 3-month and 10-day returns, 3-month relative strength vs SPY, trend persistence (R² of a 63-day log-price fit × slope sign) |
+| Trend & price structure (20%) | Price vs 50-day average, 50- vs 200-day average, closeness to the 52-week high, signed ADX(14), price vs today's VWAP, and the better of a 20-day breakout or an uptrend pullback (RSI < 55) |
+| Volume (10%) | 20- vs 120-day volume, today's relative volume for the time of day, up-day vs down-day volume, ½ × log dollar volume |
+| Volatility (10%) | Lower ATR%, contracting 21- vs 63-day volatility, 6-month Sharpe, lower implied-vs-realised volatility (event risk) |
+| Fundamentals & earnings (10%) | Earnings and FCF yield, ½ book-to-market, gross profitability, ROE, low accruals, ½ low asset growth, the latest earnings reaction (post-earnings drift); point-in-time SEC data from the stock model |
+| Stock model (20%) | The walk-forward model's live z-score (ridge + gradient-boosted trees), the latest completed run |
+| Regime fit (5%) | Beta × the regime's tilt: high-beta names score higher in bullish markets, defensive ones in bearish markets |
+
+A missing component counts as neutral (0). ETFs have no model or fundamental score, for example, and
+the cycle notes say why a component was missing.
+
+**Market regime** (`domain/trading_regime.py`). The regime is built from:
+
+* SPY and QQQ versus their 200-day averages;
+* SPY's 50/200-day cross and 3-month return;
+* breadth (the share of the universe above its 200-day average);
+* SPY's realised-volatility percentile, the VIX when a live quote exists, and SPY's drawdown from its
+  52-week high.
+
+The possible labels are *bullish*, *neutral*, *high volatility*, *bearish* and *risk-off*. Each label sets
+the share of maximum exposure deployed (`QP_TRADING_REGIME_EXPOSURE`: 100/80/60/40/15%) and an extra
+score new positions need (`QP_TRADING_REGIME_ENTRY_PENALTY`: 0/0.15/0.3/0.5/1.0). Nothing assumes
+markets rise.
+
+**Portfolio construction** (`domain/trading_portfolio.py`).
+
+1. **Risk exits first.**
+   * Stop-loss: a holding down `QP_TRADING_MAX_POSITION_LOSS_PCT` (8%) is sold.
+   * Take-profit: a holding up `QP_TRADING_TAKE_PROFIT_PCT` (25%) has half sold, once per entry price.
+   * In a risk-off market, holdings below the entry bar are sold.
+2. **Strategy exits.** A holding is sold when:
+   * its trend reverses (below its 20- and 50-day averages with a negative 10-day return);
+   * its score falls below `QP_TRADING_EXIT_THRESHOLD` (0);
+   * the stock model turns from clearly positive to clearly negative since entry; or
+   * a clearly stronger name displaces it.
+3. **Selection.** Holdings get a head start of `QP_TRADING_INCUMBENT_BONUS` (0.35), which limits churn.
+   A new name needs all of the following:
+   * a score of `QP_TRADING_ENTRY_THRESHOLD` (0.75) plus the regime penalty;
+   * an intact trend (above its 50-day average, positive 3-month return);
+   * enough liquidity and a live quote;
+   * no earnings release within `QP_TRADING_EARNINGS_BLACKOUT_DAYS` (2).
+
+   The best `QP_TRADING_MAX_POSITIONS` (8) are held.
+4. **Sizing: conviction ÷ volatility.**
+   * Conviction grows with the score.
+   * Volatility is the largest of realised (21 and 63 days), ATR-based and implied volatility, floored at
+     12%.
+   * Weights are scaled to the regime's share of 95% gross exposure and capped per name by three limits:
+     30% of equity; a volatility budget (weight × volatility ≤ 12%, so a 60%-volatility stock gets at
+     most 20%); and 1% of its average dollar volume.
+   * Excess is redistributed. Weights under 3% are dropped: the book is a concentrated handful of names,
+     not dozens of tiny positions.
+5. **Turnover controls.**
+   * A position is only traded when its target weight changes by at least 2%, and each order is at
+     least $100.
+   * Buys are capped at `QP_TRADING_MAX_ORDER_NOTIONAL` ($15,000) per order. Larger targets are reached
+     over the next cycles without fragmenting orders.
+   * No direction reversal within `QP_TRADING_COOLDOWN_MINUTES` (120): no buy right after a sell, and no
+     sell right after a buy. Scaling in is allowed.
+   * Discretionary trades share a per-cycle turnover budget (60% of equity). Exits are never deferred.
+
+**Orders.** `QP_TRADING_ORDER_TYPE` sets the order type:
+
+* `marketable_limit` (the default): a DAY limit order priced `QP_TRADING_LIMIT_OFFSET_BPS` (10 bp)
+  through the live ask or bid;
+* `limit`: at the last price;
+* `market`.
+
+Close-all and the daily-loss flatten use market orders, and so do fractional quantities. Unfilled
+QuantPulse orders older than `QP_TRADING_ORDER_TIMEOUT_MINUTES` (20) are canceled at the next cycle,
+before it re-plans. Orders you place yourself in Alpaca are never touched by that clean-up.
+
+### Risk controls (`services/trading_risk.py`)
+
+Every order passes the risk engine; each decision records every named check (shown per trade on the
+dashboard). The book is *projected*: each approved order counts against the limits for the rest of the
+cycle, and open orders count from the start.
+
+| Check | Rule |
+|---|---|
+| `kill_switch` | No order while the kill switch is on (`QP_TRADING_KILL_SWITCH` or the runtime switch), except an explicit flatten |
+| `account` | Alpaca has not blocked the account |
+| `market_open` | Alpaca's clock says the market is open |
+| `live_data` | A live quote no older than `QP_TRADING_MAX_QUOTE_AGE_SECONDS` (600 s). **Synthetic prices are never traded**; stale ones only if `QP_TRADING_REQUIRE_LIVE_DATA=false` |
+| `no_working_order` | No other order for the symbol is still working (no stacking, no duplicates) |
+| `no_short` | A sell never exceeds the shares held (`QP_TRADING_ALLOW_SHORTS` must stay false) |
+| `order_size` | $100 ≤ notional ≤ $15,000; an order that closes a whole position is exempt from the cap so a stop-loss can always execute |
+| `daily_loss` | Buys stop once today's loss (equity vs Alpaca's previous-close equity) reaches `QP_TRADING_MAX_DAILY_LOSS_PCT` (4%). With `QP_TRADING_DAILY_LOSS_ACTION=flatten` every position is also sold |
+| `position_limit` | A position stays within `QP_TRADING_MAX_POSITION_PCT` (30%) of equity |
+| `total_exposure` | Long exposure stays within `QP_TRADING_MAX_TOTAL_EXPOSURE_PCT` (95%) |
+| `max_positions` | At most `QP_TRADING_MAX_POSITIONS` (8) names, held plus pending |
+| `buying_power` | The order fits in buying power and in cash above the `QP_TRADING_CASH_BUFFER_PCT` (2%) reserve: no margin |
+| `liquidity` | Price ≥ $5, 20-day dollar volume ≥ `QP_TRADING_MIN_DOLLAR_VOLUME` ($25M), spread ≤ 30 bp |
+
+### Duplicate protection and reconciliation (`services/order_manager.py`)
+
+* **Deterministic client order ids.** Each order's id is `qp-<cycle slot>-<symbol>-<b|s>`, for example
+  `qp-20260925T1030-AAPL-b`. Re-running a slot produces the same ids, so a double click, a second
+  poller pass or a restart mid-cycle cannot send the same order twice.
+* **Write-ahead record.** The order is stored as `pending_submit` (unique on the client id) *before* the
+  request leaves. A second attempt fails on that constraint and sends nothing.
+* **No blind resubmission.** After a timeout or a dropped connection the order is looked up by its
+  client id. If Alpaca never saw it, the order is marked `submit_unknown`, never resent, and closed out
+  as `submit_failed` after a grace period. The SDK's own retry is limited to 429 responses, and Alpaca
+  itself rejects a repeated client id.
+* **Reconciliation.** This runs at start-up, before every cycle, every 5 minutes during the session, and
+  on demand. It reads open and recent orders from Alpaca and updates every local record (status, filled
+  quantity, average fill price, timestamps). It adds orders placed elsewhere (marked `external`) and
+  logs every change. Partial fills are tracked; a symbol with a working order is never traded again
+  until that order is done.
+
+### Records, dashboard and performance
+
+Three tables come from migration `0010`:
+
+* `trading_cycles`: one row per cycle, holding the regime, account equity, cash, positions, the top
+  signals with their components, targets, proposed trades with risk decisions and order status, and
+  notes.
+* `broker_orders`: every order with its Alpaca id, client id, strategy, score, reason and error.
+* `trading_events`: the audit trail. It records signals generated, trades proposed, risk
+  approved/rejected, orders submitted, partially filled, filled, canceled and rejected, the kill switch,
+  the daily loss limit, and reconciliation.
+
+**Performance** (`GET /trading/performance`) is computed **only from recorded data**. It uses daily
+equity (the last cycle of each day) and FIFO round trips of filled orders, and reports:
+
+* Sharpe and Sortino ratios, maximum drawdown, best and worst day;
+* win rate, average winner and loser, profit factor;
+* turnover, average exposure, daily and monthly P/L;
+* realised P/L by symbol and by exit type.
+
+A statistic without enough data is empty, with a note saying why.
+
+**Dashboard.**
+
+* **Banners:** the page always shows **ALPACA PAPER TRADING — SIMULATED MONEY ONLY**, plus either
+  **DRY RUN — NO ORDERS WILL BE SUBMITTED** or the execution-active warning.
+* **Account:** equity, cash, buying power, today's and total P/L.
+* **Views:**
+  * Portfolio: shares, entry, price, value, weight, P/L, target weight, score, stop-loss.
+  * Strategy: regime, top opportunities with every component, target vs current portfolio, proposed
+    trades with each risk check.
+  * Orders, Risk (limits and usage), Activity (cycles and the audit trail) and Performance.
+* **Controls:**
+  * Run strategy now (optionally forced to a dry run).
+  * Kill switch (optionally cancelling working orders).
+  * Reconcile.
+  * Cancel all open orders (needs a confirmation tick).
+  * Close all positions (needs the exact phrase `CLOSE ALL`; a preview in dry-run mode).
+
+### API
+
+| Method & path | Purpose |
+|---|---|
+| `GET /trading/status` | Paper-only flag and endpoint, mode (dry run / paper), kill switch, Alpaca market clock, next cycle, last cycle, warnings |
+| `GET /trading/account` · `/positions` · `/orders?status=all\|open\|closed` | The Alpaca paper account (authoritative), with QuantPulse's targets, scores and reasons attached |
+| `GET /trading/proposed` · `/cycles` · `/cycles/{id}` | Latest cycle (regime, opportunities, targets, trades and risk decisions) · cycle history |
+| `GET /trading/risk` · `/events?kind=` · `/performance` · `/job` | Risk snapshot · audit trail · recorded performance · cycle progress |
+| `POST /trading/run?dry_run=&wait=` | Run a cycle now (202 with progress if it takes longer than `wait`) |
+| `POST /trading/reconcile` | Reconcile with Alpaca now |
+| `POST /trading/kill-switch` `{"active": true, "reason": "...", "cancel_open_orders": true}` | Kill switch on/off (the env switch can only be released in `.env`) |
+| `POST /trading/cancel-all` `{"confirm": true}` | Cancel every open order on the paper account |
+| `POST /trading/close-all` `{"confirm": "CLOSE ALL"}` | Sell every position (a preview in dry-run mode) |
+
+The order endpoints (`run`, `kill-switch`, `cancel-all` and `close-all`) require either `QP_API_TOKEN`
+(sent as `X-API-Key`) or a request from the same machine. A missing broker returns 503, an order Alpaca
+refuses returns 422, and other broker failures return 502. API keys never appear in a response, a log
+line or the UI; account numbers are masked.
+
+### First paper-trading session, step by step
+
+1. `make test` (or `python -m pytest`) — everything is mocked; no test touches Alpaca.
+2. `quantpulse-migrate` — creates the trading tables (revision `0010`).
+3. Start the API and the UI (see [Quick start](#quick-start)).
+4. Open **Paper Trading (Alpaca)**. Check that the page says *Paper* and shows your paper equity
+   (≈ $100,000), or run `curl localhost:8000/api/v1/trading/account`.
+5. With the defaults (dry run), open **Controls → Run strategy now**. Then look at **Strategy**: the
+   regime, top opportunities, target portfolio, and proposed trades with every risk decision.
+6. When satisfied, set `QP_ALPACA_TRADING_ENABLED=true` and `QP_TRADING_DRY_RUN=false`, then restart
+   the API.
+7. During market hours, **Run strategy now** submits the approved orders. Alternatively, lower
+   `QP_TRADING_MAX_ORDER_NOTIONAL` first for a smaller initial trade.
+8. Verify each of the following:
+   * the orders appear in Alpaca's paper dashboard;
+   * the **Orders** view shows them with QuantPulse's reasons, and fills are reconciled;
+   * **Portfolio** updates;
+   * restarting the API and pressing **Reconcile** shows the same orders and adds none.
+
+---
+
 ## Vehicle module reference data
 
 The packaged profile (`src/quantpulse/data/elantra_2025_limited.json`) was verified when it was built:
@@ -725,6 +1005,7 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0007_trading_sandbox` | `sandbox_accounts`, `sandbox_positions`, `sandbox_trades`, `sandbox_equity`, `sandbox_journal` |
 | `0008_prediction_ledger` | `predictions` |
 | `0009_reference_data` | `company_profiles`, `earnings_events`, `reference_blobs` (S&P membership snapshot, download bookkeeping), `fundamental_facts` (SEC XBRL frames); `predictions.origin` |
+| `0010_alpaca_paper_trading` | `trading_cycles`, `broker_orders`, `trading_events`, `trading_state` (runtime kill switch, per-position memory, P/L baseline) |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)
@@ -748,15 +1029,17 @@ The test suite checks four things:
 make check     # ruff lint + format check, mypy, pytest
 ```
 
-**314 tests.** No test touches the network. Every outbound request is mocked with `respx`, and
-unmocked requests fail.
+**409 tests.** No test touches the network. Every outbound `httpx` request is mocked with `respx`, and
+unmocked requests fail. Real `requests` traffic (the Alpaca SDK) is refused outright, and Alpaca and
+trading variables are cleared from the environment for the test run, so the suite can never reach a real
+Alpaca account, even with your keys in `.env` or your shell.
 
 | Suite | Covers |
 |---|---|
-| `tests/unit` | BSM against Hull's textbook values, put-call parity, every Greek vs finite differences, IV round trips, rates; DCF by hand; Monte Carlo reproducibility; VaR/CVaR closed forms; Ledoit-Wolf; frontier optimality vs the analytic tangency portfolio; vol-surface recovery; vehicle and sports models; GARCH-t parameter recovery and likelihood vs SciPy, forecast calibration on simulated data and no look-ahead, Breeden-Litzenberger vs Black-Scholes; the feature library (earnings reactions, industry averages and neutralisation, membership masks, delisting cash-outs), the walk-forward models (planted signal found by ridge, trees and the ensemble; noise not over-claimed; future labels cannot leak), signal research and regime; earnings-aware GARCH, earnings-jump simulation, the options-implied variance blend and calibration with earnings; point-in-time S&P 500 membership replay, the SIC → Fama-French mapping, earnings reaction timing and point-in-time fundamentals; the daily-picks screener; the paper broker (fills, slippage, no shorting or margin) and the learning agent (IC direction, walk-forward without look-ahead); cache, single-flight, token bucket, circuit breaker; the gateway fallback chain ("no data" never opens a breaker); background jobs; the NYSE calendar |
-| `tests/providers` | Parsers validated against **real captured payloads** (SEC EDGAR for Apple and Alphabet, Treasury CSV, fueleconomy.gov, ESPN scoreboards) and documented vendor shapes (Yahoo crumb flow and chart adjustment, Polygon pagination and plan errors, Alpaca (including paginated multi-symbol bars) and OCC symbols, FMP field variants, EIA, Odds API); HTTP retries, 429 back-off, concurrency caps |
-| `tests/integration` | Every API endpoint through ASGI: provenance transitions (live → cached → warehouse-stale → synthetic), validation errors, auth, SSE, WebSocket, portfolio, vehicle, picks (all ranking methods), forecast, stock-model, stock-report and regime endpoints, the prediction ledger (logging, grading a week later, scorecard, scheduler, intraday and synthetic refusals, the point-in-time historical replay), the S&P 500 universe end to end (former members, membership masks, SEC industries, earnings and XBRL fundamentals, 202 progress, the previous close serving while the next run trains), warehouse-first price panels (incremental tails, split re-adjustments, delisted and unknown tickers), trading-sandbox flows (orders, the agent learning across days, trading on the model, training, the synthetic-data refusals), the email policy, poller scheduling, migrations, repositories |
-| `tests/frontend` | API client error handling, and **every Streamlit page** plus its interactive forms run with `AppTest` against a real in-process API server |
+| `tests/unit` | BSM against Hull's textbook values, put-call parity, every Greek vs finite differences, IV round trips, rates; DCF by hand; Monte Carlo reproducibility; VaR/CVaR closed forms; Ledoit-Wolf; frontier optimality vs the analytic tangency portfolio; vol-surface recovery; vehicle and sports models; GARCH-t parameter recovery and likelihood vs SciPy, forecast calibration on simulated data and no look-ahead, Breeden-Litzenberger vs Black-Scholes; the feature library (earnings reactions, industry averages and neutralisation, membership masks, delisting cash-outs), the walk-forward models (planted signal found by ridge, trees and the ensemble; noise not over-claimed; future labels cannot leak), signal research and regime; earnings-aware GARCH, earnings-jump simulation, the options-implied variance blend and calibration with earnings; point-in-time S&P 500 membership replay, the SIC → Fama-French mapping, earnings reaction timing and point-in-time fundamentals; the daily-picks screener; the paper broker (fills, slippage, no shorting or margin) and the learning agent (IC direction, walk-forward without look-ahead); the paper-trading strategy (scale-free component scores, ranking, live-row intraday signals, implied-volatility risk, fundamentals orientation, regime labels and breadth, water-filled conviction × inverse-volatility sizing with position, volatility and liquidity caps, stop-loss, one-time take-profit, trend / signal / model exits, displacement with an incumbent head start, rebalance band, direction-reversal cooldown, turnover budget), every risk-engine rule, FIFO round trips and recorded-data performance, and the trading settings guards (paper-only, long-only, dry-run defaults); cache, single-flight, token bucket, circuit breaker; the gateway fallback chain ("no data" never opens a breaker); background jobs; the NYSE calendar |
+| `tests/providers` | Parsers validated against **real captured payloads** (SEC EDGAR for Apple and Alphabet, Treasury CSV, fueleconomy.gov, ESPN scoreboards) and documented vendor shapes (Yahoo crumb flow and chart adjustment, Polygon pagination and plan errors, Alpaca (including paginated multi-symbol bars) and OCC symbols, the **Alpaca paper broker through the real alpaca-py SDK** against a stateful fake of the paper API (paper URL guard, account/positions/orders, submit, cancel, close, duplicate client ids, rejections, timeouts as ambiguous outcomes), FMP field variants, EIA, Odds API); HTTP retries, 429 back-off, concurrency caps |
+| `tests/integration` | Every API endpoint through ASGI: provenance transitions (live → cached → warehouse-stale → synthetic), validation errors, auth, SSE, WebSocket, portfolio, vehicle, picks (all ranking methods), forecast, stock-model, stock-report and regime endpoints, the prediction ledger (logging, grading a week later, scorecard, scheduler, intraday and synthetic refusals, the point-in-time historical replay), the S&P 500 universe end to end (former members, membership masks, SEC industries, earnings and XBRL fundamentals, 202 progress, the previous close serving while the next run trains), warehouse-first price panels (incremental tails, split re-adjustments, delisted and unknown tickers), trading-sandbox flows (orders, the agent learning across days, trading on the model, training, the synthetic-data refusals), the email policy, poller scheduling, migrations, repositories; the order manager (fills, partial fills, rejections, stale-order cancels, duplicate prevention, both restart crash windows, timeouts never resent, adopting external orders); **Alpaca paper trading end to end** (dry run sends nothing, paper execution with fills and reconciliation, scaling in, restart without duplicates, partial fills / rejections / timeouts, the kill switch, cancel-all and close-all confirmations, market closed, missing and synthetic data, stop-loss and the daily loss limit, the scheduler's slots, remote callers refused without a token, credentials never in a response, performance from recorded data, the stock model feeding the score) |
+| `tests/frontend` | API client error handling, and **every Streamlit page** plus its interactive forms run with `AppTest` against a real in-process API server; the paper-trading page against a fake Alpaca paper account (banners, every view, run now, kill switch, close-all disabled until `CLOSE ALL` is typed) |
 
 CI (`.github/workflows/ci.yml`) runs lint, format, mypy, the migration round trip and tests on
 Python 3.11 and 3.12. It then builds the Docker image and smoke-tests it.
@@ -770,16 +1053,16 @@ src/quantpulse/
   config.py              settings (pydantic-settings, SecretStr)
   core/                  cache · rate limiter · circuit breaker · HTTP client · gateway · NYSE calendar · background jobs
   quant/                 black_scholes · rates · vol_surface · dcf · monte_carlo · risk · optimization · volatility (GARCH) · forecasting · implied
-  domain/                vehicle · sports · screener · paper_broker · trading_agent · features · alpha_model · research · regime · universe (point-in-time S&P 500) · sectors (SIC → FF12) · earnings · fundamental_factors
-  providers/             yahoo · polygon · alpaca · treasury · sec_edgar · sp500 (Wikipedia) · fmp · eia · fueleconomy · espn · odds_api · synthetic
+  domain/                vehicle · sports · screener · paper_broker · trading_agent · features · alpha_model · research · regime · universe (point-in-time S&P 500) · sectors (SIC → FF12) · earnings · fundamental_factors · trading_signals · trading_regime · trading_portfolio · trading_performance
+  providers/             yahoo · polygon · alpaca · treasury · sec_edgar · sp500 (Wikipedia) · fmp · eia · fueleconomy · espn · odds_api · synthetic · alpaca_trading (paper broker)
   schemas/               Pydantic v2 request/response/ingestion models
-  db/                    models · repositories · session · migrate · migrations/versions/0001-0009
-  services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · forecast · model · reference · facts · stocks · predictions · backfill · notifications · container
-  workers/poller.py      market-hours-aware refresh, scheduled email, sandbox scheduler, prediction ledger, model warm-up
+  db/                    models · repositories · session · migrate · migrations/versions/0001-0010
+  services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · forecast · model · reference · facts · stocks · predictions · backfill · notifications · trading · trading_data · trading_risk · order_manager · container
+  workers/poller.py      market-hours-aware refresh, scheduled email, sandbox scheduler, prediction ledger, model warm-up, paper-trading cycles and reconciliation
   api/                   app factory · middleware · error handlers · routers/*
   data/                  packaged vehicle profile · S&P 500 constituents and change-history snapshot
 frontend/                Streamlit app (app.py, api_client.py, components.py, charts.py, views/*)
-tests/                   unit · providers · integration · frontend · fixtures (real captured payloads)
+tests/                   unit · providers · integration · frontend · fixtures (real captured payloads) · fakes (Alpaca paper API, market data)
 ```
 
 ---
@@ -791,6 +1074,9 @@ tests/                   unit · providers · integration · frontend · fixture
 * **Secrets.** Stored as `SecretStr`; never logged or returned. `/system/status` reports only whether
   each credential is configured. `httpx` URL logging is suppressed because some vendors take keys in
   query strings.
+* **Paper trading.** The broker is always `TradingClient(..., paper=True)`, its endpoint is verified,
+  and `QP_ALPACA_PAPER=false` refuses to start. Keys stay inside the SDK client, and account numbers are
+  masked. Order endpoints need `QP_API_TOKEN` or a request from this machine. `.env` is git-ignored.
 * **Error handling.** Provider failures never produce a 500: the gateway absorbs them. Unexpected
   errors return a generic 500 with a `request_id` for log correlation.
 * **Logging.** Human-readable by default. Set `QP_LOG_JSON=true` for JSON lines that include the
@@ -838,3 +1124,18 @@ tests/                   unit · providers · integration · frontend · fixture
     and the next run learns from the longer interval.
   * An agent-mode account rebalances to its own targets, so its next run sells manual positions that
     fall outside them.
+* **Alpaca paper trading:**
+  * It is paper trading. Alpaca's paper fills have no market impact and can be kinder than real
+    execution, and a strategy that works on paper may not work with money. Nothing here is advice.
+  * The free Alpaca plan's quotes come from IEX (a few percent of US volume). The spread check and the
+    marketable-limit prices use the IEX bid/ask, which can be wider than the national best. With a paid
+    plan, set `QP_ALPACA_STOCK_FEED=sip`.
+  * Stops are evaluated at every cycle (every 30 minutes by default), not held as resting stop orders
+    at Alpaca, so a gap can fill well beyond the 8% level.
+  * The stock model and fundamentals are as of the last close; only the momentum, trend, volume and VWAP
+    signals see today's session. Revenue growth and analyst estimate revisions are not part of the
+    score: the SEC dataset QuantPulse stores has no revenue line, and estimates are slow per-stock calls.
+  * The first cycle on a fresh install downloads about 14 months of daily bars for the whole candidate
+    universe (a few minutes); later cycles only fetch the latest session.
+  * Cycles need the API process to be running. Performance statistics need weeks of recorded cycles
+    before they mean anything.

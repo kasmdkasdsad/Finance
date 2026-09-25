@@ -26,6 +26,7 @@ from frontend.views import (  # noqa: E402
     stock,
     system,
     track_record,
+    trading,
     valuation,
     vehicle,
 )
@@ -75,6 +76,14 @@ pages = {
             track_record.render, title="Track Record", icon=":material/fact_check:", url_path="track-record"
         ),
         st.Page(sandbox.render, title="Trading Sandbox", icon=":material/smart_toy:", url_path="sandbox"),
+    ],
+    "Alpaca Paper Trading": [
+        st.Page(
+            trading.render,
+            title="Paper Trading (Alpaca)",
+            icon=":material/candlestick_chart:",
+            url_path="trading",
+        ),
     ],
     "Corporate & Risk": [
         st.Page(

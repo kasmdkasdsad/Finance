@@ -76,6 +76,28 @@ class BatchHistoryProvider(Protocol):
     ) -> dict[str, PriceHistory]: ...
 
 
+class BatchQuoteProvider(Protocol):
+    name: str
+
+    def configured(self) -> bool: ...
+
+    async def quotes(self, symbols: Sequence[str]) -> dict[str, Quote]: ...
+
+
+QUOTE_BATCH = 100  # symbols per multi-symbol snapshot request
+QUOTE_FALLBACKS = 30  # per-symbol lookups allowed for names the batch source did not return
+
+
+@dataclass
+class LiveQuotes:
+    """Quotes fetched from a live vendor just now — never cached, archived or synthetic values."""
+
+    quotes: dict[str, Quote]
+    providers: dict[str, str]
+    fetched_at: datetime
+    missing: dict[str, str] = field(default_factory=dict)
+
+
 def history_frame(h: PriceHistory) -> pd.DataFrame:
     """OHLCV indexed by New York session date (naive midnight timestamps)."""
     idx = pd.DatetimeIndex([b.timestamp for b in h.bars])
@@ -181,6 +203,52 @@ class MarketService:
     ) -> dict[str, Resolved[Quote]]:
         results = await asyncio.gather(*(self.quote(s, force_refresh=force_refresh) for s in symbols))
         return dict(zip(symbols, results, strict=True))
+
+    async def live_quotes(self, symbols: Sequence[str]) -> LiveQuotes:
+        """Fresh quotes for many symbols, for trading: multi-symbol snapshots from a vendor that offers them
+        (Alpaca), then per-symbol lookups for the few it missed. Only answers a live vendor gave *now* are
+        returned — a symbol with nothing better than a cached, stale or synthetic price is listed in
+        ``missing`` instead."""
+        symbols = list(dict.fromkeys(symbols))
+        now = self._clock.now()
+        out = LiveQuotes({}, {}, now)
+        if not self._settings.enable_live_data:
+            out.missing = dict.fromkeys(symbols, "live data disabled (QP_ENABLE_LIVE_DATA=false)")
+            return out
+        todo = list(symbols)
+        for p in self._providers:
+            if not todo or not (hasattr(p, "quotes") and p.configured()):
+                continue
+            batcher: BatchQuoteProvider = p  # type: ignore[assignment]
+            for i in range(0, len(todo), QUOTE_BATCH):
+                chunk = todo[i : i + QUOTE_BATCH]
+                try:
+                    got = await batcher.quotes(chunk)
+                except Exception as exc:  # a failed batch falls through to the next source
+                    logger.warning("batch quotes from %s failed: %s", p.name, exc)
+                    continue
+                for s, q in got.items():
+                    if s in chunk:
+                        out.quotes[s], out.providers[s] = q, p.name
+            todo = [s for s in todo if s not in out.quotes]
+
+        async def one(symbol: str) -> None:
+            r = await self.quote(symbol, force_refresh=True)
+            if r.status is DataStatus.LIVE:
+                out.quotes[symbol], out.providers[symbol] = r.value, r.provenance.provider
+            else:
+                out.missing[symbol] = f"no live quote ({r.status.value} from {r.provenance.provider})"
+
+        sem = asyncio.Semaphore(PANEL_CONCURRENCY)
+
+        async def limited(symbol: str) -> None:
+            async with sem:
+                await one(symbol)
+
+        await asyncio.gather(*(limited(s) for s in todo[:QUOTE_FALLBACKS]))
+        for s in todo[QUOTE_FALLBACKS:]:
+            out.missing[s] = "not returned by the batch quote source"
+        return out
 
     async def history(
         self, symbol: str, interval: Interval = "1d", lookback_days: int = 365, *, force_refresh: bool = False

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from quantpulse.core.clock import utcnow
 from quantpulse.core.errors import NotFoundError
 from quantpulse.db.models import (
+    BrokerOrderRow,
     CompanyProfileRow,
     CompanyRow,
     EarningsEventRow,
@@ -43,6 +44,9 @@ from quantpulse.db.models import (
     SportsGameRow,
     TeamRatingRow,
     TelemetryRow,
+    TradingCycleRow,
+    TradingEventRow,
+    TradingStateRow,
     VehicleRow,
     YieldCurvePointRow,
 )
@@ -84,7 +88,8 @@ async def upsert_bars(session: AsyncSession, history: PriceHistory, provider: st
     """Store bars, writing only what is new.
 
     Bars from ``REVISION_WINDOW`` before the latest stored bar onwards are always rewritten (vendors revise
-    recent bars). If the stored closes in that overlap no longer match the vendor's, the history has been
+    recent bars), and so are bars older than the earliest stored one (a longer download backfilling
+    history). If the stored closes in the overlap no longer match the vendor's, the history has been
     re-adjusted (a split or dividend adjustment) and every bar is rewritten."""
     if not history.bars:
         return 0
@@ -92,7 +97,10 @@ async def upsert_bars(session: AsyncSession, history: PriceHistory, provider: st
     now = utcnow()
     bars = history.bars
     key = (PriceBarRow.symbol == history.symbol, PriceBarRow.interval == history.interval)
-    latest = (await session.execute(select(func.max(PriceBarRow.ts)).where(*key))).scalar_one_or_none()
+    span = (
+        await session.execute(select(func.min(PriceBarRow.ts), func.max(PriceBarRow.ts)).where(*key))
+    ).one()
+    earliest, latest = span[0], span[1]
     if latest is not None:
         cutoff = latest - REVISION_WINDOW
         recent = await session.execute(
@@ -102,7 +110,7 @@ async def upsert_bars(session: AsyncSession, history: PriceHistory, provider: st
         overlap = [b for b in bars if b.timestamp in stored]
         unchanged = all(abs(b.close - stored[b.timestamp]) <= 1e-9 * max(1.0, abs(b.close)) for b in overlap)
         if overlap and unchanged:
-            bars = [b for b in bars if b.timestamp >= cutoff]
+            bars = [b for b in bars if b.timestamp >= cutoff or b.timestamp < earliest]
     rows = [
         {
             "symbol": history.symbol,
@@ -1127,3 +1135,130 @@ async def facts_for(
             ).scalars()
         )
     return out
+
+
+# ----------------------------------------------------------------------------- Alpaca paper trading
+async def get_trading_state(session: AsyncSession, key: str) -> dict[str, Any] | None:
+    row = await session.get(TradingStateRow, key)
+    return dict(row.value) if row is not None else None
+
+
+async def put_trading_state(session: AsyncSession, key: str, value: Mapping[str, Any], now: datetime) -> None:
+    stmt = sqlite_insert(TradingStateRow).values(key=key, value=dict(value), updated_at=now)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["key"], set_={"value": stmt.excluded.value, "updated_at": stmt.excluded.updated_at}
+    )
+    await session.execute(stmt)
+
+
+async def add_trading_event(
+    session: AsyncSession,
+    kind: str,
+    message: str,
+    now: datetime,
+    *,
+    cycle_id: int | None = None,
+    symbol: str | None = None,
+    client_order_id: str | None = None,
+    details: Mapping[str, Any] | None = None,
+) -> TradingEventRow:
+    row = TradingEventRow(
+        created_at=now,
+        cycle_id=cycle_id,
+        kind=kind,
+        symbol=symbol,
+        client_order_id=client_order_id,
+        message=message,
+        details=dict(details or {}),
+    )
+    session.add(row)
+    return row
+
+
+async def trading_events(
+    session: AsyncSession,
+    limit: int = 200,
+    *,
+    kinds: Sequence[str] | None = None,
+    cycle_id: int | None = None,
+) -> list[TradingEventRow]:
+    stmt = select(TradingEventRow).order_by(TradingEventRow.id.desc()).limit(limit)
+    if kinds:
+        stmt = stmt.where(TradingEventRow.kind.in_(list(kinds)))
+    if cycle_id is not None:
+        stmt = stmt.where(TradingEventRow.cycle_id == cycle_id)
+    return list((await session.scalars(stmt)).all())
+
+
+async def get_broker_order(session: AsyncSession, client_order_id: str) -> BrokerOrderRow | None:
+    return (
+        await session.scalars(select(BrokerOrderRow).where(BrokerOrderRow.client_order_id == client_order_id))
+    ).first()
+
+
+async def broker_orders(
+    session: AsyncSession,
+    limit: int = 200,
+    *,
+    statuses: Sequence[str] | None = None,
+    exclude_statuses: Iterable[str] | None = None,
+    symbol: str | None = None,
+    since: datetime | None = None,
+) -> list[BrokerOrderRow]:
+    stmt = select(BrokerOrderRow).order_by(BrokerOrderRow.id.desc()).limit(limit)
+    if statuses:
+        stmt = stmt.where(BrokerOrderRow.status.in_(list(statuses)))
+    if exclude_statuses is not None:
+        stmt = stmt.where(BrokerOrderRow.status.not_in(list(exclude_statuses)))
+    if symbol:
+        stmt = stmt.where(BrokerOrderRow.symbol == symbol)
+    if since is not None:
+        stmt = stmt.where(BrokerOrderRow.created_at >= since)
+    return list((await session.scalars(stmt)).all())
+
+
+async def filled_broker_orders(session: AsyncSession) -> list[BrokerOrderRow]:
+    """Every order with at least one fill, oldest first (for round-trip performance)."""
+    stmt = (
+        select(BrokerOrderRow)
+        .where(BrokerOrderRow.filled_quantity > 0)
+        .order_by(BrokerOrderRow.filled_at, BrokerOrderRow.id)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def create_trading_cycle(session: AsyncSession, **fields: Any) -> TradingCycleRow:
+    row = TradingCycleRow(**fields)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_trading_cycle(session: AsyncSession, cycle_id: int) -> TradingCycleRow:
+    row = await session.get(TradingCycleRow, cycle_id)
+    if row is None:
+        raise NotFoundError(f"trading cycle {cycle_id} not found")
+    return row
+
+
+async def trading_cycle_by_key(session: AsyncSession, cycle_key: str) -> TradingCycleRow | None:
+    return (
+        await session.scalars(select(TradingCycleRow).where(TradingCycleRow.cycle_key == cycle_key))
+    ).first()
+
+
+async def trading_cycles(
+    session: AsyncSession,
+    limit: int = 50,
+    *,
+    statuses: Sequence[str] | None = None,
+    since: datetime | None = None,
+    oldest_first: bool = False,
+) -> list[TradingCycleRow]:
+    order = TradingCycleRow.started_at.asc() if oldest_first else TradingCycleRow.started_at.desc()
+    stmt = select(TradingCycleRow).order_by(order).limit(limit)
+    if statuses:
+        stmt = stmt.where(TradingCycleRow.status.in_(list(statuses)))
+    if since is not None:
+        stmt = stmt.where(TradingCycleRow.started_at >= since)
+    return list((await session.scalars(stmt)).all())

@@ -170,6 +170,19 @@ class ReferenceService:
         except ProviderError:
             return None
 
+    async def next_earnings(self, symbol: str) -> tuple[date | None, str | None]:
+        """The next earnings date and its source ('scheduled' vendor calendar or 'estimated' cadence),
+        without the price history :meth:`earnings` loads. Synthetic event histories give no date."""
+        today = self._clock.now().astimezone(NEW_YORK).date()
+        scheduled = await self.next_scheduled(symbol, today)
+        if scheduled is not None:
+            return scheduled, "scheduled"
+        ev = await self.events(symbol)
+        if ev.status is DataStatus.SYNTHETIC:
+            return None, None
+        estimated = earn.estimate_next(ev.value.earnings, today)
+        return estimated, "estimated" if estimated else None
+
     async def earnings(self, symbol: str) -> tuple[EarningsOut, Resolved[CompanyEvents]]:
         bench = self._settings.benchmark_symbol
         ev_r, hist_r, bench_r = await asyncio.gather(

@@ -26,7 +26,7 @@ import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -286,6 +286,15 @@ class _Run:
     fwd: pd.DataFrame | None = None  # realised forward returns (cash-out after a delisting)
     bench_fwd: pd.Series | None = None
     close: pd.DataFrame | None = None
+
+
+@dataclass(frozen=True)
+class ModelSnapshot:
+    live: dict[str, LiveScore]
+    features: pd.DataFrame  # symbols × raw features on the model's live date
+    as_of: date
+    data_status: DataStatus
+    label: str
 
 
 class ModelService:
@@ -809,6 +818,18 @@ class ModelService:
     ) -> tuple[dict[str, LiveScore], ModelReport]:
         run = await self._run(self.default_horizon, MODEL_HISTORY_DAYS, 5, symbols, wait=wait)
         return run.live, run.report
+
+    async def trading_snapshot(self, *, wait: float | None = None) -> ModelSnapshot:
+        """The default run's live scores and the raw features behind them (fundamentals, earnings reaction)
+        for the trading strategy. The last completed run is used while a new one trains."""
+        run = await self._run(self.default_horizon, MODEL_HISTORY_DAYS, 5, None, wait=wait)
+        return ModelSnapshot(
+            live=run.live,
+            features=run.latest_raw,
+            as_of=run.report.as_of,
+            data_status=run.report.data_status,
+            label=run.report.model_label,
+        )
 
     async def warm(self) -> str:
         """Start today's default run in the background unless it is cached or already running."""

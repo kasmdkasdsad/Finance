@@ -61,6 +61,7 @@ class _Bar(WireModel):
     l: float | None = None  # noqa: E741
     c: float | None = None
     v: float | None = None
+    vw: float | None = None
 
 
 class _StockSnapshot(WireModel):
@@ -300,5 +301,6 @@ def _snapshot_to_quote(symbol: str, snap: _StockSnapshot) -> Quote | None:
         day_high=positive_or_none(daily.h) if daily else None,
         day_low=positive_or_none(daily.l) if daily else None,
         volume=finite_or_none(daily.v) if daily else None,
+        vwap=positive_or_none(daily.vw) if daily else None,
         timestamp=stamp,
     )

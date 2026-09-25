@@ -494,3 +494,102 @@ class FundamentalFactRow(Base):
     period_end: Mapped[date] = mapped_column(Date)
     value: Mapped[float] = mapped_column(Float)
     accn: Mapped[str] = mapped_column(String(25))
+
+
+# ----------------------------------------------------------------------------- 0010 Alpaca paper trading
+
+
+class TradingCycleRow(Base):
+    """One strategy cycle against the Alpaca paper account (dry run or executed) and everything it saw."""
+
+    __tablename__ = "trading_cycles"
+    __table_args__ = (Index("ix_trading_cycles_started_at", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_key: Mapped[str] = mapped_column(String(48), unique=True)
+    trigger: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(12))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cash: Mapped[float | None] = mapped_column(Float, nullable=True)
+    buying_power: Mapped[float | None] = mapped_column(Float, nullable=True)
+    long_market_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    data_status: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    regime: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    positions: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    signals: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    targets: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    trades: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    plan: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    notes: Mapped[list[Any]] = mapped_column(JSON, default=list)
+
+
+class BrokerOrderRow(Base):
+    """An order QuantPulse sent to (or found on) the Alpaca paper account. Alpaca is authoritative; this
+    row is kept in step with it by reconciliation."""
+
+    __tablename__ = "broker_orders"
+    __table_args__ = (
+        Index("ix_broker_orders_symbol_created_at", "symbol", "created_at"),
+        Index("ix_broker_orders_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_order_id: Mapped[str] = mapped_column(String(128), unique=True)
+    alpaca_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("trading_cycles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    symbol: Mapped[str] = mapped_column(String(16))
+    side: Mapped[str] = mapped_column(String(4))
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional: Mapped[float | None] = mapped_column(Float, nullable=True)
+    order_type: Mapped[str] = mapped_column(String(20))
+    time_in_force: Mapped[str] = mapped_column(String(8), default="day")
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(24))
+    filled_quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    average_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    filled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    canceled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    strategy: Mapped[str] = mapped_column(String(32))
+    kind: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class TradingEventRow(Base):
+    """Audit trail: signals, proposals, risk decisions, orders, fills, kill switch, reconciliation."""
+
+    __tablename__ = "trading_events"
+    __table_args__ = (Index("ix_trading_events_created_at", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("trading_cycles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(40))
+    symbol: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class TradingStateRow(Base):
+    """Small persistent trading state (runtime kill switch, per-position memory, P/L baseline)."""
+
+    __tablename__ = "trading_state"
+
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)

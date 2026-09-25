@@ -12,7 +12,10 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
 * the prediction ledger — forecasts and model predictions are logged after ``predictions_log_time`` on
   trading days and graded when their target date's close is in;
 * the stock model — the run for the latest close is started in the background (every few minutes it
-  checks whether one is cached or running), so pages and the ledger rarely wait for it.
+  checks whether one is cached or running), so pages and the ledger rarely wait for it;
+* Alpaca paper trading — reconciliation at startup and every few minutes in the session, and one strategy
+  cycle per ``trading_rebalance_interval_minutes`` slot from ``trading_time`` (dry runs included; orders are
+  only sent when paper execution is enabled).
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ PICKS_CHECK_SECONDS = 60.0
 SANDBOX_CHECK_SECONDS = 60.0
 PREDICTIONS_CHECK_SECONDS = 60.0
 MODEL_WARM_SECONDS = 300.0
+TRADING_CHECK_SECONDS = 60.0
 
 
 @dataclass
@@ -90,6 +94,7 @@ class Poller:
                 self._loop("predictions", lambda: PREDICTIONS_CHECK_SECONDS, self.run_predictions)
             ),
             asyncio.create_task(self._loop("model", lambda: MODEL_WARM_SECONDS, self.warm_model)),
+            asyncio.create_task(self._loop("trading", lambda: TRADING_CHECK_SECONDS, self.run_trading)),
         ]
         logger.info("poller started (%d jobs)", len(self._tasks))
 
@@ -182,6 +187,9 @@ class Poller:
 
     async def run_predictions(self) -> str:
         return await self._c.predictions.run_scheduled()
+
+    async def run_trading(self) -> str:
+        return await self._c.trading.run_scheduled()
 
     async def warm_model(self) -> str:
         """Keep the latest close's model run computed, so pages and the ledger never wait for it."""
