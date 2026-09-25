@@ -452,11 +452,13 @@ def synthetic_company_facts(symbol: str, now: datetime) -> CompanyFacts:
     base_rev = 5e9 + 395e9 * _unit("rev", symbol)
     growth = 0.03 + 0.12 * _unit("growth", symbol)
     margin = 0.12 + 0.18 * _unit("margin", symbol)
-    anchor_price, _, _ = symbol_profile(symbol)
-    shares = base_rev * (3 + 5 * _unit("ps", symbol)) / anchor_price
     last = now.astimezone(NEW_YORK).year - 1
     first_price_day = _anchor_day(now) - timedelta(days=CACHED_SPAN_DAYS)
     days, closes = daily_closes(symbol, first_price_day, now)
+    # Shares are sized from the *earliest* simulated price. The anchor price is where the path ends, so
+    # sizing from it would leak every future return into market value (and into the value factors).
+    start_price = float(closes[0]) if len(closes) else symbol_profile(symbol)[0]
+    shares = base_rev * (3 + 5 * _unit("ps", symbol)) / start_price
     facts = CompanyFacts()
     for y in range(last - 5, last + 1):
         noise = [_normal(tag, symbol, y) for tag in ("rev", "margin", "cash", "assets")]

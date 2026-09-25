@@ -932,6 +932,47 @@ async def due_predictions(session: AsyncSession, on_or_before: date) -> list[Pre
     return list((await session.execute(query)).scalars())
 
 
+async def score_rows(
+    session: AsyncSession, *, symbol: str | None = None, origin: str | None = None
+) -> list[Any]:
+    """Only the columns the scorecard needs, as light rows (fast over hundreds of thousands of predictions)."""
+    p = PredictionRow
+    query = select(
+        p.source,
+        p.horizon_days,
+        p.status,
+        p.prob_up,
+        p.outcome_up,
+        p.in_50,
+        p.in_90,
+        p.prob_outperform,
+        p.outcome_outperform,
+        p.rank,
+        p.realized_return,
+        p.benchmark_return,
+    )
+    if symbol is not None:
+        query = query.where(p.symbol == symbol)
+    if origin is not None:
+        query = query.where(p.origin == origin)
+    return list((await session.execute(query)).all())
+
+
+async def recent_predictions(
+    session: AsyncSession, *, symbol: str | None = None, origin: str | None = None, limit: int = 60
+) -> list[PredictionRow]:
+    """Most recently resolved or logged first."""
+    query = select(PredictionRow)
+    if symbol is not None:
+        query = query.where(PredictionRow.symbol == symbol)
+    if origin is not None:
+        query = query.where(PredictionRow.origin == origin)
+    query = query.order_by(
+        func.coalesce(PredictionRow.resolved_at, PredictionRow.created_at).desc(), PredictionRow.id.desc()
+    ).limit(limit)
+    return list((await session.execute(query)).scalars())
+
+
 async def list_predictions(
     session: AsyncSession,
     *,

@@ -439,11 +439,11 @@ class PredictionService:
         self, symbol: str | None = None, origin: Literal["live", "backfill", "all"] = "all"
     ) -> Scorecard:
         """Scores for live predictions, the backfilled replay, or both (``origin``)."""
+        which = None if origin == "all" else origin
         async with self._db.session() as session:
-            rows = await repo.list_predictions(
-                session, symbol=symbol, origin=None if origin == "all" else origin, limit=None
-            )
-        groups: dict[tuple[str, int], list[PredictionRow]] = defaultdict(list)
+            rows = await repo.score_rows(session, symbol=symbol, origin=which)
+            recent = await repo.recent_predictions(session, symbol=symbol, origin=which, limit=60)
+        groups: dict[tuple[str, int], list[Any]] = defaultdict(list)
         for r in rows:
             groups[(r.source, r.horizon_days)].append(r)
         sources: list[SourceScore] = []
@@ -495,7 +495,6 @@ class PredictionService:
                         **stats,
                     )
                 )
-        recent = sorted(rows, key=lambda r: (r.resolved_at or r.created_at, r.id), reverse=True)[:60]
         return Scorecard(
             computed_at=self._clock.now(),
             symbol=symbol,

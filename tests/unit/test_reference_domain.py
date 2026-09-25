@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -174,3 +174,27 @@ def test_model_universe_setting_is_validated():
         Settings(_env_file=None, model_universe="AAPL,MSFT")
     with pytest.raises(ValidationError):
         Settings(_env_file=None, model_type="forest")
+
+
+def test_synthetic_fundamentals_do_not_see_the_future():
+    """Simulated market value must not encode where the simulated price path ends (a look-ahead leak that
+    would make value factors 'predict' returns on demo data)."""
+    from quantpulse.domain import features as feat
+    from quantpulse.providers import synthetic
+    from quantpulse.services.market import history_frame
+
+    now = datetime(2026, 9, 25, 20, 30, tzinfo=UTC)
+    syms = [f"LEAK{i:02d}" for i in range(40)]
+    close = pd.DataFrame(
+        {
+            s: history_frame(synthetic.synthetic_history(s, "1d", now - timedelta(days=1500), now, now))[
+                "close"
+            ]
+            for s in syms
+        }
+    )
+    factors = ff.fundamental_features({s: synthetic.synthetic_company_facts(s, now) for s in syms}, close)
+    fwd = feat.forward_returns(close, 21)
+    for name in ("earnings_yield", "book_to_market", "fcf_yield"):
+        ic = feat.row_spearman(factors[name], fwd).dropna()
+        assert len(ic) > 300 and abs(ic.mean()) < 0.08, (name, ic.mean())

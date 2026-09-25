@@ -748,7 +748,7 @@ The test suite checks four things:
 make check     # ruff lint + format check, mypy, pytest
 ```
 
-**313 tests.** No test touches the network. Every outbound request is mocked with `respx`, and
+**314 tests.** No test touches the network. Every outbound request is mocked with `respx`, and
 unmocked requests fail.
 
 | Suite | Covers |
