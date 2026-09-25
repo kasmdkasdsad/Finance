@@ -16,13 +16,16 @@ if str(ROOT) not in sys.path:  # allow `streamlit run frontend/app.py` from the 
 
 from frontend.api_client import ApiClient, ApiError  # noqa: E402
 from frontend.views import (  # noqa: E402
+    model_lab,
     options,
     overview,
     picks,
     portfolio,
     sandbox,
     sports,
+    stock,
     system,
+    track_record,
     valuation,
     vehicle,
 )
@@ -63,7 +66,14 @@ pages = {
     "Markets": [
         st.Page(overview.render, title="Command Center", icon=":material/dashboard:", default=True),
         st.Page(options.render, title="Options Lab", icon=":material/candlestick_chart:", url_path="options"),
+    ],
+    "Predictions": [
+        st.Page(stock.render, title="Stock Intelligence", icon=":material/query_stats:", url_path="stock"),
         st.Page(picks.render, title="Daily Picks", icon=":material/star:", url_path="picks"),
+        st.Page(model_lab.render, title="Model Lab", icon=":material/model_training:", url_path="model-lab"),
+        st.Page(
+            track_record.render, title="Track Record", icon=":material/fact_check:", url_path="track-record"
+        ),
         st.Page(sandbox.render, title="Trading Sandbox", icon=":material/smart_toy:", url_path="sandbox"),
     ],
     "Corporate & Risk": [

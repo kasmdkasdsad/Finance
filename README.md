@@ -14,12 +14,18 @@ synthetic data with a visible status badge.
 | **Portfolio risk lab** | Historical, parametric, Cornish-Fisher and Monte Carlo VaR/CVaR; Sharpe, Sortino, drawdown and beta; Ledoit-Wolf covariance; efficient frontier | Market providers · Treasury |
 | **Asset lifecycle** | 2025 Hyundai Elantra Limited: regional fuel prices, telemetry and fill-up logs, realised MPG, depreciation curve, maintenance schedule, cost per mile | EIA · fueleconomy.gov |
 | **Sports analytics** | Live NFL / FBS scoreboards and lines, Elo power ratings, pre-game and in-game win probability | ESPN · The Odds API |
-| **Daily picks** | Factor screen over a stock universe with a **1-10 rating**, plus an email digest | Market providers · SMTP |
+| **Price forecasts** | Probability ranges for any ticker 1 week to 3 months out (GARCH-t volatility, bootstrapped shocks), P(higher), P(above your target), options-implied moves and a walk-forward calibration test | Market providers · Treasury · option chains |
+| **Stock model** | 18-feature cross-sectional model trained **walk-forward** with purged labels; out-of-sample skill, backtest, calibrated P(beat SPY), signal research and the market regime | Market providers · Treasury |
+| **Stock intelligence** | One page per ticker: forecast cone, model rank, technicals, options view, DCF and the ticker's prediction track record, summarised in plain English | All of the above |
+| **Prediction ledger** | Logs every forecast and model call after the close from live data only, grades each on its target date, and keeps a Brier / hit-rate / coverage scorecard | Market providers |
+| **Daily picks** | Ranks a stock universe (factor rule, stock model, or both) with a **1-10 rating**, P(beat SPY) and 1-month ranges, plus an email digest | Market providers · SMTP |
 | **Trading sandbox** | Paper-trading accounts with simulated money, run by a **self-learning agent** that re-weights its factors from its own results; walk-forward training on history | Market providers · Treasury |
 
-> **Disclaimer.** Analytics, valuations, win probabilities, daily picks and the sandbox agent are model
-> outputs for research and education. They are not investment, betting or mechanical advice. The trading
-> sandbox is paper trading only: it has no brokerage connection and cannot place a real order.
+> **Disclaimer.** Analytics, valuations, forecasts, model rankings, win probabilities, daily picks and the
+> sandbox agent are model outputs for research and education. They are not investment, betting or
+> mechanical advice. Nobody can reliably predict individual stock prices; the platform's job is to give
+> honest probability ranges and to **measure** its own predictions against what happened (see the Track
+> Record page). The trading sandbox is paper trading only: it cannot place a real order.
 
 ---
 
@@ -32,14 +38,15 @@ synthetic data with a visible status badge.
 5. [Configuration](#configuration)
 6. [API reference](#api-reference)
 7. [Methodology](#methodology)
-8. [Daily picks and the email digest](#daily-picks-and-the-email-digest)
-9. [Trading sandbox (paper trading)](#trading-sandbox-paper-trading)
-10. [Vehicle module reference data](#vehicle-module-reference-data)
-11. [Database and migrations](#database-and-migrations)
-12. [Testing and quality gates](#testing-and-quality-gates)
-13. [Project layout](#project-layout)
-14. [Security and operations](#security-and-operations)
-15. [Known limitations](#known-limitations)
+8. [Predictions: forecasts, the stock model and the track record](#predictions-forecasts-the-stock-model-and-the-track-record)
+9. [Daily picks and the email digest](#daily-picks-and-the-email-digest)
+10. [Trading sandbox (paper trading)](#trading-sandbox-paper-trading)
+11. [Vehicle module reference data](#vehicle-module-reference-data)
+12. [Database and migrations](#database-and-migrations)
+13. [Testing and quality gates](#testing-and-quality-gates)
+14. [Project layout](#project-layout)
+15. [Security and operations](#security-and-operations)
+16. [Known limitations](#known-limitations)
 
 ---
 
@@ -96,7 +103,7 @@ flowchart LR
     CB --> PR[providers<br/>strict wire schemas]
     PR --> HTTP[HttpClient<br/>token buckets · retries · concurrency caps]
     HTTP --> EXT[(Yahoo · Polygon · Alpaca · Treasury · SEC · FMP · EIA · fueleconomy.gov · ESPN · Odds API)]
-    G --> WH[(SQLite warehouse<br/>Alembic 0001-0007)]
+    G --> WH[(SQLite warehouse<br/>Alembic 0001-0008)]
     G --> SYN[synthetic generators]
 ```
 
@@ -153,6 +160,7 @@ jittered exponential back-off.
 | NFL and FBS scoreboards | `QP_POLL_SPORTS_SECONDS` |
 | Daily picks email | Checked every minute; sent once per trading day |
 | Trading sandbox | Checked every minute; auto-trading agents run once per trading day after `QP_SANDBOX_TRADE_TIME`, and every account is marked to market after `QP_SANDBOX_MARK_TIME` |
+| Prediction ledger | Checked every minute; logs predictions once per trading day after `QP_PREDICTIONS_LOG_TIME`, and grades due ones every 15 minutes |
 
 Trading hours come from a full NYSE calendar (`core/market_calendar.py`). It covers holidays and
 their Saturday/Sunday observance, including the New Year's exception, Good Friday via the Gregorian
@@ -196,6 +204,7 @@ which would include query-string API keys, is suppressed.
 | Sports | `QP_SPORTS_INCLUDE_PRIOR_SEASON`, `QP_ODDS_BOOKMAKER_REGIONS` |
 | Picks / email | `QP_PICKS_UNIVERSE`, `QP_PICKS_TOP_N`, `QP_PICKS_EMAIL_ENABLED`, `QP_PICKS_RECIPIENTS`, `QP_PICKS_SEND_TIME`, `QP_PICKS_ALLOW_SYNTHETIC_EMAIL`, `QP_SMTP_*`, `QP_EMAIL_FROM` |
 | Trading sandbox | `QP_SANDBOX_SCHEDULER_ENABLED`, `QP_SANDBOX_TRADE_TIME` (default 10:00 ET), `QP_SANDBOX_MARK_TIME` (default 16:05 ET); per-account strategy settings are set through the API or UI |
+| Predictions | `QP_PREDICTIONS_ENABLED`, `QP_PREDICTIONS_LOG_TIME` (default 16:20 ET), `QP_PREDICTIONS_ALLOW_SYNTHETIC` (default off), `QP_TTL_MODEL` (how long a model run is reused, default 6 h) |
 
 The Streamlit app reads `QP_API_URL` (default `http://127.0.0.1:8000`) and `QP_API_TOKEN`. Both can
 also be changed in the sidebar.
@@ -233,7 +242,12 @@ Every response carries `X-Request-ID` and `X-Response-Time-ms` headers.
 | `GET/POST /vehicles` · `GET/DELETE /vehicles/{id}` · `GET /vehicles/{id}/dashboard` | Vehicles and the cost dashboard |
 | `GET/POST /vehicles/{id}/telemetry` · `…/fuel-logs` · `…/maintenance` · `DELETE /vehicles/{id}/{kind}/{record_id}` | Telemetry and logs |
 | `GET /sports/{nfl|college-football}/scoreboard` · `…/ratings` | Scores with win probability · Elo ratings |
-| `GET /picks/daily?top_n=10` · `POST /picks/email` | Daily picks with 1-10 ratings · email digest |
+| `GET /picks/daily?top_n=10&method=auto` · `POST /picks/email` | Daily picks (`auto`, `factors`, `model` or `blend` ranking) with 1-10 ratings, P(beat benchmark) and 1-month ranges · email digest |
+| `GET /forecast/{symbol}?horizons=5,21,63&target=&options=true&calibrate=false` | Price ranges and probabilities per horizon, options-implied view, optional walk-forward calibration |
+| `GET /stocks/{symbol}/report` | Stock intelligence: technicals, forecast, model rank, options view, DCF, track record, plain-English summary |
+| `GET /model/report?horizon=21&top_k=5&symbols=` · `GET /model/research` | Walk-forward stock model (out-of-sample skill, backtest, calibration, live ranks) · signal IC research |
+| `GET /market/regime` | Trend, volatility, breadth and yield-curve regime with historical context |
+| `GET /predictions` · `GET /predictions/scorecard` · `POST /predictions/log` · `POST /predictions/resolve` | The prediction ledger and its scorecard |
 | `GET/POST /sandbox/accounts` · `GET/PATCH/DELETE /sandbox/accounts/{id}` | Paper accounts · summary marked to live prices |
 | `POST /sandbox/accounts/{id}/step?force=` · `…/train` · `…/orders` · `…/reset?keep_learning=` | Run the agent · walk-forward training · manual paper order · start over |
 | `GET /sandbox/accounts/{id}/trades` · `…/equity` · `…/journal` | Fills · equity snapshots · what the agent did and learned |
@@ -346,6 +360,122 @@ curl -N 'localhost:8000/api/v1/market/stream?symbols=SPY,QQQ&interval=5'
 
 ---
 
+## Predictions: forecasts, the stock model and the track record
+
+This part of the platform answers three questions for any stock: *what range of prices is plausible*,
+*how does it rank against other stocks*, and *has any of this actually worked*. In the UI it is the
+**Predictions** group: Stock Intelligence, Daily Picks, Model Lab, Track Record and the Trading Sandbox.
+
+### Price forecasts (`quant/volatility.py`, `quant/forecasting.py`, `GET /forecast/{symbol}`)
+
+1. **Volatility.** A GARCH(1,1) model with Student-t shocks is fitted by maximum likelihood to five years
+   of daily log returns, with variance targeting (the long-run variance is pinned to the sample
+   variance). It captures volatility clustering (calm and turbulent periods persist) and fat tails.
+   With under 250 returns the model falls back to EWMA (RiskMetrics, λ = 0.94).
+2. **Simulation.** 5,000 price paths are simulated with *filtered historical simulation*. Each day draws
+   one of the stock's own standardised historical shocks, scales it by the GARCH volatility, and updates
+   the variance. Skew and fat tails therefore come from the stock's history rather than an assumption.
+3. **Drift.** The expected return is CAPM: `r_f + β × ERP − dividend yield`. Beta is two-year daily beta,
+   Blume-adjusted towards 1. Optionally the stock model's calibrated view is added as a tilt. Each
+   horizon is shifted so the *mean* simulated price matches that drift exactly. Direction is a weak
+   signal, so ranges barely lean up or down; that is deliberate.
+4. **Outputs** per horizon (default 1 week, 1 month and 3 months):
+   * the 5/25/50/75/95% price quantiles (the cone on the Stock Intelligence chart);
+   * P(price higher) and, if you give a target, P(price above target);
+   * 5% value-at-risk and expected shortfall.
+5. **Options view** (`quant/implied.py`). For the expiry nearest each horizon, the ATM implied
+   volatility gives the market's ±1σ move, and the whole smile gives a risk-neutral distribution by
+   Breeden-Litzenberger (`P(S_T > K) = −∂C/∂K / DF`). This includes the skew, so crash insurance
+   priced into puts shows up. These are *risk-neutral* probabilities: they embed risk premia and are
+   not unbiased forecasts.
+6. **Calibration** (`calibrate=true`, or the button on Stock Intelligence). The forecaster is replayed
+   over the stock's history with no look-ahead: it is refitted every 63 days, a forecast is made every
+   5 days, and each forecast is scored against the realised price. It reports:
+   * how often outcomes fell inside the 50% and 90% bands;
+   * a PIT histogram (flat means the ranges were honest);
+   * the ratio of realised to forecast volatility;
+   * the Brier skill of P(up) against the base rate (expect about 0).
+
+   On simulated GARCH data the unit tests require 90% ± 4% coverage and an unbiased volatility ratio.
+
+### The stock model (`domain/features.py`, `domain/alpha_model.py`, `GET /model/report`)
+
+* **Features (18, point-in-time).** 12-1, 6-1 and 3-month momentum; 1-month and 5-day returns;
+  50/200-day trend; price vs 50-day average; distance from the 52-week high; 3-month and relative
+  volatility; 6-month Sharpe; RSI(14); Bollinger %B; one-year beta; idiosyncratic volatility; the
+  largest daily gain in the last month (lottery effect); skewness; and volume trend. Each feature is
+  z-scored across the universe every day and winsorised at ±3.
+* **Target.** The rank of each stock's next-21-day return within the universe, mapped to normal
+  scores. The model predicts *relative* performance, not market direction.
+* **Walk-forward training.** A ridge regression is refitted every 21 trading days on a rolling
+  three-year window.
+  * **Purging.** To predict on day *t* it uses only samples from days *s ≤ t − 21*, whose labels are
+    fully known by *t*.
+  * **Penalty.** The ridge penalty is chosen on a purged hold-out made of the last quarter of each
+    training window.
+  * **Scoring.** Every statistic below comes from predictions made this way.
+
+  A unit test perturbs future labels and checks that past predictions do not change. Other tests check
+  that a planted signal is found and that pure noise is **not** reported as skill.
+* **Out-of-sample evaluation.**
+  * The information coefficient (IC): the daily rank correlation of prediction and realised return.
+    Its t-statistic uses non-overlapping dates.
+  * The hit rate against the median.
+  * The average return of each prediction quintile.
+  * A top-5 long-only portfolio rebalanced every 21 days, net of 10 bps per trade, against an
+    equal-weight universe and SPY.
+  * The same IC statistics for the hand-set Daily Picks factor rule, as a baseline to beat.
+* **Verdict.** Plain English. "Evidence of skill" needs t ≥ 2 on out-of-sample ICs. Otherwise the page
+  says there is no reliable evidence, and Daily Picks in `auto` mode keep using the factor rule.
+* **Probabilities.** Out-of-sample predictions are bucketed. In each bucket, the observed frequency of
+  beating SPY over 21 days (and the mean excess return) is shrunk towards the base rate and made
+  monotone (pool-adjacent-violators). Live scores are mapped through that table, so a model without
+  skill reports probabilities near the base rate instead of confident-sounding numbers.
+* **Signal research** (`GET /model/research`). Each feature's IC at 1, 5, 21 and 63 days (IC decay),
+  its quintile spread, and the feature correlation matrix.
+* **Market regime** (`GET /market/regime`, shown on the Command Center). SPY is labelled Uptrend,
+  Volatile uptrend, Downtrend or Stress, from its 200-day average and the percentile of its current
+  volatility. The panel adds breadth (share of the universe above its 200-day average), the
+  10-year minus 3-month yield spread, and what followed historically in the same trend state.
+
+### Stock Intelligence (`GET /stocks/{symbol}/report`)
+
+It combines everything above for one ticker:
+* a one-year chart with 50/200-day averages, continued by the 63-day forecast cone;
+* a horizon table with model and options views side by side;
+* volatility-model and drift details;
+* the stock model's rank (tickers outside the universe are scored against the universe's latest
+  cross-section);
+* technicals, a DCF summary, and the ticker's graded predictions.
+
+A short plain-English summary ties each takeaway to a number.
+
+### The prediction ledger and Track Record (`GET /predictions/scorecard`)
+
+After each close (`QP_PREDICTIONS_LOG_TIME`, 16:20 ET) the poller logs, for every stock in
+`QP_PICKS_UNIVERSE`:
+* the 5- and 21-day price forecasts (P(up) and the 5-95% quantiles);
+* the stock model's rank and P(beat SPY).
+
+Every prediction is anchored on that day's official close. On its target date's close it is graded
+automatically:
+* did the price rise;
+* did it beat SPY;
+* did it land in the 50% and 90% bands.
+
+The scorecard reports:
+* the Brier score (0 is perfect, 0.25 is a coin flip);
+* Brier skill against always predicting the base rate;
+* the hit rate;
+* band coverage;
+* a reliability chart (predicted vs observed);
+* for the model, the excess return of its top-5 names against the rest.
+
+Predictions are never logged from synthetic prices (unless `QP_PREDICTIONS_ALLOW_SYNTHETIC=true`), so
+the record only ever reflects real markets. Expect a few weeks of results to be mostly noise.
+
+---
+
 ## Daily picks and the email digest
 
 `GET /api/v1/picks/daily` screens `QP_PICKS_UNIVERSE` (30 liquid large caps by default) on daily closes:
@@ -364,6 +494,16 @@ and mapped to **`rating = round(1 + 9·Φ(z))` on a 1-10 scale**. The top-ranked
 "best stock for the day". Ratings are *relative to the screened universe*. After the close, picks are
 labelled for the next trading session.
 
+**Ranking method** (`method=`):
+* `factors` is the hand-set rule above.
+* `model` uses the walk-forward [stock model](#the-stock-model-domainfeaturespy-domainalpha_modelpy-get-modelreport).
+* `blend` averages the two standardised scores.
+* `auto` (the default) uses `blend` only when the stock model has shown out-of-sample skill (t ≥ 2).
+  Otherwise it uses the factor rule and says so.
+
+Every pick also shows the model's calibrated P(beat SPY over 21 days), its model rank, and the
+forecaster's 21-day 90% price range and P(higher).
+
 **Email.** Configure SMTP. For Gmail, use an app password with `smtp.gmail.com:587` and STARTTLS:
 
 ```env
@@ -377,7 +517,8 @@ QP_PICKS_RECIPIENTS=recipient@example.com
 QP_PICKS_EMAIL_ENABLED=true        # send automatically each trading day at QP_PICKS_SEND_TIME (ET)
 ```
 
-The digest (plain text and HTML) lists rank, symbol, rating/10, price, day change and drivers, and
+The digest (plain text and HTML) lists rank, symbol, rating/10, price, day change, P(beat SPY), the
+1-month 90% range and drivers, and
 includes the methodology and disclaimer. You can also send it on demand with
 `POST /api/v1/picks/email` or from the **Daily Picks** screen.
 
@@ -424,6 +565,7 @@ with `POST …/step`:
 
 | Strategy setting | Default | Meaning |
 |---|---|---|
+| `signal` | `factors` | `factors`: the self-weighting factor rule described above. `model`: hold the walk-forward stock model's top names (the model retrains itself monthly; the IC re-weighting step is skipped) |
 | `universe` | `QP_PICKS_UNIVERSE` | Tickers the agent may trade (at least 3) |
 | `top_k` · `max_position` · `cash_buffer` | 5 · 25% · 2% | Portfolio construction |
 | `learning_rate` (η) · `prior_shrink` · `weight_floor` | 0.5 · 5% · 2% | Learning speed and guard rails (η = 0 disables learning) |
@@ -500,6 +642,7 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0005_vehicle_lifecycle` | `vehicles`, `telemetry_readings`, `fuel_logs`, `maintenance_records`, `fuel_price_observations` |
 | `0006_sports` | `sports_games`, `team_ratings` |
 | `0007_trading_sandbox` | `sandbox_accounts`, `sandbox_positions`, `sandbox_trades`, `sandbox_equity`, `sandbox_journal` |
+| `0008_prediction_ledger` | `predictions` |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)
@@ -523,14 +666,14 @@ The test suite checks four things:
 make check     # ruff lint + format check, mypy, pytest
 ```
 
-**241 tests.** No test touches the network. Every outbound request is mocked with `respx`, and
+**278 tests.** No test touches the network. Every outbound request is mocked with `respx`, and
 unmocked requests fail.
 
 | Suite | Covers |
 |---|---|
-| `tests/unit` | BSM against Hull's textbook values, put-call parity, every Greek vs finite differences, IV round trips, rates; DCF by hand; Monte Carlo reproducibility; VaR/CVaR closed forms; Ledoit-Wolf; frontier optimality vs the analytic tangency portfolio; vol-surface recovery; vehicle and sports models; the daily-picks screener; the paper broker (fills, slippage, no shorting or margin) and the learning agent (IC direction, walk-forward without look-ahead); cache, single-flight, token bucket, circuit breaker; the gateway fallback chain; the NYSE calendar |
+| `tests/unit` | BSM against Hull's textbook values, put-call parity, every Greek vs finite differences, IV round trips, rates; DCF by hand; Monte Carlo reproducibility; VaR/CVaR closed forms; Ledoit-Wolf; frontier optimality vs the analytic tangency portfolio; vol-surface recovery; vehicle and sports models; GARCH-t parameter recovery and likelihood vs SciPy, forecast calibration on simulated data and no look-ahead, Breeden-Litzenberger vs Black-Scholes; the feature library, the walk-forward model (planted signal found, noise not over-claimed, future labels cannot leak), signal research and regime; the daily-picks screener; the paper broker (fills, slippage, no shorting or margin) and the learning agent (IC direction, walk-forward without look-ahead); cache, single-flight, token bucket, circuit breaker; the gateway fallback chain; the NYSE calendar |
 | `tests/providers` | Parsers validated against **real captured payloads** (SEC EDGAR for Apple and Alphabet, Treasury CSV, fueleconomy.gov, ESPN scoreboards) and documented vendor shapes (Yahoo crumb flow and chart adjustment, Polygon pagination and plan errors, Alpaca and OCC symbols, FMP field variants, EIA, Odds API); HTTP retries, 429 back-off, concurrency caps |
-| `tests/integration` | Every API endpoint through ASGI: provenance transitions (live → cached → warehouse-stale → synthetic), validation errors, auth, SSE, WebSocket, portfolio, vehicle, picks and trading-sandbox flows (orders, the agent learning across days, training, the synthetic-data refusals), the email policy, poller scheduling, migrations, repositories |
+| `tests/integration` | Every API endpoint through ASGI: provenance transitions (live → cached → warehouse-stale → synthetic), validation errors, auth, SSE, WebSocket, portfolio, vehicle, picks (all ranking methods), forecast, stock-model, stock-report and regime endpoints, the prediction ledger (logging, grading a week later, scorecard, scheduler, intraday and synthetic refusals), trading-sandbox flows (orders, the agent learning across days, trading on the model, training, the synthetic-data refusals), the email policy, poller scheduling, migrations, repositories |
 | `tests/frontend` | API client error handling, and **every Streamlit page** plus its interactive forms run with `AppTest` against a real in-process API server |
 
 CI (`.github/workflows/ci.yml`) runs lint, format, mypy, the migration round trip and tests on
@@ -544,13 +687,13 @@ Python 3.11 and 3.12. It then builds the Docker image and smoke-tests it.
 src/quantpulse/
   config.py              settings (pydantic-settings, SecretStr)
   core/                  cache · rate limiter · circuit breaker · HTTP client · gateway · NYSE calendar
-  quant/                 black_scholes · rates · vol_surface · dcf · monte_carlo · risk · optimization
-  domain/                vehicle · sports (Elo, win probability) · screener (daily picks) · paper_broker · trading_agent
+  quant/                 black_scholes · rates · vol_surface · dcf · monte_carlo · risk · optimization · volatility (GARCH) · forecasting · implied
+  domain/                vehicle · sports · screener · paper_broker · trading_agent · features · alpha_model · research · regime
   providers/             yahoo · polygon · alpaca · treasury · sec_edgar · fmp · eia · fueleconomy · espn · odds_api · synthetic
   schemas/               Pydantic v2 request/response/ingestion models
-  db/                    models · repositories · session · migrate · migrations/versions/0001-0007
-  services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · notifications · container
-  workers/poller.py      market-hours-aware background refresh, scheduled email, sandbox scheduler
+  db/                    models · repositories · session · migrate · migrations/versions/0001-0008
+  services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · forecast · model · stocks · predictions · notifications · container
+  workers/poller.py      market-hours-aware refresh, scheduled email, sandbox scheduler, prediction ledger
   api/                   app factory · middleware · error handlers · routers/*
   data/                  packaged vehicle profile
 frontend/                Streamlit app (app.py, api_client.py, components.py, charts.py, views/*)
@@ -588,8 +731,17 @@ tests/                   unit · providers · integration · frontend · fixture
     UI. There is no vehicle OEM API integration.
   * Depreciation is a parametric model, not live used-car pricing.
   * When no telemetry exists, a simulated odometer is used and labelled.
-* **Picks:** a backward-looking factor screen. Ratings are relative to the universe and are **not** a
-  forecast or investment advice.
+* **Picks:** ratings are relative to the universe and are **not** a forecast of absolute returns or
+  investment advice.
+* **Forecasts and the stock model:**
+  * The price forecast is a volatility model with a CAPM drift. It says how *wide* the range is, and
+    deliberately almost nothing about direction.
+  * The stock model uses price and volume features only (no fundamentals, news or earnings dates). It
+    is trained on a 30-stock universe, so its statistics are noisy, and past out-of-sample skill can
+    vanish.
+  * The walk-forward protocol avoids look-ahead, but the default universe is today's large caps, which
+    introduces survivorship bias into the backtest.
+  * Options-implied probabilities are risk-neutral, and need a live option chain.
 * **Trading sandbox:**
   * Fills are simulated at the quote ± slippage. There is no order book, partial fills, market impact
     beyond the slippage setting, dividends, or corporate actions on paper positions.

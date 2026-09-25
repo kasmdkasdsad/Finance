@@ -3,7 +3,20 @@
 import pytest
 from streamlit.testing.v1 import AppTest
 
-PAGES = ["overview", "options", "picks", "sandbox", "valuation", "portfolio", "vehicle", "sports", "system"]
+PAGES = [
+    "overview",
+    "options",
+    "stock",
+    "picks",
+    "model_lab",
+    "track_record",
+    "sandbox",
+    "valuation",
+    "portfolio",
+    "vehicle",
+    "sports",
+    "system",
+]
 
 
 def page(module: str, api_url: str, state: dict | None = None) -> AppTest:
@@ -129,3 +142,33 @@ def test_sandbox_account_agent_and_training_flow(api_server):
     assert at.session_state["sandbox_view"] == "Learning"
     assert any(m.label == "Weights applied" and m.value == "Yes" for m in at.metric)  # synthetic allowed
     assert len(at.get("plotly_chart")) == 3  # learned weights, replay equity, replay weights
+
+
+def test_prediction_pages_interactions(api_server):
+    at = page("stock", api_server, {"stock_symbol": "MSFT"})
+    at.run()
+    assert_clean(at)
+    assert any(m.label == "P(higher in 1 month)" for m in at.metric)
+    assert len(at.get("plotly_chart")) >= 1 and any("SYNTHETIC" in w.value for w in at.warning)
+    next(b for b in at.button if b.label == "Test the forecaster on this stock's history").click().run()
+    assert_clean(at)
+    assert any(m.label == "Inside 90% range" for m in at.metric)
+
+    at = page("model_lab", api_server)
+    at.run()
+    assert_clean(at)
+    assert any(m.label == "Mean IC (model)" for m in at.metric) and len(at.get("plotly_chart")) == 5
+    at.segmented_control(key="lab_view").set_value("Signal research").run()
+    assert_clean(at)
+    assert len(at.get("plotly_chart")) == 1
+
+    at = page("track_record", api_server)
+    at.run()
+    assert_clean(at)
+    assert any("No predictions logged yet" in i.value for i in at.info)
+
+    at = page("picks", api_server)
+    at.run()
+    at.segmented_control(key="picks_method").set_value("model").run()
+    assert_clean(at)
+    assert any("Ranked by the stock model" in c.value for c in at.caption)

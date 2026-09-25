@@ -33,8 +33,21 @@ def _universe(text: str) -> list[str] | None:
 
 def _strategy_inputs(prefix: str, current: dict[str, Any] | None = None) -> dict[str, Any]:
     cur = current or {}
+    signals = ["factors", "model"]
+    signal = st.radio(
+        "Signal",
+        signals,
+        index=signals.index(cur.get("signal", "factors")),
+        horizontal=True,
+        key=f"{prefix}_signal",
+        format_func={
+            "factors": "Factor rule (re-weights its factors from its own results)",
+            "model": "Stock model (walk-forward ridge, retrained monthly)",
+        }.get,
+    )
     c = st.columns(4)
     strategy: dict[str, Any] = {
+        "signal": signal,
         "top_k": c[0].number_input("Names held (top k)", 1, 20, int(cur.get("top_k", 5)), key=f"{prefix}_k"),
         "max_position": c[1].slider(
             "Max per name", 0.05, 1.0, float(cur.get("max_position", 0.25)), 0.05, key=f"{prefix}_maxpos"

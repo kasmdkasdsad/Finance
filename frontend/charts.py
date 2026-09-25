@@ -109,3 +109,22 @@ def base_layout(fig: go.Figure, title: str | None = None, height: int = 360, **k
 
 def show(fig: go.Figure, key: str | None = None) -> None:
     st.plotly_chart(fig, width="stretch", key=key, config={"displaylogo": False, "responsive": True})
+
+
+def rgba(hex_color: str, alpha: float) -> str:
+    """``#rrggbb`` → ``rgba(r,g,b,a)`` (for translucent bands of a single series hue)."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def reference_line(fig: go.Figure, y: float, label: str | None = None) -> None:
+    """A solid hairline reference (zero, 50%, the diagonal's anchor) in muted ink, never dashed."""
+    fig.add_hline(
+        y=y,
+        line_width=1,
+        line_color=theme()["axis"],
+        annotation_text=label,
+        annotation_position="bottom right",
+        annotation_font_color=theme()["muted"],
+    )

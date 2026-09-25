@@ -21,10 +21,22 @@ FACTOR_LABELS = {
 
 def render() -> None:
     st.title("Daily Picks")
-    c1, c2 = st.columns([1, 3])
+    c1, c2, c3 = st.columns([1, 2, 1], vertical_alignment="bottom")
     top_n = c1.slider("How many", 5, 30, 10)
-    refresh = c2.toggle("Force fresh prices", value=False, help="Bypass the cache (slower; uses API quota)")
-    res = guarded(lambda: api().get("/picks/daily", top_n=top_n, refresh=refresh), "daily picks")
+    method = c2.segmented_control(
+        "Ranking",
+        ["auto", "factors", "model", "blend"],
+        default="auto",
+        key="picks_method",
+        format_func={"auto": "Auto", "factors": "Factor rule", "model": "Stock model", "blend": "Blend"}.get,
+        help="Auto uses the stock model only when it has shown out-of-sample skill.",
+    )
+    refresh = c3.toggle("Force fresh prices", value=False, help="Bypass the cache (slower; uses API quota)")
+    with st.spinner("Ranking the universe…"):
+        res = guarded(
+            lambda: api().get("/picks/daily", top_n=top_n, refresh=refresh, method=method or "auto"),
+            "daily picks",
+        )
     if not res:
         return
     d = res["data"]
@@ -55,6 +67,13 @@ def render() -> None:
                 "rating": p["rating"],
                 "price": p["price"],
                 "day_%": p["change_percent"],
+                f"P(beat {d['benchmark']})": p["prob_outperform"],
+                "1-month 90% range": "—"
+                if p["low_21d"] is None
+                else f"${p['low_21d']:,.2f} – ${p['high_21d']:,.2f}",
+                "P(up, 1 mo)": p["prob_up_21d"],
+                "factor rating": p["factor_rating"],
+                "model rank": p["model_rank"],
                 "drivers": ", ".join(p["drivers"]),
                 "data": p["data_status"],
             }
@@ -90,8 +109,16 @@ def render() -> None:
             "rating": st.column_config.ProgressColumn("Rating", min_value=0, max_value=10, format="%d/10"),
             "price": st.column_config.NumberColumn(format="%.2f"),
             "day_%": st.column_config.NumberColumn(format="%+.2f%%"),
+            f"P(beat {d['benchmark']})": st.column_config.NumberColumn(format="percent"),
+            "P(up, 1 mo)": st.column_config.NumberColumn(format="percent"),
         },
     )
+    method_label = {"factors": "the factor rule", "model": "the stock model", "blend": "a blend of both"}
+    st.caption(f"Ranked by {method_label.get(d['method'], d['method'])}.")
+    for note in d["notes"]:
+        st.info(note, icon=":material/info:")
+    if d["model_verdict"]:
+        st.caption("Stock model: " + d["model_verdict"])
     with st.expander("Factor z-scores (table view)"):
         z = pd.DataFrame(
             [
