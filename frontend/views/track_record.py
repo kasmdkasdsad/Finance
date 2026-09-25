@@ -48,13 +48,21 @@ def _reliability(score: dict[str, Any], key: str) -> None:
     charts.show(fig, key=key)
 
 
+def _count(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 10_000 else f"{n:,}"
+
+
 def _score_panel(score: dict[str, Any]) -> None:
     title = f"{SOURCE_LABEL[score['source']]} · {score['horizon_days']} trading days"
     with st.container(border=True):
         st.markdown(f"**{title}**")
         k = st.columns(5)
         k[0].metric(
-            "Graded", score["resolved"], f"{score['open']} open", delta_color="off", delta_arrow="off"
+            "Graded",
+            _count(score["resolved"]),
+            f"{score['open']:,} open",
+            delta_color="off",
+            delta_arrow="off",
         )
         k[1].metric(
             "Brier score",
@@ -164,10 +172,8 @@ def render() -> None:
             "The replay is point-in-time but not live: it uses today's risk-free rate and dividend yield and no "
             "options. Trust the live record more once it has a few months of results."
         )
-    cols = st.columns(2, gap="large")
-    for i, score in enumerate(card["sources"]):
-        with cols[i % 2]:
-            _score_panel(score)
+    for score in card["sources"]:
+        _score_panel(score)
     st.subheader("Recent predictions")
     recent = pd.DataFrame(card["recent"])
     if not recent.empty:

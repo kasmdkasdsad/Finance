@@ -210,8 +210,10 @@ def _earnings(symbol: str, fc: dict[str, Any]) -> None:
         return
     k = st.columns(4)
     if e and e["next_date"]:
-        when = f"{e['next_date']}" + (f" (in {e['sessions_ahead']} sessions)" if e["sessions_ahead"] else "")
-        k[0].metric("Next reaction day", when, e["source"], delta_color="off", delta_arrow="off")
+        ahead = f"in {e['sessions_ahead']} sessions · " if e["sessions_ahead"] else ""
+        k[0].metric(
+            "Next reaction day", e["next_date"], f"{ahead}{e['source']}", delta_color="off", delta_arrow="off"
+        )
     else:
         k[0].metric("Next reaction day", "—")
     k[1].metric(
@@ -221,8 +223,8 @@ def _earnings(symbol: str, fc: dict[str, Any]) -> None:
     )
     k[2].metric("Past releases used", e["events_used"] if e else 0)
     k[3].metric(
-        "In the forecast",
-        "jump simulated" if e and e["modelled"] else "not in horizon" if e else "—",
+        "Jump in the forecast",
+        "yes" if e and e["modelled"] else "no" if e else "—",
         help="Earnings days are left out of the volatility model and added back as jumps on the day they are due",
     )
     if res and res["data"]["reactions"]:
