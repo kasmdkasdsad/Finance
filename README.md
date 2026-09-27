@@ -1097,11 +1097,13 @@ Every trade it proposes is previewed by the same deterministic risk engine that 
 (`services/trading_risk.RiskBook`), and the verdict is recorded. The brain has no broker access beyond a
 read-only view (account, positions, open orders, clock): every Alpaca request it makes is a `GET`.
 
-**Status (built and tested):** the agent interface, registry and orchestrator; fifteen deterministic
-agents; working memory; opportunity detection; consensus with visible disagreement and an adversarial
-debate; proposed actions with a risk preview; grading of predictions against real prices, reflection and
-measured track records; persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Paper
-Trading*). What is not built yet is listed at the end of this section.
+**Status (built and tested):** the agent interface, registry and orchestrator; sixteen deterministic
+agents and one optional model-backed agent; working memory; opportunity detection; consensus with visible
+disagreement and an adversarial debate; proposed actions with a risk preview; grading of predictions
+against real prices, reflection and measured track records; a supervisor that runs by session and by
+event; a strategy lab; self-improvement proposals; a provider-agnostic language-model layer (no provider
+is built in); persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Paper
+Trading*). What is not built is listed under [Known limitations](#known-limitations).
 
 ### One cycle
 
@@ -1137,7 +1139,9 @@ Trading*). What is not built yet is listed at the end of this section.
    * working: this cycle's investigation;
    * long term: regime changes and proposed trades.
 
-### Agents (all deterministic)
+### Agents
+
+All of them are deterministic except `briefing` (see [Language models](#language-models-optional-none-by-default)).
 
 | Agent | Role | What it looks at |
 |---|---|---|
@@ -1154,6 +1158,9 @@ Trading*). What is not built yet is listed at the end of this section.
 | `options` | forecast (21 days) | Live option chains only: ATM implied vol and its premium, term structure, put/call skew, put/call volume and open interest, unusual turnover, implied move |
 | `catalyst` | forecast (21 days) | Earnings calendar and typical reaction (event risk, context only), post-earnings drift after a large surprise |
 | `portfolio` | constraint | Position weights, concentration (HHI), sector weights, beta, average correlation, margin, positions at their stop; hints close / reduce / hold |
+| `strategy_lab` | forecast (21 days) | Rankings of strategies a person promoted after validation and paper tracking (skipped when none is promoted) |
+| `research` · `situational_awareness` | context (second stage) | The research checklist and the risk posture (below) |
+| `briefing` | context (runs last; model-backed) | A language model's short written summary of the findings on the strongest ideas; skipped unless a model is configured |
 
 Agents that need data the cycle does not have (no stock-model run, no live option chain, no earnings
 calendar) are skipped with the reason, never fed made-up inputs. An agent whose evidence is context rather
@@ -1362,6 +1369,40 @@ VALIDATED. The strategy lab implements that pipeline for strategies; agent versi
 graded calls because each version keeps its own record. Risk controls are never the subject of a
 proposal.
 
+### Language models (optional; none by default)
+
+The brain works without a language model, and nothing pretends to be one. `brain/llm.py` defines the
+interface a model provider would plug into:
+
+* **What a model may do:** summarise, extract, classify, research questions, argue a case, synthesise.
+  A request for a calculation — RSI, ATR, beta, correlation, volatility, returns, position weights or
+  size, spreads, quote age, risk limits, the account, P/L, orders — is refused before it reaches any
+  provider. Model output is context for people and the record: it casts no vote, is never graded as a
+  forecast, and no number in it reaches sizing, the risk engine or an order.
+* **Providers:** `ModelProvider` says why it cannot be used (a missing credential or package) and turns a
+  request (system prompt, user/assistant messages, output cap, optional JSON schema) into a response
+  (text, token usage, stop reason). The default provider is `none`. No vendor integration is included;
+  one is registered by name in code (`register_provider`) and selected with `QP_BRAIN_LLM_PROVIDER`. It
+  reads its own API key from the environment and must never log or return it.
+* **Cost control** (`ModelRouter`):
+  * *tiers*: fast tasks (summaries, extraction, classification) go to `QP_BRAIN_LLM_FAST_MODEL`, strong
+    ones (research, debate, synthesis) to `QP_BRAIN_LLM_STRONG_MODEL`; an unset tier is unavailable;
+  * *a daily token budget* (`QP_BRAIN_LLM_DAILY_TOKEN_BUDGET`, default **0 = no calls**), checked before
+    each call with a high estimate and charged with the provider's reported usage (a failed call is
+    charged its estimate); today's usage survives restarts;
+  * *a cache*: identical requests are answered from it for `QP_BRAIN_LLM_CACHE_MINUTES`, at no cost;
+  * *limits*: an output cap (`QP_BRAIN_LLM_MAX_OUTPUT_TOKENS`), a concurrency limit and a timeout;
+  * *routing*: the model-backed agent runs only on full and deep cycles, for at most
+    `QP_BRAIN_LLM_MAX_BRIEFINGS` symbols.
+* **Failures are visible:** a structured answer must parse and match its schema, a refusal is recorded as
+  a refusal, a cut-off answer is a failure, and each outcome is listed (without prompt or answer) by
+  `GET /brain/models`. The cycle carries on without the model.
+
+The one model-backed agent, **briefing**, runs after all the others and writes, for the strongest ideas,
+a short summary of the findings with the points for and against, conflicts between agents and one thing
+to watch. Without a provider, a model and a budget it is skipped with the reason. The tests use a
+scripted fake provider and never reach a model.
+
 ### The Brain page
 
 *Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
@@ -1382,15 +1423,15 @@ proposal.
   validate, paper-track, promote and retire.
 * **Improvements:** proposals with their evidence and validation plan, and the decision buttons.
 * **Supervisor & events:** the supervisor's state, its queued wake-ups and recent work, a pause/resume
-  button, and the event stream.
+  button, language-model status and usage, and the event stream.
 * **Memory** and **History.**
 
 The page keeps four layers visibly apart: ① agent analysis, ② consensus, ③ risk preview, and ④ broker
 execution. There is no execution from the Brain.
 
 An agent returns structured `Opinion`s: stance, score (−1…1), confidence, horizon, thesis, evidence,
-data used and missing, data quality, invalidation and veto. A language-model agent will implement the
-same `Agent` interface with a `model_tier` of `fast` or `strong`; none exists yet.
+data used and missing, data quality, invalidation and veto. A model-backed agent implements the same
+`Agent` interface with a `model_tier` of `fast` or `strong`.
 
 ### Modes
 
@@ -1400,7 +1441,9 @@ same `Agent` interface with a `model_tier` of `fast` or `strong`; none exists ye
 * `dry_run`: proposed actions previewed by the risk engine.
 * `paper_recommendation` (default): the same, labelled as recommendations for the paper account.
 
-There is no execution mode: the brain cannot place orders in Phase 1.
+There is no execution mode: the brain cannot place orders. Its proposals are recommendations; the
+existing trading service (with its own risk engine, live-data, spread and trading-control checks and order
+manager) is the only path to the Alpaca paper account.
 
 ### API
 
@@ -1417,6 +1460,7 @@ There is no execution mode: the brain cannot place orders in Phase 1.
 | `GET /brain/learning` · `/performance?window=` · `/reflections?category=` | Prediction counts, last pass and calibration · measured track records · reflections and failure analyses |
 | `GET /brain/supervisor` · `POST /brain/supervisor {"paused": true}` | Supervisor state (session, schedule, queued wake-ups, recent work) · pause or resume |
 | `GET /brain/events?type=&subject=` | Recorded events, newest first |
+| `GET /brain/models` | Language models: provider, tier models, today's token budget and usage, recent calls (never prompts, answers or keys) |
 | `GET /brain/lab/templates` · `/lab/strategies?status=` · `/lab/strategies/{id}/{version}` · `/lab/compare?keys=` | Strategy templates · versions · one version with its runs · versions side by side |
 | `GET /brain/improvements?status=` · `POST /brain/improvements/review` · `POST /brain/improvements/{id} {"status": …, "note": …}` | Improvement proposals · review the record now · record a person's decision (nothing is applied automatically) |
 | `POST /brain/lab/propose` · `/lab/strategies {"template": …}` · `/lab/strategies/{id}/{version}/validate` · `/lab/strategies/{id}/{version}/status {"status": "paper"\|"promoted"\|"retired"}` · `/lab/paper` | Propose templates · create a version · validate (202 while running) · paper / promote (gated) / retire · update paper portfolios |
@@ -1458,9 +1502,9 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0008_prediction_ledger` | `predictions` |
 | `0009_reference_data` | `company_profiles`, `earnings_events`, `reference_blobs` (S&P membership snapshot, download bookkeeping), `fundamental_facts` (SEC XBRL frames); `predictions.origin` |
 | `0010_alpaca_paper_trading` | `trading_cycles`, `broker_orders`, `trading_events`, `trading_state` (runtime kill switch, per-position memory, P/L baseline) |
-| `0013_brain_strategy_lab` | `brain_strategies` (versioned specs, status, validation and paper results), `brain_strategy_runs` |
+| `0011_brain` | `brain_agents`, `brain_cycles`, `brain_agent_runs`, `brain_opinions`, `brain_consensus`, `brain_decisions`, `brain_predictions`, `brain_memory`, `brain_reflections`, `brain_agent_performance`, `brain_improvements`, `brain_events`, `brain_state` |
 | `0012_brain_research` | `brain_opportunities` (with the pipeline trace), `brain_debates` |
-| `0011_brain` | `brain_agents`, `brain_cycles`, `brain_agent_runs`, `brain_opinions`, `brain_consensus`, `brain_decisions`, `brain_predictions`, `brain_memory`; reserved for later phases and still empty: `brain_reflections`, `brain_agent_performance`, `brain_improvements`, `brain_events`, `brain_state` |
+| `0013_brain_strategy_lab` | `brain_strategies` (versioned specs, status, validation and paper results), `brain_strategy_runs` |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)
@@ -1597,3 +1641,18 @@ tests/                   unit · providers · integration · frontend · fixture
     universe (a few minutes); later cycles only fetch the latest session.
   * Cycles need the API process to be running. Performance statistics need weeks of recorded cycles
     before they mean anything.
+* **The Brain:**
+  * It recommends; it never trades. There is no hand-off from a Brain proposal to the order manager:
+    acting on one is a person's decision, through the trading service and all of its checks.
+  * Track records start empty. Every agent is *unproven* (weight 1.0) until its calls are graded, which
+    takes weeks; thresholds such as `QP_BRAIN_MIN_CONFIDENCE` are starting values until calibration
+    confirms or changes them.
+  * The fundamental, valuation and factor agents need a completed stock-model run; the options agent needs
+    live option chains; the catalyst agent needs an earnings calendar. Without them they skip.
+  * No news provider: `NewsEventDetected` exists, but nothing produces it.
+  * No language-model provider is included. The interface, router and one model-backed agent exist and
+    are tested with a scripted fake; using a real model means registering a provider and setting a budget.
+  * The strategy lab tests long-only rules on price features over today's liquid universe, so results
+    carry survivorship bias (the report says so), and paper tracking needs weeks before promotion.
+  * Improvement proposals are recommendations for people; nothing changes the code or the configuration
+    by itself.

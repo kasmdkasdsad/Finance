@@ -92,7 +92,7 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert "Orders sent by the Brain" in text and "Mode" in text
     frames = [d.value for d in at.dataframe]
     agents = next(f for f in frames if "track record" in f.columns)
-    assert len(agents) == 16 and set(agents["this cycle"]) <= {"ok", "skipped", "failed", "timeout", "—"}
+    assert len(agents) == 17 and set(agents["this cycle"]) <= {"ok", "skipped", "failed", "timeout", "—"}
     assert (agents["track record"] == "unproven (no evaluated predictions yet)").all()
     consensus = next(f for f in frames if "disagreement" in f.columns)
     assert {"supporting", "neutral", "opposing", "confidence", "data"} <= set(consensus.columns)
@@ -117,6 +117,8 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert any("the Brain never sends orders" in m.value for m in at.markdown if "supervisor" in m.value)
     assert any("only a person can promote" in m.value for m in at.markdown)
     assert any("Nothing is applied automatically" in m.value for m in at.markdown)
+    assert any("Every analysis is deterministic" in i.value for i in at.info)  # no language model configured
+    assert "Language models: not in use" in text
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
     assert "AgentCompleted" in set(events["event"])
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}

@@ -65,7 +65,12 @@ def _status(status: dict[str, Any]) -> None:
     cols[2].metric("Last cycle", f"#{last['id']} · {last['status']}" if last else "none yet")
     cols[3].metric("Open predictions", status["open_predictions"])
     cols[4].metric("Orders sent by the Brain", 0)
-    st.caption(f"Orders: {status['orders']}. Learning: {status['learning']}.")
+    st.caption(
+        _md(
+            f"Orders: {status['orders']}. Learning: {status['learning']}. "
+            f"Language models: {status.get('language_models', 'unknown')}."
+        )
+    )
 
 
 def _run_controls() -> None:
@@ -719,6 +724,7 @@ def _operations() -> None:
         st.caption(
             _md("Last runs: " + ", ".join(f"{k} {v[:16].replace('T', ' ')}" for k, v in sup["last"].items()))
         )
+    _models()
     kind = st.selectbox(
         "Events",
         [
@@ -773,6 +779,37 @@ def _operations() -> None:
         )
     else:
         st.info("No events of this kind yet.", icon=":material/notifications_off:")
+
+
+def _models() -> None:
+    m = guarded(lambda: api().get(f"{BASE}/models"), "language models")
+    if m is None:
+        return
+    st.markdown("**Language models**")
+    if not m["available"]:
+        st.info(
+            _md(
+                f"Not in use: {m['reason']}. Every analysis is deterministic; the briefing agent skips itself. "
+                "Calculations (indicators, risk, sizing, spreads, quote ages, the account) never go to a model."
+            ),
+            icon=":material/memory:",
+        )
+        return
+    u = m["usage"]
+    c = st.columns(4)
+    c[0].metric("Provider", m["provider"])
+    c[1].metric("Tokens today", f"{u['tokens'] + u['estimated']:,} / {m['daily_token_budget']:,}")
+    c[2].metric("Calls (cached)", f"{u['calls']} ({u['cached']})")
+    c[3].metric("Failed / refused", f"{u['failed']} / {u['refused']}")
+    st.caption(
+        _md(
+            f"Fast: {m['models']['fast'] or '—'} · strong: {m['models']['strong'] or '—'} · output cap "
+            f"{m['max_output_tokens']} tokens · cache {m['cache_minutes']} min. Model output is context only: it "
+            "casts no vote and sets no number."
+        )
+    )
+    if m["recent"]:
+        st.dataframe(pd.DataFrame(m["recent"]).astype(str), hide_index=True, use_container_width=True)
 
 
 def _memory() -> None:
