@@ -54,6 +54,8 @@ def _peer_sector(ctx: BrainContext, symbol: str) -> str | None:
 class FundamentalAgent(Agent):
     spec = AgentSpec(
         id="fundamental",
+        source="fundamentals",
+        failure="skips without a completed stock-model run; its vote is listed as missing",
         name="Fundamental quality",
         description="Profitability, earnings quality (accruals), balance-sheet growth and the latest earnings "
         "reaction, ranked against the model universe (point-in-time SEC data).",
@@ -127,6 +129,8 @@ class FundamentalAgent(Agent):
 class ValuationAgent(Agent):
     spec = AgentSpec(
         id="valuation",
+        source="fundamentals",
+        failure="skips without a completed stock-model run; its vote is listed as missing",
         name="Valuation",
         description="Earnings, free-cash-flow and book yields against the universe and sector peers, with a "
         "value-trap check.",

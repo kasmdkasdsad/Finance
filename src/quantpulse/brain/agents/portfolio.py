@@ -24,6 +24,8 @@ class PortfolioAgent(Agent):
     role = "constraint"
     spec = AgentSpec(
         id="portfolio",
+        source="account",
+        failure="no portfolio hints; the decision step still checks portfolio fit and the risk engine still checks every limit",
         name="Portfolio",
         description="Concentration, sector exposure, beta, correlation, cash and stop-losses of the paper "
         "portfolio; whether each holding still fits.",

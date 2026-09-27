@@ -133,6 +133,10 @@ class AgentSpec:
     version: str = "1.0.0"
     horizon_days: int = 5  # the horizon its directional opinions are graded on
     stage: int = 0  # 0 specialists; 1 agents that read the specialists' findings (research, situation)
+    # the information it rests on: agents sharing a source are one piece of evidence in the consensus,
+    # however many of them agree ("prices", "fundamentals", "model", "options", "events", "strategies", …)
+    source: str = ""
+    failure: str = ""  # what happens when it cannot run or fails (its charter's failure behaviour)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

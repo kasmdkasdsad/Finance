@@ -33,6 +33,8 @@ STALE_DAYS = 5
 class FactorAgent(Agent):
     spec = AgentSpec(
         id="factor",
+        source="model",
+        failure="skips without a completed stock-model run; a stale run weighs less",
         name="Factor model",
         description="The walk-forward stock model's calibrated view, with the momentum, value, quality, "
         "low-volatility and beta exposures behind it.",

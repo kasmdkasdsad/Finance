@@ -113,6 +113,45 @@ def test_disagreement_is_measured_kept_and_means_unknown():
     assert any("disagree" in r for r in c.reasons)
 
 
+def test_agents_sharing_a_source_count_once_and_their_conflict_stays_visible():
+    four = [
+        op("technical", 0.7, 0.8),
+        op("momentum", 0.6, 0.8),
+        op("statistical", 0.5, 0.7),
+        op("mean_reversion", 0.4, 0.7),
+    ]
+    prices = dict.fromkeys(["technical", "momentum", "statistical", "mean_reversion"], "prices")
+    one_source = build_consensus("AAA", four, sources=prices)
+    as_if_independent = build_consensus("AAA", four)  # every agent its own source
+    assert one_source.independent == 1 and as_if_independent.independent == 4
+    assert one_source.confidence == pytest.approx(as_if_independent.confidence / 2)  # four views, one idea
+    assert one_source.supporting == 4  # the agents are still shown
+    assert any("one source only (prices)" in u for u in one_source.uncertainty)
+
+    two = [op("technical", 0.7, 0.8), op("valuation", 0.6, 0.8)]
+    c = build_consensus("AAA", two, sources={"technical": "prices", "valuation": "fundamentals"})
+    assert c.independent == 2 and set(c.sources) == {"prices", "fundamentals"}
+
+    # a conflict inside one source is not averaged away
+    split = [op("technical", 0.7, 0.8), op("mean_reversion", -0.7, 0.8), op("valuation", 0.5, 0.8)]
+    c = build_consensus("AAA", split, sources={**prices, "valuation": "fundamentals"})
+    assert c.disagreement >= 0.4 and c.opposing == 1
+
+
+def test_missing_agents_and_uncertainty_are_explicit():
+    missing = [
+        {"agent_id": "options", "source": "options", "kind": "skipped", "reason": "no live option chains"},
+        {"agent_id": "catalyst", "source": "events", "kind": "abstained", "reason": "no event ahead"},
+    ]
+    c = build_consensus("AAA", [op("technical", 0.7, 0.9), op("valuation", 0.6, 0.9)], missing=missing)
+    assert c.missing == missing and c.to_dict()["missing"] == missing
+    assert any("options (no live option chains)" in u for u in c.uncertainty)
+    assert not any("catalyst" in u for u in c.uncertainty)  # an abstention is counted, not "missing"
+    assert any("unproven" in u for u in c.uncertainty)
+    empty = build_consensus("AAA", [op("technical", None)], missing=missing)
+    assert empty.unknown and empty.uncertainty
+
+
 def test_one_unsure_voice_or_no_voice_is_unknown():
     lone = build_consensus("AAA", [op("tech", 0.6, confidence=0.4)])
     assert lone.unknown and any("only one view" in r for r in lone.reasons)
@@ -212,6 +251,14 @@ def test_default_agents_are_deterministic_except_the_optional_briefing():
     # the only model-backed agent runs last and never votes
     assert {a.spec.id for a in reg.all() if a.spec.model_tier.value != "deterministic"} == {"briefing"}
     assert reg.get("briefing").spec.stage == 2 and reg.get("briefing").role == "context"
+    # every agent has a charter: its job, inputs, outputs, source of evidence and failure behaviour
+    for a in reg.all():
+        spec = a.spec
+        assert spec.description and spec.inputs and spec.outputs and spec.source and spec.failure, spec.id
+    sources = {a.spec.id: a.spec.source for a in reg.all()}
+    assert {sources[x] for x in ("technical", "momentum", "mean_reversion", "statistical")} == {"prices"}
+    assert sources["fundamental"] == sources["valuation"] == "fundamentals"
+    assert "fails closed" in reg.get("data_quality").spec.failure
 
 
 def test_selection_explains_every_skip():

@@ -29,6 +29,8 @@ MIN_UNIVERSE = 15
 class MomentumAgent(Agent):
     spec = AgentSpec(
         id="momentum",
+        source="prices",
+        failure="no momentum vote; the consensus lists it as missing and has less coverage",
         name="Momentum",
         description="Relative strength, acceleration, deceleration and persistence across horizons, ranked "
         "against the whole universe.",

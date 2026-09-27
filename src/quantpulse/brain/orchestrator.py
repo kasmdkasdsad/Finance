@@ -36,7 +36,7 @@ from .perception import Perception
 from .registry import AgentRegistry, AgentRun, Skip
 from .routing import route
 from .store import BrainStore
-from .types import MARKET, PORTFOLIO, BrainMode
+from .types import MARKET, PORTFOLIO, BrainMode, Opinion, Stance
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,8 @@ class Orchestrator:
             reliability = ReliabilityBook(
                 await self._store.reliability_rows(), self._s.brain_min_reliability_observations
             )
-            result.consensus = self._consensus(ctx, reliability)
+            self._fail_safe(ctx, runs, skips)
+            result.consensus = self._consensus(ctx, reliability, runs, skips)
             result.debates = review(ctx, result.consensus)  # bull, bear, devil's advocate
             if mode is not BrainMode.RESEARCH_ONLY:
                 result.proposals = plan(
@@ -218,10 +219,66 @@ class Orchestrator:
             logger.exception("publishing events for brain cycle %s failed", cycle_id)
 
     # ------------------------------------------------------------------ consensus
-    def _consensus(self, ctx: BrainContext, reliability: ReliabilityBook) -> dict[str, Consensus]:
+    @staticmethod
+    def _fail_safe(ctx: BrainContext, runs: list[AgentRun], skips: list[Skip]) -> None:
+        """Checks that must hold even when the agent responsible did not run: fail closed."""
+        why = {r.agent_id: f"{r.status}: {r.error}" for r in runs if r.status != "ok"}
+        why.update({s.agent_id: s.reason for s in skips})
+        if not any(o.agent_id == "data_quality" for o in ctx.working.opinions.get(MARKET, [])):
+            reason = why.get("data_quality", "it produced no market view")
+            ctx.working.post(
+                "system_vetoes", [f"the data-quality check did not run ({reason}): nothing is executable"]
+            )
+        if "situation" not in ctx.working.facts:
+            reason = why.get("situational_awareness", "it produced no posture")
+            ctx.working.post(
+                "situation",
+                {
+                    "posture": "cautious",
+                    "risk_scale": 0.6,
+                    "reasons": [f"situational awareness did not run ({reason}): cautious by default"],
+                    "session": ctx.session.value,
+                },
+            )
+
+    def _missing(
+        self, subject: str, opinions: list[Opinion], runs: list[AgentRun], skips: list[Skip]
+    ) -> list[dict[str, str]]:
+        """The forecasting agents that could have had a view on ``subject`` and did not, with the reason."""
+        kind = "market" if subject == MARKET else "symbol"
+        ran = {r.agent_id: r for r in runs}
+        skipped = {s.agent_id: s.reason for s in skips}
+        said = {o.agent_id: o for o in opinions}
+        out: list[dict[str, str]] = []
+        for agent in self.registry.all():
+            spec = agent.spec
+            if agent.role != "forecast" or kind not in spec.subjects:
+                continue
+            o = said.get(spec.id)
+            if o is not None:
+                if o.stance is Stance.ABSTAIN:
+                    out.append(self._gap(spec.id, spec.source, "abstained", o.thesis))
+                continue
+            if spec.id in skipped:
+                out.append(self._gap(spec.id, spec.source, "skipped", skipped[spec.id]))
+            elif spec.id in ran and ran[spec.id].status != "ok":
+                r = ran[spec.id]
+                out.append(self._gap(spec.id, spec.source, r.status, r.error or r.status))
+            elif spec.id in ran:
+                out.append(self._gap(spec.id, spec.source, "not asked", "not asked about this subject"))
+        return out
+
+    @staticmethod
+    def _gap(agent_id: str, source: str, kind: str, reason: str) -> dict[str, str]:
+        return {"agent_id": agent_id, "source": source or agent_id, "kind": kind, "reason": reason[:200]}
+
+    def _consensus(
+        self, ctx: BrainContext, reliability: ReliabilityBook, runs: list[AgentRun], skips: list[Skip]
+    ) -> dict[str, Consensus]:
         out: dict[str, Consensus] = {}
         horizons: dict[str, int] = {}
         regime = ctx.working.facts.get("regime")
+        sources = {a.spec.id: a.spec.source for a in self.registry.all() if a.spec.source}
         for subject, opinions in ctx.working.opinions.items():
             if subject == PORTFOLIO:
                 continue
@@ -229,7 +286,15 @@ class Orchestrator:
             constraints = [o for o in opinions if self.registry.get(o.agent_id).role == "constraint"]
             if not forecasts:
                 continue
-            out[subject] = build_consensus(subject, forecasts, constraints, reliability, regime)
+            out[subject] = build_consensus(
+                subject,
+                forecasts,
+                constraints,
+                reliability,
+                regime,
+                sources=sources,
+                missing=self._missing(subject, opinions, runs, skips),
+            )
             voting = [o for o in forecasts if o.directional]
             if voting:
                 horizons[subject] = round(

@@ -47,6 +47,8 @@ def garch_forecast(closes: np.ndarray, horizon: int = HORIZON) -> tuple[float | 
 class VolatilityAgent(Agent):
     spec = AgentSpec(
         id="volatility",
+        source="prices",
+        failure="no volatility forecast: sizing falls back to the strategy's risk volatility",
         name="Volatility",
         description="GARCH volatility forecast, realised-volatility regime, expansion/compression, tail shape "
         "and implied volatility; sets a volatility-based size scale.",

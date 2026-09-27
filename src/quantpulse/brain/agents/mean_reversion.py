@@ -21,6 +21,8 @@ NEEDED = ("z20", "rsi14", "ret_5d_z")
 class MeanReversionAgent(Agent):
     spec = AgentSpec(
         id="mean_reversion",
+        source="prices",
+        failure="no reversion vote; the consensus lists it as missing and has less coverage",
         name="Mean reversion",
         description="Short-term stretch from the 20-day mean (z-score, RSI, 5-day move in sigmas), filtered "
         "by trend strength so strong trends are not faded blindly.",

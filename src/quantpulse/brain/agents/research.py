@@ -158,6 +158,8 @@ SPECIFIC: dict[str, tuple[Callable[[BrainContext, str], Finding | None], ...]] =
 class ResearchAgent(Agent):
     spec = AgentSpec(
         id="research",
+        source="findings",
+        failure="no research checklist; the bull and bear cases rest on the specialists' evidence alone",
         name="Research",
         description="Answers a checklist of questions per symbol (market vs own move, volume, sector, events, "
         "extension, liquidity, and opportunity-specific checks) from the cycle's data.",
@@ -213,6 +215,8 @@ class ResearchAgent(Agent):
 class SituationalAwarenessAgent(Agent):
     spec = AgentSpec(
         id="situational_awareness",
+        source="findings",
+        failure="fails safe: if it does not run, the posture is cautious (fewer, smaller new positions)",
         name="Situational awareness",
         description="The moment in one posture — normal, cautious or defensive — from regime, volatility, "
         "breadth, data health, exposure, day P/L vs the loss limit and the kill switch.",

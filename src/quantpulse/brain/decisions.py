@@ -489,6 +489,7 @@ def risk_preview(ctx: BrainContext, proposals: list[Proposal], mode: BrainMode) 
     market_vetoes = [
         o.veto for o in ctx.working.opinions.get(MARKET, []) if o.agent_id == "data_quality" and o.veto
     ]
+    market_vetoes += list(ctx.working.facts.get("system_vetoes") or [])  # checks that failed closed
     for p in proposals:
         if not p.is_trade:
             p.status = "no_trade"

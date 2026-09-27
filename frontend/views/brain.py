@@ -233,13 +233,19 @@ def _agents(cycle: dict[str, Any], agents: list[dict[str, Any]]) -> None:
             lambda: api().post(f"{BASE}/agents/{pick}", {"enabled": not current}), "switch"
         ):
             st.rerun()
-    with st.expander("What each agent does", icon=":material/info:"):
+    with st.expander("What each agent does (its charter)", icon=":material/info:"):
         for a in agents:
             spec = a.get("spec") or {}
             st.markdown(
                 _md(
-                    f"**{a['name']}** (`{a['id']}`, {spec.get('role')}, horizon {spec.get('horizon_days')}d) — "
-                    f"{spec.get('description', '')}"
+                    f"**{a['name']}** (`{a['id']}`, {spec.get('role')}, horizon {spec.get('horizon_days')}d, "
+                    f"source: {spec.get('source') or '—'}) — {spec.get('description', '')}"
+                )
+            )
+            st.caption(
+                _md(
+                    f"Reads: {', '.join(spec.get('inputs') or [])} · writes: {', '.join(spec.get('outputs') or [])}"
+                    f" · if it cannot run: {spec.get('failure') or '—'}"
                 )
             )
 
@@ -247,7 +253,8 @@ def _agents(cycle: dict[str, Any], agents: list[dict[str, Any]]) -> None:
 def _consensus(cycle: dict[str, Any]) -> None:
     st.markdown(
         "**② Consensus** — agents' forecasts combined per subject (weight = confidence × data quality × "
-        "measured reliability; every agent is *unproven* until its predictions are graded)."
+        "measured reliability; every agent is *unproven* until its predictions are graded). Agents that rest on "
+        "the same information count as **one source**: a confident view needs at least two independent sources."
     )
     items = cycle.get("consensus") or []
     if not items:
@@ -264,6 +271,7 @@ def _consensus(cycle: dict[str, Any]) -> None:
             "opposing": c["opposing"],
             "abstaining": c["abstaining"],
             "disagreement": round(c["disagreement"], 2),
+            "independent sources": (c.get("detail") or {}).get("independent_sources"),
             "data": c["data_quality"],
             "vetoes": "; ".join(v["reason"] for v in c.get("vetoes") or []),
         }
@@ -308,6 +316,33 @@ def _consensus(cycle: dict[str, Any]) -> None:
         )
     for reason in chosen.get("reasons") or []:
         st.caption(_md(f"• {reason}"))
+    sources = detail.get("sources") or {}
+    if sources:
+        st.markdown("**Evidence by source** (agents sharing a source count once)")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "source": k,
+                        "score": v["score"],
+                        "weight": v["weight"],
+                        "agents": ", ".join(v["agents"]),
+                    }
+                    for k, v in sources.items()
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    uncertainty = detail.get("uncertainty") or []
+    if uncertainty:
+        st.markdown("**Why it is uncertain**")
+        for u in uncertainty:
+            st.caption(_md(f"• {u}"))
+    missing = detail.get("missing") or []
+    if missing:
+        with st.expander(f"Agents with no view here ({len(missing)})"):
+            st.dataframe(pd.DataFrame(missing), hide_index=True, use_container_width=True)
     _debate(cycle, subject)
     _opinions(cycle, subject)
 

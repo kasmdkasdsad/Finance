@@ -30,6 +30,8 @@ def _t(x: float, scale: float) -> float:
 class TechnicalAgent(Agent):
     spec = AgentSpec(
         id="technical",
+        source="prices",
+        failure="no trend vote; the consensus lists it as missing and has less coverage",
         name="Technical",
         description="Trend, ADX, MACD, RSI, breakouts, VWAP, support and resistance over about a week.",
         family=AgentFamily.SPECIALIST,

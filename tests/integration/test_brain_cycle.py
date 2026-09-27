@@ -79,6 +79,25 @@ async def brain_client(tmp_path, clock, fake=None, feed=None, client_host="127.0
         yield api
 
 
+def with_stock_model(monkeypatch) -> None:
+    """A completed stock-model run as test data (through the real service interface): the fundamental,
+    valuation and factor agents then see the uptrend names as better — a second and third source of
+    evidence beside prices, which a trade needs before the consensus is confident."""
+    from datetime import date as _date
+
+    from quantpulse.services.model import ModelService
+    from tests.unit.test_brain_agents import snapshot, universe_features
+
+    feats = universe_features()
+    feats = pd.concat([feats, feats.iloc[: len(STOCKS)].set_axis(STOCKS)])
+    probs = {s: 0.62 if s.startswith("UP") else 0.40 if s.startswith("DN") else 0.5 for s in STOCKS}
+
+    async def model_snapshot(self, *, wait=None):
+        return snapshot(feats, probs, as_of=_date(2026, 9, 24))
+
+    monkeypatch.setattr(ModelService, "trading_snapshot", model_snapshot)
+
+
 async def run_cycle(api, **body):
     r = await api.post(f"{BRAIN}/run", json=body or None)
     assert r.status_code == 200, r.text
@@ -93,9 +112,10 @@ def only_reads(fake: FakeAlpacaPaper) -> bool:
     return all(method == "GET" for method, _ in fake.log) and fake.orders == {}
 
 
-async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path):
+async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
-    async for api in brain_client(tmp_path, clock):
+    async for api in brain_client(tmp_path, clock, brain_use_stock_model=True):
         api.fake.hold("UPA", 40, 60.0)  # a small existing position
         cycle = await run_cycle(api)
 
@@ -114,9 +134,10 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         # every agent ran and its run is persisted
         assert {a["agent_id"] for a in cycle["agents"]} == AGENTS
         status_of = {r["agent_id"]: r["status"] for r in cycle["runs"]}
-        assert status_of == {a: "ok" if a in RAN else "skipped" for a in AGENTS}
+        with_model = RAN | {"fundamental", "valuation", "factor"}
+        assert status_of == {a: "ok" if a in with_model else "skipped" for a in AGENTS}
         reasons = {r["agent_id"]: r["reason"] for r in cycle["runs"] if r["status"] == "skipped"}
-        assert "stock model" in reasons["factor"] and "option chains" in reasons["options"]
+        assert "option chains" in reasons["options"]
         assert "QP_BRAIN_LLM_PROVIDER=none" in reasons["briefing"]
 
         # structured findings: each focus symbol seen by data quality, technical and momentum
@@ -137,7 +158,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         upc = consensus["UPC"]
         assert upc["stance"] == "bullish" and not upc["unknown"] and upc["supporting"] >= 2
         votes = upc["detail"]["votes"]
-        assert {"technical", "momentum"} <= {v["agent_id"] for v in votes} <= RAN
+        assert {"technical", "momentum"} <= {v["agent_id"] for v in votes} <= with_model
         assert upc["supporting"] + upc["neutral"] + upc["opposing"] == len(votes)
         assert all(v["reliability"] == {"weight": 1.0, "status": "unproven", "n": 0} for v in votes)
 
@@ -199,9 +220,10 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         assert {m["subject"] for m in long if m["kind"] == "decision"} == {d["subject"] for d in trades}
 
 
-async def test_modes_dry_run_and_research_only(tmp_path):
+async def test_modes_dry_run_and_research_only(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
-    async for api in brain_client(tmp_path / "dry", clock, brain_mode="dry_run"):
+    async for api in brain_client(tmp_path / "dry", clock, brain_mode="dry_run", brain_use_stock_model=True):
         cycle = await run_cycle(api)
         trades = [d for d in cycle["decisions"] if d["action"] in TRADES]
         assert trades and {d["status"] for d in trades} <= {"dry_run_approved", "risk_rejected", "blocked"}
@@ -255,6 +277,49 @@ async def test_a_failing_agent_is_recorded_and_the_cycle_goes_on(tmp_path, monke
             assert "technical" not in {v["agent_id"] for v in c["detail"]["votes"]}
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
         assert agents["technical"]["runs"]["failures"] == 1
+
+
+async def test_price_only_evidence_is_one_source_and_proposes_no_new_position(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock):  # no stock model, options or calendar: prices only
+        cycle = await run_cycle(api)
+        stocks = [c for c in cycle["consensus"] if c["subject"] != "@market"]
+        assert stocks
+        for c in stocks:
+            detail = c["detail"]
+            assert set(detail["sources"]) <= {"prices"} and detail["independent_sources"] <= 1
+            gone = {m["agent_id"]: m for m in detail["missing"]}
+            assert gone["factor"]["kind"] == "skipped" and "stock model" in gone["factor"]["reason"]
+            assert gone["options"]["source"] == "options"
+            assert any("one source only (prices)" in u or "no source" in u for u in detail["uncertainty"])
+        assert not [
+            d for d in cycle["decisions"] if d["action"] == "buy"
+        ]  # several agents agreeing is not enough
+        assert only_reads(api.fake)
+
+
+async def test_checks_fail_closed_when_their_agent_does_not_run(tmp_path, monkeypatch):
+    from quantpulse.brain.agents.research import SituationalAwarenessAgent
+
+    async def broken(self, ctx, subjects):
+        raise RuntimeError("posture blew up")
+
+    monkeypatch.setattr(SituationalAwarenessAgent, "analyze", broken)
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, brain_use_stock_model=True):
+        r = await api.post(f"{BRAIN}/agents/data_quality", json={"enabled": False})
+        assert r.status_code == 200
+        cycle = await run_cycle(api)
+        assert cycle["status"] == "completed"
+        situation = cycle["market"]["situation"]
+        assert situation["posture"] == "cautious" and "did not run" in situation["reasons"][0]
+        trades = [d for d in cycle["decisions"] if d["action"] in TRADES]
+        assert trades
+        for d in trades:  # nothing is executable without the data-quality check
+            assert d["status"] in ("blocked", "risk_rejected")
+            assert any("data-quality check did not run" in b for b in d["rationale"]["blocked_by"])
+        assert only_reads(api.fake)
 
 
 async def test_stale_quotes_are_vetoed(tmp_path):
@@ -492,9 +557,12 @@ async def test_opportunities_debates_and_posture_are_recorded(tmp_path):
         assert only_reads(api.fake)
 
 
-async def test_the_brain_sends_nothing_even_when_paper_orders_are_enabled(tmp_path):
+async def test_the_brain_sends_nothing_even_when_paper_orders_are_enabled(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
-    async for api in brain_client(tmp_path, clock, alpaca_trading_enabled=True, trading_dry_run=False):
+    async for api in brain_client(
+        tmp_path, clock, alpaca_trading_enabled=True, trading_dry_run=False, brain_use_stock_model=True
+    ):
         cycle = await run_cycle(api)
         controls = cycle["portfolio"]["trading_controls"]
         assert controls["orders_would_reach_alpaca"] and controls["blockers"] == []

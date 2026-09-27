@@ -82,6 +82,8 @@ def strength(ctx: BrainContext, s: str) -> float:
 class BriefingAgent(Agent):
     spec = AgentSpec(
         id="briefing",
+        source="findings",
+        failure="skips without a language model; nothing depends on it",
         name="Analyst briefing",
         description="A language model's short written summary of the team's findings on the strongest ideas "
         "(context only: no vote, no numbers used). Skips itself when no model is configured.",

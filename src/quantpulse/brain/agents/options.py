@@ -23,6 +23,8 @@ HORIZON = 21
 class OptionsAgent(Agent):
     spec = AgentSpec(
         id="options",
+        source="options",
+        failure="skips without live option chains (never synthetic); its vote is listed as missing",
         name="Options",
         description="Implied volatility level and term structure, put/call skew, put/call flow and unusual "
         "options turnover from live option chains.",

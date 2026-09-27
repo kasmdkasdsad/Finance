@@ -7,7 +7,7 @@ plus the risks that do not come from any single forecast (vetoes, an earnings re
 a volatility regime, a value-trap flag). The **devil's advocate** then attacks the *leading* side with a
 fixed set of objections that are known ways a consensus goes wrong:
 
-* one idea counted several times (trend agents agreeing with each other and nobody else);
+* one idea counted several times (agents that share one source of evidence and nobody else);
 * a single voice, or strong opposition from a credible agent;
 * chasing an extended move (or selling into an oversold one);
 * an earnings release inside the forecast horizon;
@@ -32,7 +32,6 @@ from .consensus import Consensus
 from .context import BrainContext
 from .types import EXECUTABLE_STATES, DataState, Opinion, Stance
 
-TREND_FAMILY = {"technical", "momentum"}
 MAX_ARGS = 5
 
 
@@ -146,10 +145,15 @@ def _objections(
     supporters = [v for v in votes if (v.score > 0) == (lead > 0)]
     opponents = [v for v in votes if (v.score > 0) != (lead > 0)]
     out: list[Objection] = []
-    if len(supporters) >= 2 and {v.agent_id for v in supporters} <= TREND_FAMILY:
+    sources = {v.source or v.agent_id for v in supporters}
+    if len(supporters) >= 2 and len(sources) == 1:
+        # already counted once in the consensus (one source = one piece of evidence): no further haircut
         out.append(
             Objection(
-                "one_idea", "the case rests on one idea (trend) counted by several agents", "medium", 0.85
+                "one_idea",
+                f"the case rests on one source of evidence ({next(iter(sources))}) seen by several agents",
+                "medium",
+                1.0,
             )
         )
     if len(supporters) == 1:

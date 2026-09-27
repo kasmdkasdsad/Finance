@@ -27,6 +27,8 @@ DRIFT_WINDOW = 60  # calendar days a post-earnings drift view lasts
 class CatalystAgent(Agent):
     spec = AgentSpec(
         id="catalyst",
+        source="events",
+        failure="skips without an earnings calendar; the earnings caution still uses the trading data's dates",
         name="Catalyst (earnings)",
         description="Next earnings date and typical reaction (event risk), and post-earnings drift after a "
         "large surprise.",

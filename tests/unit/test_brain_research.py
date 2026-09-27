@@ -195,8 +195,13 @@ def test_devils_advocate_challenges_a_single_voice_and_weakens_one_idea():
     trend = [op("technical", "AAA", 0.6, 0.8), op("momentum", "AAA", 0.5, 0.8)]
     for o in trend:
         ctx.working.add(o)
-    d = review(ctx, {"AAA": build_consensus("AAA", trend)})["AAA"]
+    prices = {"technical": "prices", "momentum": "prices"}
+    c = build_consensus("AAA", trend, sources=prices)
+    assert c.independent == 1 and set(c.sources) == {"prices"}
+    d = review(ctx, {"AAA": c})["AAA"]
     assert d.verdict == "weakened" and {o.code for o in d.objections} >= {"one_idea", "unproven"}
+    one_idea = next(o for o in d.objections if o.code == "one_idea")
+    assert "prices" in one_idea.text and one_idea.haircut == 1.0  # already counted once in the consensus
 
 
 def test_devils_advocate_objections_for_regime_events_extension_and_data():

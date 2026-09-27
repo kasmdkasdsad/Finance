@@ -5,7 +5,7 @@ Every decision whose outcome is known is judged twice, independently:
 * **Decision quality** — from what was known *at the time* (the stored consensus, debate and risk preview),
   never from the outcome. Hard checks: the data was executable, the risk engine allowed the trade, and the
   devil's advocate had not challenged the view. Soft checks: combined confidence, agreement among the
-  agents, unresolved objections, evidence from more than one idea, and whether the agents it relied on had
+  agents, unresolved objections, evidence from more than one source, and whether the agents it relied on had
   a measured record. ``poor`` if a hard check failed, ``good`` if ≥ 60% of the soft checks passed, else
   ``fair``.
 * **Outcome quality** — the move in the decision's favour over its horizon, relative to the benchmark:
@@ -52,7 +52,6 @@ from .performance import Graded, metrics
 
 LONG_SIDE = {"buy": 1, "increase": 1, "watch": 1, "hold": 1}
 SHORT_SIDE = {"reduce": -1, "close": -1, "sell": -1, "de_risk": -1, "rebalance": -1}
-TREND_FAMILY = {"technical", "momentum"}
 OUTCOME_BAND = 0.005
 
 
@@ -77,7 +76,13 @@ def decision_quality(
         votes = (consensus.detail or {}).get("votes") or []
         lead = 1 if consensus.score > 0 else -1
         supporters = {v["agent_id"] for v in votes if v["score"] * lead >= 0.15}
-        soft["evidence from more than one idea"] = bool(supporters - TREND_FAMILY) and len(supporters) >= 2
+        detail = consensus.detail or {}
+        if "independent_sources" in detail:  # agents sharing a source of information count once
+            soft["evidence from more than one source"] = int(detail["independent_sources"]) >= 2
+        else:  # cycles recorded before sources were tracked
+            soft["evidence from more than one source"] = (
+                bool(supporters - {"technical", "momentum"}) and len(supporters) >= 2
+            )
         soft["relied on agents with a measured record"] = any(
             (v.get("reliability") or {}).get("status") == "measured"
             for v in votes

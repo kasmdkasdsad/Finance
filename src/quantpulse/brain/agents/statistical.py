@@ -52,6 +52,8 @@ def market_model(r: np.ndarray, b: np.ndarray) -> tuple[float, float, np.ndarray
 class StatisticalAgent(Agent):
     spec = AgentSpec(
         id="statistical",
+        source="prices",
+        failure="no serial-dependence vote; the consensus lists it as missing",
         name="Statistical",
         description="Variance ratio and autocorrelation (trending vs mean-reverting), market-model beta and "
         "the last ten days' idiosyncratic move.",

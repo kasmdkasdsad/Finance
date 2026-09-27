@@ -1124,6 +1124,22 @@ Trading*). What is not built is listed under [Known limitations](#known-limitati
    1 split) and the strongest voice on each side are kept. The answer is **unknown** (no action) when
    there is one unsure voice, heavy disagreement or low combined confidence. Vetoes from the
    *constraint* agents stay attached.
+
+   **Agents that share a source of information count once.** Each agent declares its source (prices,
+   fundamentals, the stock model, options, events, promoted strategies). The consensus score is a
+   weighted mean over sources, and full confidence needs at least two independent sources. Technical,
+   momentum, mean-reversion and statistical agreeing is one idea (prices) seen four ways, not four
+   confirmations, so with prices alone the confidence is halved and new positions are rarely proposed.
+   Disagreement is the larger of the split between agents and the split between sources, so a conflict
+   inside one source stays visible.
+
+   Each consensus also lists every forecasting agent that gave no view (skipped, failed or abstained,
+   with the reason) and its **reasons for uncertainty**: one source only, all agents unproven, data not
+   executable, partial disagreement, missing agents. The consensus is graded like an agent, and its
+   version changed with this method (`2`), so its track record never mixes the two.
+
+   **Checks fail closed.** If the data-quality agent does not run (failed, timed out or switched off),
+   nothing is executable that cycle. If situational awareness does not run, the posture is *cautious*.
 4. **Decide.** Holdings: CLOSE at a stop, REDUCE when overweight or bearish, INCREASE when confidently
    bullish below target, otherwise HOLD. New names: BUY only on a confident bullish consensus with no
    veto, outside a risk-off market, with a free slot and unborrowed cash, sized by a volatility budget
@@ -1182,6 +1198,17 @@ What was found while investigating stale quotes:
 ### Agents
 
 All of them are deterministic except `briefing` (see [Language models](#language-models-optional-none-by-default)).
+Each has a charter in its spec: its job, the inputs it reads, what it writes, its source of evidence,
+the horizon it is graded on, and what happens when it cannot run. The charter is shown on the page's
+*Agents* tab. New agents are added only for a distinct job with data that exists:
+
+* **Liquidity.** The risk engine already enforces minimum dollar volume and the spread limit; position
+  size against daily volume matters only at a larger size, so capacity is analysed in the strategy lab.
+* **Sector momentum.** It would rest on the same prices as the others, so it adds no independent
+  evidence.
+* **Macro.** It needs historical rates and credit data that QuantPulse does not store (only today's
+  yield curve).
+* **Execution quality.** It needs real fills.
 
 | Agent | Role | What it looks at |
 |---|---|---|

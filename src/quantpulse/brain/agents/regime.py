@@ -20,6 +20,8 @@ LABEL_BIAS = {"bullish": 1.0, "neutral": 0.0, "high_volatility": -0.35, "bearish
 class MarketRegimeAgent(Agent):
     spec = AgentSpec(
         id="market_regime",
+        source="prices",
+        failure="no market view this cycle; symbol agents still run and the risk posture falls back to cautious if situational awareness cannot run either",
         name="Market regime",
         description="Classifies the market (bull, bear, choppy, high volatility, risk-off) from trend, "
         "volatility, breadth, correlation and the VIX.",

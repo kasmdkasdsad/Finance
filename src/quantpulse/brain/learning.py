@@ -35,7 +35,7 @@ from quantpulse.db.session import Database
 
 from . import performance as perf
 from . import reflection
-from .consensus import Consensus
+from .consensus import CONSENSUS_VERSION, Consensus
 from .context import BrainContext
 from .evaluation import PriceSource, evaluate_due
 from .memory import AGENT, LONG_TERM, MemoryStore
@@ -129,7 +129,7 @@ class PredictionRecorder:
                 cycle_id,
                 source_type="consensus",
                 source_id="consensus",
-                version="1",
+                version=CONSENSUS_VERSION,
                 subject=subject,
                 direction=1 if c.score > 0 else -1,
                 score=c.score,
@@ -139,6 +139,8 @@ class PredictionRecorder:
                     "supporting": c.supporting,
                     "opposing": c.opposing,
                     "disagreement": round(c.disagreement, 3),
+                    "independent_sources": c.independent,
+                    "uncertainty": c.uncertainty[:6],
                 },
             )
             if row is not None:

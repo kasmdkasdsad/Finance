@@ -36,6 +36,8 @@ class DataQualityAgent(Agent):
     role = "constraint"
     spec = AgentSpec(
         id="data_quality",
+        source="data",
+        failure="fails closed: if it does not run, the orchestrator vetoes every action (nothing is executable)",
         name="Data quality",
         description="Checks freshness, completeness and plausibility of market data and broker state; "
         "vetoes actions on data that cannot be trusted.",

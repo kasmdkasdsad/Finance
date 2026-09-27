@@ -20,6 +20,8 @@ from .common import opinion, symbol_quality
 class StrategyLabAgent(Agent):
     spec = AgentSpec(
         id="strategy_lab",
+        source="strategies",
+        failure="skips while no strategy is promoted",
         name="Promoted strategies",
         description="Votes from strategies that passed the lab's validation, were paper-tracked and were "
         "promoted by a person.",
