@@ -7,6 +7,7 @@ each trade and persists everything. It never sends an order: every Alpaca reques
 
 from datetime import date, timedelta
 
+import pandas as pd
 import pytest
 
 from quantpulse.brain.agents.technical import TechnicalAgent
@@ -18,7 +19,24 @@ from .conftest import NOW
 from .test_trading import trading_client
 
 BRAIN = "/api/v1/brain"
-AGENTS = {"data_quality", "market_regime", "technical", "momentum", "portfolio"}
+AGENTS = {
+    "data_quality",
+    "market_regime",
+    "technical",
+    "momentum",
+    "mean_reversion",
+    "volatility",
+    "statistical",
+    "fundamental",
+    "valuation",
+    "factor",
+    "options",
+    "catalyst",
+    "portfolio",
+}
+# without a stock model run, live option chains or an earnings calendar (the fakes have none) these skip
+NEEDS_RESEARCH = {"fundamental", "valuation", "factor", "options", "catalyst"}
+RAN = AGENTS - NEEDS_RESEARCH
 TRADES = {"buy", "increase", "reduce", "close", "sell"}
 
 # a cross-section wide enough for momentum ranking: the standard trend names plus more of each kind
@@ -38,6 +56,7 @@ def _no_network(mock_net):
 
 
 async def brain_client(tmp_path, clock, fake=None, feed=None, client_host="127.0.0.1", **overrides):
+    overrides.setdefault("brain_use_stock_model", False)  # never start a model training run in these tests
     feed = feed or TrendFeed(clock, drifts=WIDE)
     async for api in trading_client(
         tmp_path,
@@ -82,8 +101,10 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
 
         # every agent ran and its run is persisted
         assert {a["agent_id"] for a in cycle["agents"]} == AGENTS
-        assert all(a["status"] == "ok" for a in cycle["agents"])
-        assert {r["agent_id"]: r["status"] for r in cycle["runs"]} == dict.fromkeys(AGENTS, "ok")
+        status_of = {r["agent_id"]: r["status"] for r in cycle["runs"]}
+        assert status_of == {a: "ok" if a in RAN else "skipped" for a in AGENTS}
+        reasons = {r["agent_id"]: r["reason"] for r in cycle["runs"] if r["status"] == "skipped"}
+        assert "stock model" in reasons["factor"] and "option chains" in reasons["options"]
 
         # structured findings: each focus symbol seen by data quality, technical and momentum
         seen: dict[str, set[str]] = {}
@@ -92,7 +113,8 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
             assert -1 <= o["score"] <= 1 and 0 <= o["confidence"] <= 1 and o["thesis"]
         for s in focus:
             assert {"data_quality", "technical", "momentum"} <= seen[s]
-        assert seen["@market"] == {"data_quality", "market_regime"} and seen["@portfolio"] == {"portfolio"}
+        assert seen["@market"] == {"data_quality", "market_regime", "volatility"}
+        assert seen["@portfolio"] == {"portfolio"}
         tech = next(o for o in cycle["opinions"] if o["agent_id"] == "technical" and o["subject"] == "UPC")
         assert tech["stance"] == "bullish" and tech["evidence"] and tech["invalidation"]
 
@@ -100,9 +122,10 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         consensus = by(cycle["consensus"])
         assert set(consensus) == {"@market", *focus}
         upc = consensus["UPC"]
-        assert upc["stance"] == "bullish" and not upc["unknown"] and upc["supporting"] == 2
+        assert upc["stance"] == "bullish" and not upc["unknown"] and upc["supporting"] >= 2
         votes = upc["detail"]["votes"]
-        assert {v["agent_id"] for v in votes} == {"technical", "momentum"}
+        assert {"technical", "momentum"} <= {v["agent_id"] for v in votes} <= RAN
+        assert upc["supporting"] + upc["neutral"] + upc["opposing"] == len(votes)
         assert all(v["reliability"] == {"weight": 1.0, "status": "unproven", "n": 0} for v in votes)
 
         # proposed actions, each trade previewed by the deterministic risk engine; nothing sent
@@ -146,7 +169,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
 
         status = (await api.get(f"{BRAIN}/status")).json()
         assert status["paper_only"] and status["last_cycle"]["id"] == cycle["id"]
-        assert status["agents"] == {"registered": 5, "enabled": 5} and not status["running"]
+        assert status["agents"] == {"registered": 13, "enabled": 13} and not status["running"]
         assert status["open_predictions"] == len(preds) and "not built yet" in status["learning"]
 
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
@@ -211,15 +234,12 @@ async def test_a_failing_agent_is_recorded_and_the_cycle_goes_on(tmp_path, monke
         runs = by(cycle["runs"], "agent_id")
         assert runs["technical"]["status"] == "failed"
         assert runs["technical"]["reason"] == "RuntimeError: indicator blew up"
-        assert {a for a, r in runs.items() if r["status"] == "ok"} == AGENTS - {"technical"}
+        assert {a for a, r in runs.items() if r["status"] == "ok"} == RAN - {"technical"}
         assert cycle["summary"]["agents_failed"] == 1
         assert not any(o["agent_id"] == "technical" for o in cycle["opinions"])
-        # momentum alone is one voice: the brain says so instead of acting on it
+        # the others still vote; the failed agent's voice is simply missing
         for c in cycle["consensus"]:
-            if c["subject"] != "@market":
-                assert [v["agent_id"] for v in c["detail"]["votes"]] == ["momentum"]
-                assert c["confidence"] <= 0.5
-        assert not [d for d in cycle["decisions"] if d["action"] in TRADES]
+            assert "technical" not in {v["agent_id"] for v in c["detail"]["votes"]}
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
         assert agents["technical"]["runs"]["failures"] == 1
 
@@ -291,7 +311,7 @@ async def test_agent_controls_and_background_runs(tmp_path):
         assert (await api.get(f"{BRAIN}/agents/momentum")).json()["enabled"] is False
         assert (await api.get(f"{BRAIN}/agents/nobody")).status_code == 404
         assert (await api.post(f"{BRAIN}/agents/nobody", json={"enabled": True})).status_code == 404
-        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 5, "enabled": 4}
+        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 13, "enabled": 12}
 
         cycle = await run_cycle(api, symbols=["DNA"])
         runs = by(cycle["runs"], "agent_id")
@@ -324,4 +344,61 @@ async def test_brain_controls_refuse_remote_callers_without_a_token(tmp_path):
         assert (await api.post(f"{BRAIN}/run")).status_code == 401
         r = await api.post(f"{BRAIN}/run", headers={"X-API-Key": "tok-123"})
         assert r.status_code == 200 and r.json()["status"] == "completed"
+        assert only_reads(api.fake)
+
+
+async def test_every_agent_takes_part_when_its_data_exists(tmp_path, monkeypatch):
+    """Stock-model run, live option chains and an earnings calendar supplied as test data through the real
+    service interfaces: all thirteen agents run and vote, and an imminent release blocks new risk."""
+    from datetime import UTC, datetime
+
+    from quantpulse.core.gateway import Resolved
+    from quantpulse.schemas.common import DataStatus, Provenance
+    from quantpulse.schemas.reference import CompanyEvents, CompanyProfile
+    from quantpulse.services.model import ModelService
+    from quantpulse.services.options import OptionsService
+    from quantpulse.services.reference import ReferenceService
+    from tests.unit.test_brain_agents import chain, snapshot, universe_features
+
+    now = datetime(2026, 9, 25, 14, 0, tzinfo=UTC)
+    prov = Provenance(status=DataStatus.LIVE, provider="test", as_of=now, fetched_at=now)
+    feats = universe_features()
+    feats = pd.concat([feats, feats.iloc[: len(STOCKS)].set_axis(STOCKS)])
+    probs = {s: 0.62 if s.startswith("UP") else 0.40 if s.startswith("DN") else 0.5 for s in STOCKS}
+
+    async def model_snapshot(self, *, wait=None):
+        return snapshot(feats, probs, as_of=date(2026, 9, 24))
+
+    async def option_chain(self, symbol, expirations=None, max_expirations=8, *, force_refresh=False):
+        return Resolved(chain(spot=100.0), prov), {}
+
+    async def events(self, symbol, *, force_refresh=False):
+        profile = CompanyProfile(symbol=symbol, cik="0", name=symbol, sector="12", sector_label="Other")
+        release = datetime(2026, 9, 15, 11, 0, tzinfo=UTC)  # before the open: reacts the same session
+        return Resolved(
+            CompanyEvents(profile=profile, earnings=[release], earnings_since=date(2024, 1, 1)), prov
+        )
+
+    async def next_earnings(self, symbol):
+        return (date(2026, 9, 27), "scheduled") if symbol == "UPB" else (date(2026, 11, 20), "estimated")
+
+    monkeypatch.setattr(ModelService, "trading_snapshot", model_snapshot)
+    monkeypatch.setattr(OptionsService, "chain", option_chain)
+    monkeypatch.setattr(ReferenceService, "events", events)
+    monkeypatch.setattr(ReferenceService, "next_earnings", next_earnings)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, brain_use_stock_model=True):
+        cycle = await run_cycle(api)
+        assert cycle["status"] == "completed"
+        assert {r["agent_id"]: r["status"] for r in cycle["runs"]} == dict.fromkeys(AGENTS, "ok")
+        voters = {v["agent_id"] for c in cycle["consensus"] for v in c["detail"]["votes"]}
+        assert {"fundamental", "valuation", "factor", "options", "technical", "momentum"} <= voters
+        catalyst = [o for o in cycle["opinions"] if o["agent_id"] == "catalyst"]
+        assert catalyst and all(o["meta"]["next"] for o in catalyst)
+        upb = by(cycle["decisions"])["UPB"]
+        assert upb["action"] in {"watch", "no_action"} and upb["status"] == "no_trade"
+        if upb["action"] == "watch":
+            assert "earnings in 2 day(s)" in upb["rationale"]["reasons"][0]
+        factor = next(o for o in cycle["opinions"] if o["agent_id"] == "factor" and o["subject"] == "UPC")
+        assert factor["stance"] == "bullish" and factor["evidence"][0]["name"] == "prob_outperform"
         assert only_reads(api.fake)

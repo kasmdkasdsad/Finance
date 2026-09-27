@@ -25,6 +25,7 @@ from quantpulse.providers.alpaca_trading import (
     MarketClock,
 )
 from quantpulse.schemas.common import DataStatus
+from quantpulse.services.model import ModelSnapshot
 from quantpulse.services.trading_data import LiveQuote, QuoteQuality
 from quantpulse.services.trading_risk import RiskLimits
 
@@ -161,6 +162,9 @@ class BrainContext:
     data_states: dict[str, DataState]
     limits: RiskLimits
     kill_switch: bool
+    model: ModelSnapshot | None = None  # the stock model's live scores and raw features (fundamentals…)
+    options: dict[str, dict[str, Any]] = field(default_factory=dict)  # option-chain metrics per symbol
+    events: dict[str, dict[str, Any]] = field(default_factory=dict)  # earnings calendar and reactions
     focus: list[str] = field(default_factory=list)  # symbols this cycle studies closely
     focus_reasons: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -181,6 +185,17 @@ class BrainContext:
         except (TypeError, ValueError):
             return None
         return f if f == f and abs(f) != float("inf") else None
+
+    def feature(self, symbol: str, column: str) -> float | None:
+        """One of the stock model's raw features (fundamentals, earnings reaction, sector momentum…)."""
+        f = self.model.features if self.model is not None else None
+        if f is None or f.empty or symbol not in f.index or column not in f.columns:
+            return None
+        try:
+            v = float(f.at[symbol, column])
+        except (TypeError, ValueError):
+            return None
+        return v if v == v and abs(v) != float("inf") else None
 
     def state(self, symbol: str) -> DataState:
         return self.data_states.get(symbol, DataState.UNAVAILABLE)

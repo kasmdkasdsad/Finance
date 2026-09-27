@@ -13,6 +13,8 @@ from quantpulse.core.errors import DomainError, NotFoundError
 from quantpulse.core.jobs import Job, JobPending, JobRegistry
 from quantpulse.db.session import Database
 from quantpulse.providers.alpaca_trading import AlpacaPaperBroker
+from quantpulse.services.model import ModelService
+from quantpulse.services.options import OptionsService
 from quantpulse.services.reference import ReferenceService
 from quantpulse.services.trading import TradingService
 from quantpulse.services.trading_data import TradingDataLoader
@@ -49,6 +51,8 @@ class BrainService:
         trading: TradingService,
         data: TradingDataLoader,
         reference: ReferenceService | None = None,
+        model: ModelService | None = None,
+        options: OptionsService | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -56,7 +60,9 @@ class BrainService:
         self.registry = AgentRegistry(default_agents())
         self.store = BrainStore(db)
         self.memory = MemoryStore(db)
-        self.perception = Perception(settings, clock, data, BrokerView(broker), trading, reference)
+        self.perception = Perception(
+            settings, clock, data, BrokerView(broker), trading, reference, model, options
+        )
         self.orchestrator = Orchestrator(
             settings, clock, self.perception, self.registry, self.store, self.memory, PredictionRecorder(db)
         )

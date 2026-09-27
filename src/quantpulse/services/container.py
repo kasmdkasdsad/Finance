@@ -207,6 +207,8 @@ class Container:
             self.trading,
             TradingDataLoader(settings, self.clock, self.market, self.model, self.options, self.reference),
             self.reference,
+            self.model,
+            self.options,
         )
 
         from quantpulse.workers.poller import Poller  # local import avoids a cycle

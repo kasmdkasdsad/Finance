@@ -186,7 +186,7 @@ def test_registry_rejects_duplicates_and_unknown_dependencies():
         reg.register(Probe(agent_id="later", deps=("nobody",)))
 
 
-def test_default_agents_are_the_five_deterministic_ones():
+def test_default_agents_are_deterministic_specialists():
     reg = AgentRegistry(default_agents())
     ids = {a.spec.id: a.role for a in reg.all()}
     assert ids == {
@@ -194,6 +194,14 @@ def test_default_agents_are_the_five_deterministic_ones():
         "market_regime": "forecast",
         "technical": "forecast",
         "momentum": "forecast",
+        "mean_reversion": "forecast",
+        "volatility": "forecast",
+        "statistical": "forecast",
+        "fundamental": "forecast",
+        "valuation": "forecast",
+        "factor": "forecast",
+        "options": "forecast",
+        "catalyst": "forecast",
         "portfolio": "constraint",
     }
     assert all(a.spec.model_tier.value == "deterministic" for a in reg.all())

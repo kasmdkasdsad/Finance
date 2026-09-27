@@ -489,6 +489,31 @@ class Settings(BaseSettings):
         description="Evaluated predictions an agent needs before its measured reliability affects its weight.",
     )
     brain_max_new_positions_per_cycle: int = Field(default=2, ge=0, le=20)
+    brain_earnings_caution_days: int = Field(
+        default=3,
+        ge=0,
+        le=30,
+        description="No new position or increase this many days before an earnings release (at least the "
+        "trading blackout).",
+    )
+    brain_use_stock_model: bool = Field(
+        default=True,
+        description="Give the fundamental, valuation and factor agents the stock model's latest completed run "
+        "(never waits for training).",
+    )
+    brain_options_analysis: bool = Field(
+        default=True,
+        description="Read option chains for the focus symbols (live data only; never synthetic).",
+    )
+    brain_catalyst_analysis: bool = Field(
+        default=True, description="Read earnings calendars and past earnings reactions for the focus symbols."
+    )
+    brain_research_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        le=120,
+        description="Time budget for each extra evidence fetch (options, earnings).",
+    )
 
     # --- Prediction ledger ------------------------------------------------------------------------
     predictions_enabled: bool = Field(

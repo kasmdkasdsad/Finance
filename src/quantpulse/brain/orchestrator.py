@@ -114,6 +114,9 @@ class Orchestrator:
                     max_new=self._s.brain_max_new_positions_per_cycle,
                     vol_budget=self._s.trading_position_vol_budget,
                     vol_floor=self._s.trading_vol_floor,
+                    earnings_caution_days=max(
+                        self._s.brain_earnings_caution_days, self._s.trading_earnings_blackout_days
+                    ),
                 )
                 risk_preview(ctx, result.proposals, mode)
 

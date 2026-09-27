@@ -16,9 +16,11 @@ outage leaves research running but makes every action non-executable.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 
 import pandas as pd
 
@@ -27,8 +29,11 @@ from quantpulse.core.clock import Clock
 from quantpulse.core.market_calendar import NEW_YORK, is_market_open
 from quantpulse.domain import trading_regime as regime_mod
 from quantpulse.domain import trading_signals as ts
+from quantpulse.domain.fundamental_factors import FUNDAMENTAL_FEATURES
 from quantpulse.providers.alpaca_trading import BrokerError
 from quantpulse.schemas.common import DataStatus
+from quantpulse.services.model import ModelService, ModelSnapshot
+from quantpulse.services.options import OptionsService
 from quantpulse.services.reference import ReferenceService
 from quantpulse.services.trading import TradingService
 from quantpulse.services.trading_data import LiveQuote, QuoteQuality, TradingDataLoader, TradingInputs
@@ -36,6 +41,7 @@ from quantpulse.services.trading_risk import RiskLimits
 
 from .context import BrainContext, BrokerView, PortfolioState, brain_session
 from .indicators import compute_indicators, market_statistics
+from .research_data import earnings_events, option_metrics
 from .types import BrainMode, BrainSession, DataState
 
 logger = logging.getLogger(__name__)
@@ -110,6 +116,8 @@ class Perception:
         broker: BrokerView,
         trading: TradingService,
         reference: ReferenceService | None = None,
+        model: ModelService | None = None,
+        options: OptionsService | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -117,6 +125,8 @@ class Perception:
         self._broker = broker
         self._trading = trading
         self._reference = reference
+        self._model = model
+        self._options = options
 
     async def _portfolio(self, errors: dict[str, str]) -> PortfolioState:
         if not self._broker.configured():
@@ -155,6 +165,48 @@ class Perception:
             errors["sectors"] = f"{type(exc).__name__}: {exc}"
         return sectors
 
+    async def _stock_model(self, inputs: TradingInputs, errors: dict[str, str]) -> ModelSnapshot | None:
+        """The stock model's latest completed run (the trading loader's, or asked for directly when the
+        strategy's weights did not need it). Never waits for training; synthetic runs are not evidence."""
+        if inputs.model is not None:
+            return inputs.model
+        if self._model is None or not self._s.brain_use_stock_model:
+            return None
+        try:
+            snap = await asyncio.wait_for(
+                self._model.trading_snapshot(wait=0), self._s.brain_research_timeout_seconds
+            )
+        except Exception as exc:  # training, unavailable or slow: the model agents abstain
+            errors["stock_model"] = f"{type(exc).__name__}: {exc}"[:300]
+            return None
+        if snap.data_status is DataStatus.SYNTHETIC:
+            errors["stock_model"] = "the stock model only has synthetic prices"
+            return None
+        return snap
+
+    async def _research(
+        self, focus: Sequence[str], inputs: TradingInputs, close: pd.DataFrame, errors: dict[str, str]
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Option-chain metrics and earnings events for the focus stocks (bounded; failures recorded)."""
+        stocks = [s for s in focus if s not in self._s.trading_etfs]
+        today = self._clock.now().astimezone(NEW_YORK).date()
+        timeout = self._s.brain_research_timeout_seconds
+        jobs: dict[str, Any] = {}
+        if self._options is not None and self._s.brain_options_analysis and self._s.enable_live_data:
+            spots = {s: inputs.quotes[s].price for s in stocks if s in inputs.quotes}
+            jobs["options"] = option_metrics(self._options, list(spots), spots, today, timeout)
+        if self._reference is not None and self._s.brain_catalyst_analysis:
+            jobs["events"] = earnings_events(self._reference, stocks, close, inputs.benchmark, today, timeout)
+        got = dict(zip(jobs, await asyncio.gather(*jobs.values()), strict=True))
+        for kind, (found, failed) in got.items():
+            for sym, why in failed.items():
+                errors[f"{kind}:{sym}"] = why[:200]
+            label = "live option chains" if kind == "options" else "earnings calendars"
+            self._notes.append(
+                f"{label}: {len(found)} of {len(stocks)} focus stocks (only real data is used)"
+            )
+        return got.get("options", ({}, {}))[0], got.get("events", ({}, {}))[0]
+
     def _regime(self, inputs: TradingInputs) -> regime_mod.MarketRegime:
         """The strategy's own regime classification (same inputs as the trading service)."""
         spy, qqq = inputs.benchmark, inputs.qqq
@@ -171,6 +223,7 @@ class Perception:
         return regime_mod.classify(spy, qqq, breadth_50=b50, breadth_200=b200, vix=inputs.vix)
 
     async def perceive(self, mode: BrainMode, requested: Sequence[str] = ()) -> BrainContext:
+        self._notes: list[str] = []
         now = self._clock.now()
         errors: dict[str, str] = {}
         portfolio = await self._portfolio(errors)
@@ -214,6 +267,11 @@ class Perception:
             indicators["implied_vol"] = iv.reindex(indicators.index)
             rv = pd.to_numeric(indicators.get("rv63"), errors="coerce")
             indicators["iv_premium"] = indicators["implied_vol"] / rv.where(rv > 0) - 1
+
+        model = await self._stock_model(inputs, errors)
+        options, events = await self._research(focus, inputs, inputs.close, errors)
+        for sym, (nxt, source) in inputs.earnings.items():  # the trading loader's calendar, when it has one
+            events.setdefault(sym, {"next": nxt.isoformat(), "next_source": source, "reactions": []})
 
         kill = await self._trading.kill_switch()
         states = {
@@ -260,15 +318,22 @@ class Perception:
             implied_vol=dict(inputs.implied_vol),
             earnings=dict(inputs.earnings),
             model_z=inputs.model_z,
-            fundamentals=inputs.fundamentals(["earnings_yield", "fcf_yield", "book_to_market", "roe"]),
+            fundamentals=(
+                model.features[[c for c in FUNDAMENTAL_FEATURES if c in model.features.columns]]
+                if model is not None and not model.features.empty
+                else None
+            ),
             sectors=await self._sectors(errors),
             portfolio=portfolio,
             data_states=states,
             limits=RiskLimits.from_settings(self._s),
             kill_switch=kill.active,
+            model=model,
+            options=options,
+            events=events,
             focus=focus,
             focus_reasons=reasons,
-            notes=list(inputs.notes) + ([inputs.model_note] if inputs.model_note else []),
+            notes=list(inputs.notes) + ([inputs.model_note] if inputs.model_note else []) + self._notes,
             provider_errors=errors,
         )
         if inputs.price_status is DataStatus.SYNTHETIC:

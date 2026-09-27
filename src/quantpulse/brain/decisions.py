@@ -88,8 +88,9 @@ def target_weight(
     ctx: BrainContext, symbol: str, confidence: float, vol_budget: float, vol_floor: float
 ) -> float:
     """A volatility-budgeted weight (vol_budget / risk vol), capped by the position limit, scaled by
-    confidence."""
-    vol = ctx.ind(symbol, "risk_vol") or ctx.ind(symbol, "rv63") or vol_floor
+    confidence. Risk vol is the larger of the strategy's own measure and the volatility agent's forecast."""
+    forecast = (ctx.working.facts.get("vol_forecast") or {}).get(symbol)
+    vol = max(ctx.ind(symbol, "risk_vol") or ctx.ind(symbol, "rv63") or vol_floor, forecast or 0.0)
     base = vol_budget / max(vol, vol_floor)
     return round(min(base, ctx.limits.max_position_pct) * min(max(confidence, 0.0), 1.0), 4)
 
@@ -102,9 +103,18 @@ def plan(
     max_new: int,
     vol_budget: float,
     vol_floor: float,
+    earnings_caution_days: int = 0,
 ) -> list[Proposal]:
     out: list[Proposal] = []
     constraints = ctx.working.facts.get("portfolio_constraints") or {}
+    event_risk = ctx.working.facts.get("event_risk") or {}
+
+    def before_earnings(symbol: str) -> str | None:
+        days = (event_risk.get(symbol) or {}).get("days_to_earnings")
+        if days is not None and 0 <= days <= earnings_caution_days:
+            return f"earnings in {days} day(s): no new risk before the release"
+        return None
+
     regime = ctx.working.facts.get("regime")
     eq = ctx.portfolio.equity
     cash = float(constraints.get("spendable_cash", 0.0))  # shared by increases and new buys
@@ -192,6 +202,7 @@ def plan(
             and regime != "risk_off"
             and eq > 0
             and price
+            and not before_earnings(s)
         ):
             tw = target_weight(ctx, s, c.confidence, vol_budget, vol_floor)
             add = min((tw - w) * eq, cash, per_order)
@@ -220,6 +231,8 @@ def plan(
                 )
         else:
             why = c.reasons if c is not None else ["no consensus"]
+            if before_earnings(s):
+                why = [before_earnings(s) or "", *why]
             out.append(
                 Proposal(
                     action=Action.HOLD,
@@ -265,6 +278,8 @@ def plan(
             blockers.append("the account is on margin (negative cash)")
         if c.vetoes:
             blockers.extend(v["reason"] for v in c.vetoes)
+        if before_earnings(s):
+            blockers.append(before_earnings(s) or "")
         if blockers:
             out.append(
                 Proposal(
