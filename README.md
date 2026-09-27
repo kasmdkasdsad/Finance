@@ -1242,6 +1242,50 @@ Every directional call a forecasting agent makes, and every directional consensu
 The consensus **calibration** (hit rate by post-debate confidence) is the evidence for or against
 `QP_BRAIN_MIN_CONFIDENCE`. Nothing is scored before it has matured, and nothing is graded twice.
 
+### Continuous operation: supervisor, events and routing
+
+While the server runs, the background poller ticks the **supervisor** about once a minute. It works by
+market session and by event, and never runs every agent all the time:
+
+| Session | What it does |
+|---|---|
+| Pre-market (from 08:30 New York) | Once a day: a learning pass for anything that matured overnight, then a full cycle to prepare the session. Nothing is executable while the market is closed |
+| Market open | A full cycle every `QP_BRAIN_CYCLE_MINUTES` (30). A quote monitor for holdings and the last focus every `QP_BRAIN_MONITOR_MINUTES` (5): a move of ≥ 3 daily σ or a stale quote becomes an event. It reads the trading service's audit trail for orders and risk limits (read only). Event wake-ups run focused cycles, at most `QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR` (4) |
+| After hours (from 16:40) | Once a day: a learning pass, then a portfolio review of the holdings |
+| Weekends and holidays | Once a day: a learning pass, then a deep research cycle (twice the pre-screen and opportunity budget) |
+
+**Events** are recorded in `brain_events` and served by `GET /brain/events`:
+`MarketDataUpdated`, `QuoteBecameStale`, `PriceMoveDetected`, `VolumeSpikeDetected`,
+`EarningsApproaching`, `MarketRegimeChanged`, `PortfolioChanged`, `PositionChanged`, `OrderSubmitted`,
+`OrderFilled`, `OrderCanceled`, `RiskLimitTriggered`, `OpportunityDetected`, `AgentCompleted`,
+`AgentFailed`, `PredictionMatured`, `TradeOutcomeAvailable`, and `NewsEventDetected`.
+
+* **Repeats and failures:** repeats inside a cooldown are dropped, and one failing handler never stops the
+  others.
+* **What wakes what:**
+  * a price move, a volume spike, a news item or earnings approaching for a holding wake an *event*
+    cycle on that symbol;
+  * position, portfolio and order changes and risk limits wake a *portfolio* review;
+  * a regime change wakes a *full* cycle.
+* **Rate limits:** wake-ups for the same thing are merged, and event cycles run only while the market is
+  open.
+* **News:** QuantPulse has no news provider yet. `NewsSource` is an interface only, and no news event is
+  ever invented.
+
+**Routing** (cost control) decides which agents a cycle asks and how wide it looks:
+
+* *full*: every agent;
+* *portfolio*: holdings only, with the position-management agents;
+* *event*: the event's symbols plus holdings, with the agents that react to price, volume, positioning
+  and earnings;
+* *deep*: every agent and a wider focus.
+
+Agents not needed are recorded as skipped "not needed for a … cycle".
+
+The supervisor is on by default (`QP_BRAIN_SUPERVISOR_ENABLED=true`): it only analyses and never sends an
+order. It can be paused and resumed at runtime (`POST /brain/supervisor {"paused": true}` or the page),
+and its state survives restarts.
+
 ### The Brain page
 
 *Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
@@ -1258,6 +1302,8 @@ The consensus **calibration** (hit rate by post-debate confidence) is the eviden
   column — always "not sent".
 * **Learning:** open and graded predictions, consensus calibration, track records ("unproven" until
   enough calls are graded), decision-vs-outcome reflections by quadrant, and failure analyses.
+* **Supervisor & events:** the supervisor's state, its queued wake-ups and recent work, a pause/resume
+  button, and the event stream.
 * **Memory** and **History.**
 
 The page keeps four layers visibly apart: ① agent analysis, ② consensus, ③ risk preview, and ④ broker
@@ -1284,12 +1330,14 @@ There is no execution mode: the brain cannot place orders in Phase 1.
 | `GET /brain/status` | Mode, agents registered/enabled, last cycle, open predictions, learning status |
 | `GET /brain/agents` · `/agents/{id}` | Agents with their spec, run statistics and measured performance (empty until predictions are evaluated) |
 | `POST /brain/agents/{id}` `{"enabled": false}` | Switch an agent off or on |
-| `POST /brain/run?wait=` `{"symbols": ["NVDA"], "kind": "full"}` | Run one cycle now (202 with progress if it takes longer than `wait`); never sends an order |
+| `POST /brain/run?wait=` `{"symbols": ["NVDA"], "kind": "full"}` (`full`, `portfolio`, `event`, `deep`) | Run one cycle now (202 with progress if it takes longer than `wait`); never sends an order |
 | `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |
 | `GET /brain/memory?tier=&kind=&subject=&text=` | Structured memory, newest first |
 | `GET /brain/opportunities?kind=&status=` | Detected opportunities and their pipeline trace, newest first |
 | `POST /brain/learn?wait=` | Grade matured predictions, reflect on decisions, recompute track records (202 while it runs) |
 | `GET /brain/learning` · `/performance?window=` · `/reflections?category=` | Prediction counts, last pass and calibration · measured track records · reflections and failure analyses |
+| `GET /brain/supervisor` · `POST /brain/supervisor {"paused": true}` | Supervisor state (session, schedule, queued wake-ups, recent work) · pause or resume |
+| `GET /brain/events?type=&subject=` | Recorded events, newest first |
 
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
 `QP_API_TOKEN`.

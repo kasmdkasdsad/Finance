@@ -550,6 +550,94 @@ def _learning() -> None:
         )
 
 
+def _operations() -> None:
+    st.markdown(
+        "While the server runs, the **supervisor** decides what the Brain does: full cycles during the session, a "
+        "quote monitor, focused cycles when events happen (rate-limited), learning after the close and research at "
+        "weekends. It is analysis only — the Brain never sends orders."
+    )
+    sup = guarded(lambda: api().get(f"{BASE}/supervisor"), "supervisor")
+    if sup is not None:
+        c = st.columns(4)
+        c[0].metric("Supervisor", "off" if not sup["enabled"] else "paused" if sup["paused"] else "running")
+        c[1].metric("Session", sup["session"].replace("_", " "))
+        c[2].metric("Queued wake-ups", len(sup["queue"]))
+        c[3].metric(
+            "Event cycles (last hour)",
+            f"{sup['event_cycles_last_hour']} / {sup['limits']['max_event_cycles_per_hour']}",
+        )
+        if sup["enabled"]:
+            label = "Resume" if sup["paused"] else "Pause"
+            toggle = {"paused": not sup["paused"]}
+            clicked = st.button(label, icon=":material/pause_circle:", key="brain-pause")
+            if clicked and guarded(lambda: api().post(f"{BASE}/supervisor", toggle), "supervisor"):
+                st.rerun()
+        if sup["queue"]:
+            st.dataframe(pd.DataFrame(sup["queue"]), hide_index=True, use_container_width=True)
+        if sup["recent"]:
+            st.markdown("**Recent work**")
+            st.dataframe(
+                pd.DataFrame(sup["recent"][::-1]).astype(str), hide_index=True, use_container_width=True
+            )
+        st.caption(
+            _md("Last runs: " + ", ".join(f"{k} {v[:16].replace('T', ' ')}" for k, v in sup["last"].items()))
+        )
+    kind = st.selectbox(
+        "Events",
+        [
+            "all",
+            "PriceMoveDetected",
+            "VolumeSpikeDetected",
+            "QuoteBecameStale",
+            "OpportunityDetected",
+            "EarningsApproaching",
+            "MarketRegimeChanged",
+            "PortfolioChanged",
+            "PositionChanged",
+            "OrderSubmitted",
+            "OrderFilled",
+            "OrderCanceled",
+            "RiskLimitTriggered",
+            "AgentFailed",
+            "AgentCompleted",
+            "PredictionMatured",
+            "TradeOutcomeAvailable",
+            "MarketDataUpdated",
+            "NewsEventDetected",
+        ],
+        key="brain-event-kind",
+    )
+    rows = (
+        guarded(
+            lambda: api().get(f"{BASE}/events", type=None if kind == "all" else kind, limit=200), "events"
+        )
+        or []
+    )
+    if rows:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "when": r["created_at"][:19].replace("T", " "),
+                        "event": r["type"],
+                        "subject": r["subject"],
+                        "source": (r.get("payload") or {}).get("source"),
+                        "detail": ", ".join(
+                            f"{k}={v}"
+                            for k, v in (r.get("payload") or {}).items()
+                            if k != "source" and v is not None
+                        )[:160],
+                    }
+                    for r in rows
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("No events of this kind yet.", icon=":material/notifications_off:")
+
+
 def _memory() -> None:
     tier = st.segmented_control(
         "Memory tier", ["short_term", "working", "long_term", "strategy", "agent"], default="long_term"
@@ -645,6 +733,7 @@ def render() -> None:
             "Consensus & debate",
             "Proposed actions",
             "Learning",
+            "Supervisor & events",
             "Memory",
             "History",
         ]
@@ -662,6 +751,8 @@ def render() -> None:
     with tabs[5]:
         _learning()
     with tabs[6]:
-        _memory()
+        _operations()
     with tabs[7]:
+        _memory()
+    with tabs[8]:
         _history(cycles)
