@@ -159,7 +159,7 @@ flowchart LR
     CB --> PR[providers<br/>strict wire schemas]
     PR --> HTTP[HttpClient<br/>token buckets · retries · concurrency caps]
     HTTP --> EXT[(Yahoo · Polygon · Alpaca · Treasury · SEC · FMP · EIA · fueleconomy.gov · ESPN · Odds API)]
-    G --> WH[(SQLite warehouse<br/>Alembic 0001-0012)]
+    G --> WH[(SQLite warehouse<br/>Alembic 0001-0013)]
     S --> BRK[Alpaca paper broker<br/>alpaca-py, paper=True]
     G --> SYN[synthetic generators]
 ```
@@ -1286,6 +1286,59 @@ The supervisor is on by default (`QP_BRAIN_SUPERVISOR_ENABLED=true`): it only an
 order. It can be paused and resumed at runtime (`POST /brain/supervisor {"paused": true}` or the page),
 and its state survives restarts.
 
+### Strategy lab
+
+A safe place to develop strategies. A strategy is a **versioned, declarative rule** built only from
+point-in-time price features (the stock model's feature library):
+
+* it ranks the universe on a weighted sum of cross-sectional z-scores, with optional filters such as "only
+  names in an uptrend";
+* it holds the best `top_n` long-only, equal- or inverse-volatility-weighted;
+* it rebalances every `rebalance_days`, with a one-session execution lag and per-trade costs.
+
+A version never changes; a different rule is a new version. The brain proposes six templates (12-1
+momentum, momentum in uptrends, short-term reversal, low volatility, steady trend, buying the dip in an
+uptrend), and people can add versions with other parameters.
+
+**Validation** (`POST /brain/lab/strategies/{id}/{version}/validate`) runs on real daily history only
+(`QP_BRAIN_LAB_HISTORY_DAYS`, the `QP_BRAIN_LAB_UNIVERSE_SIZE` most liquid names). Synthetic prices are
+refused. The universe is today's candidates, so results carry survivorship bias, and the report says
+so. Validation has five parts:
+
+* **Backtest.** Signals at the close of *t* are traded at the close of *t+1* and earn from *t+2*.
+  Positions drift between rebalances and costs are paid on turnover.
+* **Baselines:**
+  * the benchmark;
+  * the equal-weighted universe on the same schedule;
+  * 100 portfolios of random names.
+* **Walk-forward** (train 252, test 126 sessions). In each window the grid variant with the best train
+  *active* Sharpe (versus equal weight, so market beta is not mistaken for skill) is run untouched on the
+  next window. Only the stitched test windows count.
+* **Overfitting checks:**
+  * the deflated Sharpe ratio of the out-of-sample active returns, given the number of variants tried;
+  * the out-of-sample / in-sample ratio;
+  * the share of folds that beat equal weight;
+  * the percentile against random portfolios.
+* **Stress tests:**
+  * the benchmark's worst drawdowns and worst 20-session windows;
+  * doubled costs;
+  * trading two sessions late.
+
+A version is **validated** only if every gate passes. On generated data this promotes a planted
+momentum effect and rejects a pure-noise universe whose single backtest looked attractive; both are
+tests in the suite.
+
+**Paper tracking.** A validated version can be paper-tracked: on its own schedule the lab records the
+portfolio it would hold (a shadow portfolio; no orders) and measures it afterwards from real closes.
+
+**Promotion** is a person's call (`POST .../status {"status": "promoted"}`). It is allowed only for a
+validated version paper-tracked for `QP_BRAIN_LAB_PAPER_DAYS` sessions without falling short of the
+benchmark. A promoted strategy becomes one voice in the consensus (the `strategy_lab` agent), and its
+calls are graded like any agent's.
+
+The supervisor updates paper portfolios after the close. At weekends it proposes untried templates and
+validates up to two. It never promotes.
+
 ### The Brain page
 
 *Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
@@ -1302,6 +1355,8 @@ and its state survives restarts.
   column — always "not sent".
 * **Learning:** open and graded predictions, consensus calibration, track records ("unproven" until
   enough calls are graded), decision-vs-outcome reflections by quadrant, and failure analyses.
+* **Strategy lab:** versions with their status, gates, walk-forward and paper results; propose,
+  validate, paper-track, promote and retire.
 * **Supervisor & events:** the supervisor's state, its queued wake-ups and recent work, a pause/resume
   button, and the event stream.
 * **Memory** and **History.**
@@ -1338,6 +1393,8 @@ There is no execution mode: the brain cannot place orders in Phase 1.
 | `GET /brain/learning` · `/performance?window=` · `/reflections?category=` | Prediction counts, last pass and calibration · measured track records · reflections and failure analyses |
 | `GET /brain/supervisor` · `POST /brain/supervisor {"paused": true}` | Supervisor state (session, schedule, queued wake-ups, recent work) · pause or resume |
 | `GET /brain/events?type=&subject=` | Recorded events, newest first |
+| `GET /brain/lab/templates` · `/lab/strategies?status=` · `/lab/strategies/{id}/{version}` · `/lab/compare?keys=` | Strategy templates · versions · one version with its runs · versions side by side |
+| `POST /brain/lab/propose` · `/lab/strategies {"template": …}` · `/lab/strategies/{id}/{version}/validate` · `/lab/strategies/{id}/{version}/status {"status": "paper"\|"promoted"\|"retired"}` · `/lab/paper` | Propose templates · create a version · validate (202 while running) · paper / promote (gated) / retire · update paper portfolios |
 
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
 `QP_API_TOKEN`.
@@ -1376,6 +1433,7 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0008_prediction_ledger` | `predictions` |
 | `0009_reference_data` | `company_profiles`, `earnings_events`, `reference_blobs` (S&P membership snapshot, download bookkeeping), `fundamental_facts` (SEC XBRL frames); `predictions.origin` |
 | `0010_alpaca_paper_trading` | `trading_cycles`, `broker_orders`, `trading_events`, `trading_state` (runtime kill switch, per-position memory, P/L baseline) |
+| `0013_brain_strategy_lab` | `brain_strategies` (versioned specs, status, validation and paper results), `brain_strategy_runs` |
 | `0012_brain_research` | `brain_opportunities` (with the pipeline trace), `brain_debates` |
 | `0011_brain` | `brain_agents`, `brain_cycles`, `brain_agent_runs`, `brain_opinions`, `brain_consensus`, `brain_decisions`, `brain_predictions`, `brain_memory`; reserved for later phases and still empty: `brain_reflections`, `brain_agent_performance`, `brain_improvements`, `brain_events`, `brain_state` |
 
@@ -1428,7 +1486,7 @@ src/quantpulse/
   domain/                vehicle · sports · screener · paper_broker · trading_agent · features · alpha_model · research · regime · universe (point-in-time S&P 500) · sectors (SIC → FF12) · earnings · fundamental_factors · trading_signals · trading_regime · trading_portfolio · trading_performance
   providers/             yahoo · polygon · alpaca · treasury · sec_edgar · sp500 (Wikipedia) · fmp · eia · fueleconomy · espn · odds_api · synthetic · alpaca_trading (paper broker)
   schemas/               Pydantic v2 request/response/ingestion models
-  db/                    models · repositories · session · migrate · migrations/versions/0001-0012
+  db/                    models · repositories · session · migrate · migrations/versions/0001-0013
   services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · forecast · model · reference · facts · stocks · predictions · backfill · notifications · trading · trading_data · trading_risk · order_manager · container
   brain/                 multi-agent analysis: types · perception · indicators · agents/* · registry · consensus · decisions · memory · learning (prediction records) · store · orchestrator · service
   workers/poller.py      market-hours-aware refresh, scheduled email, sandbox scheduler, prediction ledger, model warm-up, paper-trading cycles and reconciliation

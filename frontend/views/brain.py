@@ -550,6 +550,86 @@ def _learning() -> None:
         )
 
 
+STATUS_BADGE = {
+    "proposed": "gray",
+    "validated": "blue",
+    "rejected": "red",
+    "paper": "orange",
+    "promoted": "green",
+    "retired": "gray",
+}
+
+
+def _lab() -> None:
+    st.markdown(
+        "Strategies are **proposed → validated → paper-tracked → promoted**. Validation needs every gate to pass: "
+        "enough out-of-sample history, walk-forward value over the equal-weight universe, a deflated Sharpe "
+        "that survives the number of variants tried, better than random portfolios, and stress tests. One "
+        "attractive backtest is never enough, and **only a person can promote**. A promoted strategy becomes one "
+        "voice in the consensus; nothing here places an order."
+    )
+    rows = guarded(lambda: api().get(f"{BASE}/lab/strategies"), "strategy lab") or []
+    propose = st.button("Propose untried templates", icon=":material/add_circle:", key="lab-propose")
+    if propose and guarded(lambda: api().post(f"{BASE}/lab/propose"), "propose") is not None:
+        st.rerun()
+    if not rows:
+        st.info("No strategies yet.", icon=":material/science:")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "strategy": r["key"],
+                    "name": r["name"],
+                    "status": r["status"],
+                    "verdict": (r["validation"] or {}).get("verdict"),
+                    "gates passed": f"{sum(g['passed'] for g in (r['validation'] or {}).get('gates', []))}"
+                    f"/{len((r['validation'] or {}).get('gates', []))}",
+                    "OOS active Sharpe": ((r["validation"] or {}).get("walk_forward") or {}).get(
+                        "oos_active_sharpe"
+                    ),
+                    "deflated Sharpe": ((r["validation"] or {}).get("walk_forward") or {}).get("dsr"),
+                    "paper sessions": (r["paper"] or {}).get("sessions"),
+                    "paper excess": (r["paper"] or {}).get("excess_return"),
+                }
+                for r in rows
+            ]
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+    keys = [r["key"] for r in rows]
+    key = st.selectbox("Strategy", keys, key="lab-pick")
+    chosen = next(r for r in rows if r["key"] == key)
+    st.badge(chosen["status"], color=STATUS_BADGE.get(chosen["status"], "gray"))
+    st.caption(_md(chosen["spec"].get("description", "")))
+    sid, ver = chosen["strategy_id"], chosen["version"]
+    c = st.columns(4)
+    if c[0].button("Validate", key="lab-validate", disabled=chosen["status"] == "retired"):
+        guarded(lambda: api().post(f"{BASE}/lab/strategies/{sid}/{ver}/validate", wait=300), "validation")
+        st.rerun()
+    for col, status, label in (
+        (c[1], "paper", "Start paper tracking"),
+        (c[2], "promoted", "Promote"),
+        (c[3], "retired", "Retire"),
+    ):
+        pressed = col.button(label, key=f"lab-{status}")
+        if pressed and guarded(
+            lambda s=status: api().post(f"{BASE}/lab/strategies/{sid}/{ver}/status", {"status": s}), label
+        ):
+            st.rerun()
+    v = chosen["validation"] or {}
+    if v.get("gates"):
+        st.dataframe(pd.DataFrame(v["gates"]), hide_index=True, use_container_width=True)
+        bt, wf = v.get("backtest") or {}, v.get("walk_forward") or {}
+        st.caption(
+            f"Backtest {bt.get('start')} → {bt.get('end')}: Sharpe {bt.get('sharpe')}, max drawdown "
+            f"{pct(bt.get('max_drawdown'), 1)}, excess {pct(bt.get('excess_annual'), 1)}/yr · walk-forward "
+            f"in-sample active Sharpe {wf.get('is_active_sharpe')} → out-of-sample {wf.get('oos_active_sharpe')} · "
+            f"{(v.get('data') or {}).get('symbols')} symbols; {(v.get('data') or {}).get('survivorship_bias')}"
+        )
+
+
 def _operations() -> None:
     st.markdown(
         "While the server runs, the **supervisor** decides what the Brain does: full cycles during the session, a "
@@ -733,6 +813,7 @@ def render() -> None:
             "Consensus & debate",
             "Proposed actions",
             "Learning",
+            "Strategy lab",
             "Supervisor & events",
             "Memory",
             "History",
@@ -751,8 +832,10 @@ def render() -> None:
     with tabs[5]:
         _learning()
     with tabs[6]:
-        _operations()
+        _lab()
     with tabs[7]:
-        _memory()
+        _operations()
     with tabs[8]:
+        _memory()
+    with tabs[9]:
         _history(cycles)
