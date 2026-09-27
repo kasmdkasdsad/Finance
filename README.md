@@ -90,6 +90,43 @@ streamlit run frontend/app.py
 python -m pytest                 # the test suite
 ```
 
+### Windows desktop launcher (double-click, no Command Prompt)
+
+After the one-time setup above (the `.venv` and `.env` must exist), double-click
+**`launcher\install-shortcuts.bat`** once. It puts three shortcuts on your desktop:
+
+| Shortcut | What it does |
+|---|---|
+| **QuantPulse Terminal** | Starts the API and the UI (unless they are already running), waits until both answer, opens the UI in your browser |
+| **QuantPulse Trading Control** | The same, then opens the Alpaca **paper** trading page (account, positions, orders, risk, proposed trades, kill switch, reconciliation) |
+| **Stop QuantPulse** | Stops the API and the UI the launcher started, cleanly (Ctrl+C first, forced only after 20 s) |
+
+**Starting QuantPulse never trades.** The launcher only reads:
+
+* it makes GET requests to `/health`, `/openapi.json`, `/api/v1/trading/status` and Streamlit's health check;
+* it never runs a strategy cycle, sends a test order, or changes a setting;
+* the scheduler stays off unless `.env` says `QP_TRADING_SCHEDULER_ENABLED=true`, which is now off by
+  default. If it is on, the launcher warns you.
+
+Details:
+
+* **What runs.** Everything runs from the project's own `.venv`. It works without anything on your
+  PATH and from any folder: paths come from the launcher's location.
+* **Network.** Both servers listen on `127.0.0.1` only.
+* **The API token.** The UI receives the API address and `QP_API_TOKEN` from `.env`, so you do not
+  have to paste the token into the sidebar. Secrets are never written to a log.
+* **Double-clicking again** opens the browser; it never starts a second copy.
+* **Errors.** If something fails (missing `.venv`, a port used by another program, a server that stops
+  while starting), a message box says what happened and how to fix it.
+* **Logs.** Everything is logged under `logs\`:
+  * `launcher.log` holds what the launcher did (secrets are scrubbed);
+  * `api.log` and `ui.log` hold the servers' output;
+  * `launcher-state.json` records what the launcher started.
+
+From a Command Prompt, use `launcher\launch.bat`, `launcher\launch.bat status`, `launcher\stop.bat`, or
+`.venv\Scripts\python.exe launcher\quantpulse_launcher.py start --no-splash` (it logs to the console).
+The icons in `assets\` are original artwork, drawn by `launcher\make_icon.py`.
+
 ### Without make
 
 ```bash
@@ -745,8 +782,8 @@ The defaults compute everything and send nothing:
 | `QP_ALPACA_PAPER` | `true` | Must stay true |
 | `QP_TRADING_KILL_SWITCH` | `false` | Refuses every new order (the dashboard has a runtime switch as well) |
 
-To inspect the strategy first, set only the keys: every 30 minutes the scheduler records a **dry-run**
-cycle, and **Run strategy now** does the same on demand. When you are ready for the strategy to trade
+To inspect the strategy first, set only the keys: **Run strategy now** records a **dry-run** cycle on
+demand (and, with `QP_TRADING_SCHEDULER_ENABLED=true`, the scheduler does so every 30 minutes). When you are ready for the strategy to trade
 the paper account:
 
 ```env
@@ -771,8 +808,8 @@ orders are not being sent right now.
 **Scheduled cycles need arming.** With `QP_TRADING_SCHEDULER_REQUIRES_ARMING=true` (the default),
 switching paper execution on never makes the scheduler fire a batch by itself: scheduled cycles stay dry
 runs until you have used paper execution once by hand, with a manual **Run strategy now** (paper) or the
-confirmed test order. Set `QP_TRADING_SCHEDULER_ENABLED=false` to keep the scheduler out of the way
-entirely during a first session.
+confirmed test order. The scheduler itself is off unless `QP_TRADING_SCHEDULER_ENABLED=true` (the
+default is `false`: cycles run only when you start one).
 
 ### How one cycle works
 
@@ -784,7 +821,8 @@ Alpaca (reconcile orders, read account / positions / open orders / clock)
   → wait for sell fills → re-check buys against the new cash → reconcile fills → record the cycle
 ```
 
-The scheduler starts a cycle at `QP_TRADING_TIME` (10:00 New York) and then every
+With `QP_TRADING_SCHEDULER_ENABLED=true` (default `false`), the scheduler starts a cycle at
+`QP_TRADING_TIME` (10:00 New York) and then every
 `QP_TRADING_REBALANCE_INTERVAL_MINUTES` (30) until 15 minutes before the close. Early closes are
 handled. A slot that was missed (the app was down) is not run late. Each slot runs once, even across
 restarts: the cycle key is unique in the database.
@@ -1015,7 +1053,7 @@ Commands are PowerShell (Windows); `curl` works the same elsewhere. If `QP_API_T
 1. `python -m pytest -q` runs the tests. Everything is mocked; no test touches Alpaca.
 2. `quantpulse-migrate` creates the trading tables.
 3. Put the paper keys in `.env` (project folder). Leave `QP_ALPACA_TRADING_ENABLED=false` and
-   `QP_TRADING_DRY_RUN=true`, and set `QP_TRADING_SCHEDULER_ENABLED=false` for this first session.
+   `QP_TRADING_DRY_RUN=true`, and keep `QP_TRADING_SCHEDULER_ENABLED=false` (the default).
    Start the API and the UI (see [Quick start](#quick-start)).
 4. Run the read-only check. Each step should show `ok: True`, and `endpoint_verified: True`:
 
@@ -1140,6 +1178,8 @@ src/quantpulse/
   api/                   app factory · middleware · error handlers · routers/*
   data/                  packaged vehicle profile · S&P 500 constituents and change-history snapshot
 frontend/                Streamlit app (app.py, api_client.py, components.py, charts.py, views/*)
+launcher/                Windows desktop launcher: quantpulse_launcher.py (start · stop · status) · *.bat · install-shortcuts.ps1 · make_icon.py
+assets/                  QuantPulse icons (.ico for the desktop shortcuts, .png for the browser tab)
 tests/                   unit · providers · integration · frontend · fixtures (real captured payloads) · fakes (Alpaca paper API, market data)
 ```
 

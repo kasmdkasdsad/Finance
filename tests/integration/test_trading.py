@@ -73,6 +73,8 @@ async def test_status_and_account_without_keys(tmp_path, clock):
         assert r.status_code == 503 and "not configured" in r.json()["detail"]
         assert (await api.post(f"{BASE}/run")).status_code == 503
         assert (await api.get(f"{BASE}/proposed")).json() is None
+        assert await api.container.trading.run_scheduled() == "disabled"  # the scheduler is off by default
+    async for api in _client(make_settings(tmp_path / "sched", trading_scheduler_enabled=True), clock):
         assert await api.container.trading.run_scheduled() == "not configured (no Alpaca paper keys)"
 
 
@@ -80,6 +82,8 @@ async def test_default_settings_are_a_safe_dry_run(tmp_path):
     clock = FakeClock(NOW)
     async for api in trading_client(tmp_path, clock):  # defaults: trading disabled, dry run on
         st = (await api.get(f"{BASE}/status")).json()
+        assert not st["scheduler_enabled"] and st["next_cycle_at"] is None  # no automatic cycles by default
+        assert await api.container.trading.run_scheduled() == "disabled"
         assert (
             st["broker_configured"]
             and not st["trading_enabled"]
@@ -345,7 +349,7 @@ async def test_scheduler_runs_each_slot_once(tmp_path):
     slot runs once in paper mode."""
     clock = FakeClock(datetime(2026, 9, 25, 13, 45, tzinfo=UTC))  # 09:45 New York
     fake = FakeAlpacaPaper(clock=clock)
-    async for api in trading_client(tmp_path, clock, fake=fake, **PAPER):
+    async for api in trading_client(tmp_path, clock, fake=fake, trading_scheduler_enabled=True, **PAPER):
         trading = api.container.trading
         assert await trading.run_scheduled() == "no cycle due"
         assert any(e["kind"] == "reconciliation_completed" for e in (await api.get(f"{BASE}/events")).json())
@@ -390,7 +394,12 @@ async def test_scheduler_without_arming_sends_from_the_first_slot(tmp_path):
     clock = FakeClock(datetime(2026, 9, 25, 14, 5, tzinfo=UTC))  # 10:05 New York
     fake = FakeAlpacaPaper(clock=clock)
     async for api in trading_client(
-        tmp_path, clock, fake=fake, trading_scheduler_requires_arming=False, **PAPER
+        tmp_path,
+        clock,
+        fake=fake,
+        trading_scheduler_enabled=True,
+        trading_scheduler_requires_arming=False,
+        **PAPER,
     ):
         assert (await api.container.trading.run_scheduled()).startswith(
             "cycle 20260925T1000 completed (paper"

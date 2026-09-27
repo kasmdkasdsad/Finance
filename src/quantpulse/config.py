@@ -333,8 +333,11 @@ class Settings(BaseSettings):
         default=False, description="Refuse every new order (the dashboard has a runtime kill switch too)."
     )
     trading_scheduler_enabled: bool = Field(
-        default=True,
-        description="Let the poller run strategy cycles during market hours (dry runs included).",
+        default=False,
+        description=(
+            "Let the poller run strategy cycles during market hours (dry runs included). Off by default: "
+            "cycles run only when you start one, until you turn this on."
+        ),
     )
     trading_scheduler_requires_arming: bool = Field(
         default=True,

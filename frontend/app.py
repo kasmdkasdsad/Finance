@@ -31,12 +31,20 @@ from frontend.views import (  # noqa: E402
     vehicle,
 )
 
-st.set_page_config(page_title="QuantPulse Terminal", page_icon=":material/monitoring:", layout="wide")
+ICON = ROOT / "assets" / "quantpulse.png"
+st.set_page_config(
+    page_title="QuantPulse Terminal · PAPER",
+    page_icon=str(ICON) if ICON.is_file() else ":material/monitoring:",
+    layout="wide",
+)
 
 
 def sidebar() -> None:
     with st.sidebar:
         st.markdown("### QuantPulse Terminal")
+        # Always visible, on every page: QuantPulse only ever trades Alpaca's paper account.
+        st.badge("PAPER TRADING · simulated money", icon=":material/science:", color="orange")
+        st.caption("Alpaca paper account only: there is no live-money path.")
         st.session_state.setdefault("api_url", ApiClient().base_url)
         url = st.text_input("API URL", st.session_state["api_url"])
         token = st.text_input(
@@ -63,6 +71,10 @@ def sidebar() -> None:
 
 
 sidebar()
+if ICON.is_file():
+    st.logo(str(ICON), size="large")
+# A compact reminder on top of every page (the trading page adds its own full banners).
+st.badge("ALPACA PAPER TRADING · SIMULATED MONEY", icon=":material/science:", color="orange")
 pages = {
     "Markets": [
         st.Page(overview.render, title="Command Center", icon=":material/dashboard:", default=True),
