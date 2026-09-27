@@ -39,7 +39,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .types import EXECUTABLE_STATES, MARKET, DataState
+from .types import EXECUTABLE_STATES, MARKET, PORTFOLIO, DataState
 
 # which agents speak to which kind of opportunity (used to report whether the right experts looked)
 KIND_AGENTS: dict[str, tuple[str, ...]] = {
@@ -55,6 +55,10 @@ KIND_AGENTS: dict[str, tuple[str, ...]] = {
     "earnings": ("catalyst", "options", "volatility"),
     "catalyst": ("catalyst", "technical", "momentum"),
     "unusual_options": ("options", "volatility", "catalyst"),
+    "relative_strength": ("momentum", "statistical", "technical"),
+    "factor_rotation": ("momentum", "factor", "market_regime"),
+    "portfolio": ("portfolio", "technical", "volatility"),
+    "risk_reduction": ("portfolio", "market_regime", "volatility"),
 }
 MAX_PAIR_UNIVERSE = 80
 PAIR_CORR = 0.8
@@ -403,6 +407,134 @@ def regime_change(current: str | None, previous: str | None, trend_score: float 
     ]
 
 
+def relative_strength(ind: pd.DataFrame) -> list[Opportunity]:
+    """Names far ahead of (or behind) the benchmark over the last month and on the same side of their
+    50-day trend: benchmark-relative strength or weakness, not just a fast month."""
+    rs_z = _z(_num(ind, "rs_1m"))
+    trend = _num(ind, "px_vs_sma50")
+    out = []
+    for s, z in rs_z.dropna().items():
+        if abs(z) < 2.0 or np.sign(trend.get(s, 0)) != np.sign(z):
+            continue
+        d = 1 if z > 0 else -1
+        out.append(
+            Opportunity(
+                "relative_strength",
+                str(s),
+                [str(s)],
+                d,
+                _strength(z, 3.5),
+                f"{s} is {'leading' if d > 0 else 'lagging'} the benchmark ({z:+.1f}σ over a month, "
+                f"{'above' if d > 0 else 'below'} its 50-day average)",
+                {
+                    "rs_1m_z": round(float(z), 2),
+                    "rs_1m": ind.at[s, "rs_1m"] if "rs_1m" in ind.columns else None,
+                },
+            )
+        )
+    return out
+
+
+def factor_rotation(ind: pd.DataFrame) -> list[Opportunity]:
+    """Did momentum pay last month? The rank correlation between 12-1 momentum (which ends a month ago)
+    and the last month's return: strongly negative is a momentum reversal, a warning for trend ideas."""
+    mom, ret = _num(ind, "mom_12_1"), _num(ind, "ret_21d")
+    both = pd.concat([mom, ret], axis=1).dropna()
+    if len(both) < 30:
+        return []
+    ic = float(both.iloc[:, 0].rank().corr(both.iloc[:, 1].rank()))
+    if abs(ic) < 0.3:
+        return []
+    what = "momentum paid strongly" if ic > 0 else "momentum reversed (last year's winners lagged)"
+    return [
+        Opportunity(
+            "factor_rotation",
+            MARKET,
+            [],
+            1 if ic > 0 else -1,
+            _strength(ic, 0.6),
+            f"factor rotation: {what} last month (rank IC {ic:+.2f})",
+            {"momentum_ic_1m": round(ic, 3), "names": len(both)},
+        )
+    ]
+
+
+def portfolio_watch(
+    portfolio: Any, ind: pd.DataFrame, max_position_pct: float, max_position_loss_pct: float
+) -> list[Opportunity]:
+    """Holdings that need attention: near their stop, near the position limit, or lagging the market."""
+    out = []
+    for s, pos in portfolio.positions.items():
+        if pos.qty <= 0:
+            continue
+        w = portfolio.weight(s)
+        notes: list[str] = []
+        if pos.unrealized_plpc <= -0.75 * max_position_loss_pct:
+            notes.append(f"{pos.unrealized_plpc:+.1%}, near its −{max_position_loss_pct:.0%} stop")
+        if w >= 0.9 * max_position_pct:
+            notes.append(f"{w:.1%} of the book, near the {max_position_pct:.0%} limit")
+        rs, trend = (
+            ind.at[s, c] if s in ind.index and c in ind.columns else None for c in ("rs_1m", "px_vs_sma50")
+        )
+        if rs is not None and trend is not None and rs == rs and trend == trend and rs <= -0.05 and trend < 0:
+            notes.append(f"lagging the benchmark by {rs:+.1%} over a month and below its 50-day average")
+        if notes:
+            out.append(
+                Opportunity(
+                    "portfolio",
+                    str(s),
+                    [str(s)],
+                    -1,
+                    min(1.0, 0.5 + 0.2 * len(notes)),
+                    f"holding {s}: " + "; ".join(notes),
+                    {"weight": round(w, 4), "unrealized": round(pos.unrealized_plpc, 4)},
+                )
+            )
+    return out
+
+
+def risk_reduction(
+    portfolio: Any, ind: pd.DataFrame, close: pd.DataFrame, regime: str | None, vix: float | None
+) -> list[Opportunity]:
+    """Portfolio-level risk worth reducing: high beta in a stressed market, holdings that move together,
+    or full exposure outside a bullish regime."""
+    held = [s for s, p in portfolio.positions.items() if p.qty > 0]
+    if not held or portfolio.equity <= 0:
+        return []
+    weights = {s: portfolio.weight(s) for s in held}
+    exposure = sum(weights.values())
+    stressed = regime in ("bearish", "high_volatility", "risk_off") or (vix is not None and vix >= 25)
+    notes: list[str] = []
+    betas = [(weights[s], float(ind.at[s, "beta"])) for s in held if s in ind.index and "beta" in ind.columns
+             and ind.at[s, "beta"] == ind.at[s, "beta"]]  # fmt: skip
+    beta = sum(w * b for w, b in betas)
+    if stressed and beta >= 1.1 * max(exposure, 1e-9) and exposure > 0.3:
+        notes.append(
+            f"book beta {beta:.2f} in a stressed market ({regime or 'VIX ' + format(vix or 0, '.0f')})"
+        )
+    cols = [s for s in held if s in close.columns]
+    if len(cols) >= 3:
+        corr = close[cols].pct_change(fill_method=None).iloc[-60:].corr().to_numpy()
+        avg = float(corr[np.triu_indices(len(cols), 1)].mean())
+        if avg >= 0.7:
+            notes.append(f"holdings move together (average correlation {avg:.2f})")
+    if exposure >= 0.9 and regime not in (None, "bullish"):
+        notes.append(f"{exposure:.0%} invested in a {regime} market")
+    if not notes:
+        return []
+    return [
+        Opportunity(
+            "risk_reduction",
+            PORTFOLIO,
+            [],
+            -1,
+            min(1.0, 0.5 + 0.2 * len(notes)),
+            "reduce risk: " + "; ".join(notes),
+            {"beta": round(beta, 3), "exposure": round(exposure, 3), "stressed": stressed},
+        )
+    ]
+
+
 def scan_universe(
     ind: pd.DataFrame,
     close: pd.DataFrame,
@@ -416,9 +548,21 @@ def scan_universe(
     trend_score: float | None,
     exclude: Sequence[str] = (),
     session_fraction: float | None = None,
+    portfolio: Any = None,
+    limits: Any = None,
+    vix: float | None = None,
 ) -> list[Opportunity]:
     stocks = ind.drop(index=[s for s in exclude if s in ind.index])
+    book: list[Opportunity] = []
+    if portfolio is not None and limits is not None:
+        book = [
+            *portfolio_watch(portfolio, ind, limits.max_position_pct, limits.max_position_loss_pct),
+            *risk_reduction(portfolio, ind, close, regime, vix),
+        ]
     found = [
+        *book,
+        *relative_strength(stocks),
+        *factor_rotation(stocks),
         *momentum_shift(stocks),
         *breakout(stocks),
         *abnormal_volume(stocks, market_open, session_fraction),

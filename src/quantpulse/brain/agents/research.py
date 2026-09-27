@@ -266,6 +266,7 @@ class SituationalAwarenessAgent(Agent):
             cautious.append(f"data: {dq.veto}")
         if not ctx.account.available:
             cautious.append("the Alpaca paper account (and its clock) could not be read")
+        cautious.extend(o.headline for o in ctx.opportunities if o.kind == "risk_reduction")
         posture = "defensive" if defensive else "cautious" if cautious else "normal"
         scale = {"normal": 1.0, "cautious": 0.6, "defensive": 0.0}[posture]
         reasons = defensive + cautious

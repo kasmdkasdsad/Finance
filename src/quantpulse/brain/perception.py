@@ -288,6 +288,9 @@ class Perception:
             trend_score=regime.trend_score,
             exclude=exclude,
             session_fraction=inputs.session_fraction,
+            portfolio=portfolio,  # the Brain's book: its holdings' alerts and portfolio-level risk
+            limits=RiskLimits.from_settings(self._s),
+            vix=inputs.vix,
         )
         focus, reasons = choose_focus(
             indicators,

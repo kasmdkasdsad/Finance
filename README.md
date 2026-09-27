@@ -1243,7 +1243,15 @@ The brain looks for ideas itself. Every cycle it scans the **whole universe** (t
 already computes, the stock model's features, sectors and pair statistics) for momentum shifts, breakouts
 on volume, abnormal volume (judged intraday only after the first hour), valuation dislocations with
 adequate quality, mean-reversion extremes, volatility events, sector rotation, relative-value pairs (highly
-correlated same-sector names whose spread is ≥ 2σ from its 60-day relation) and regime changes. The
+correlated same-sector names whose spread is ≥ 2σ from its 60-day relation), regime changes, and:
+
+* **benchmark-relative strength or weakness:** a month's relative return ≥ 2σ, on the same side of the
+  50-day trend;
+* **factor rotation:** whether 12-1 momentum paid last month (its rank correlation with the last month's
+  return), a warning for trend ideas when it reverses;
+* **the book's own holdings:** near their stop, near the position limit, or lagging the market;
+* **risk reduction:** high book beta in a stressed market, holdings that move together, or full exposure
+  outside a bullish regime. This also makes the posture *cautious*. The
 strongest ideas (`QP_BRAIN_MAX_OPPORTUNITIES`) join the focus; after their option chains and earnings
 calendars are read, a second pass adds upcoming earnings, recent earnings surprises and unusual options
 activity. Detection is not a recommendation: each idea is traced through **data validation → the

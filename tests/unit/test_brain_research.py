@@ -148,6 +148,40 @@ def test_valuation_dislocation_needs_quality():
 
 
 # ---------------------------------------------------------------------------------------------- trace
+def test_relative_strength_and_factor_rotation():
+    n = 40
+    rs = [0.0] * n
+    rs[0], rs[1] = 0.25, -0.25
+    trend = [0.02] * n
+    trend[1] = -0.05
+    found = {(o.subject, o.direction) for o in opp.relative_strength(indicators(rs_1m=rs, px_vs_sma50=trend))}
+    assert found == {("S0", 1), ("S1", -1)}
+    against_trend = opp.relative_strength(indicators(rs_1m=rs, px_vs_sma50=[-0.02] * n))
+    assert [o.subject for o in against_trend] == ["S1"]  # a leader below its trend is not confirmed
+    # last year's winners lagged last month: a momentum reversal, market context
+    mom = list(np.linspace(-0.3, 0.6, n))
+    last = list(np.linspace(0.05, -0.05, n))
+    (rot,) = opp.factor_rotation(indicators(mom_12_1=mom, ret_21d=last))
+    assert rot.subject == MARKET and rot.direction == -1 and "reversed" in rot.headline
+    assert opp.factor_rotation(indicators(mom_12_1=mom[:10], ret_21d=last[:10])) == []  # too few names
+
+
+def test_book_alerts_and_risk_reduction():
+    book = PortfolioState(available=True, account=account(equity=100_000.0, cash=10_000.0))
+    near_stop = replace(position("S0", 100, 100.0), current_price=94.0, market_value=9_400.0,
+                        unrealized_plpc=-0.06)  # fmt: skip
+    big = position("S1", 820, 100.0)  # 82% of the book: 91% invested in all
+    book.positions = {"S0": near_stop, "S1": big}
+    ind = indicators(rs_1m=[-0.08, 0.0, 0.0], px_vs_sma50=[-0.03, 0.01, 0.0], beta=[1.6, 1.5, 1.0])
+    alerts = {o.subject: o for o in opp.portfolio_watch(book, ind, 0.10, 0.08)}
+    assert "near its −8% stop" in alerts["S0"].headline and "lagging the benchmark" in alerts["S0"].headline
+    assert "near the 10% limit" in alerts["S1"].headline and all(o.direction == -1 for o in alerts.values())
+    close = pd.DataFrame({"S0": np.linspace(90, 100, 80), "S1": np.linspace(95, 101, 80)})
+    (risk,) = opp.risk_reduction(book, ind, close, "high_volatility", None)
+    assert risk.kind == "risk_reduction" and "book beta" in risk.headline and "invested" in risk.headline
+    assert opp.risk_reduction(book, ind, close, "bullish", 15.0) == []  # calm and bullish: nothing to reduce
+
+
 async def test_trace_records_why_an_opportunity_stopped():
     ctx = make_ctx({"SPY": path(0.0003, 0.01, 1), "IN": path(0.001, 0.01, 2), "OUT": path(0.001, 0.01, 3), "BAD": path(0, 0.01, 4)},
                    focus=["IN", "BAD"])  # fmt: skip
