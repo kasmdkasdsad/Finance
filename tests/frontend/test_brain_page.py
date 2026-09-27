@@ -116,6 +116,7 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert any("matured predictions graded against real closing prices" in m.value for m in at.markdown)
     assert any("the Brain never sends orders" in m.value for m in at.markdown if "supervisor" in m.value)
     assert any("only a person can promote" in m.value for m in at.markdown)
+    assert any("Nothing is applied automatically" in m.value for m in at.markdown)
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
     assert "AgentCompleted" in set(events["event"])
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}

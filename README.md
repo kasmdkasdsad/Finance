@@ -1339,6 +1339,29 @@ calls are graded like any agent's.
 The supervisor updates paper portfolios after the close. At weekends it proposes untried templates and
 validates up to two. It never promotes.
 
+### Self-improvement (proposals only)
+
+After each learning pass (and on demand, `POST /brain/improvements/review`) the brain reviews its own
+record and writes **improvement proposals**. Each one has a problem, the evidence, a proposed change,
+an expected improvement, and a validation plan. It looks for:
+
+* weak agents (measured reliability below 1 or a hit rate below 47% on enough graded calls);
+* agents that fail in one regime (a routing proposal);
+* redundant agents (scores correlated ≥ 0.9 on the same subjects);
+* missing capabilities (agents that keep skipping for lack of data);
+* agents that fail or are slow;
+* symbols whose quotes keep going stale;
+* rejected lab strategies, and paper or promoted ones falling short;
+* recurring process failures, blocks that mostly cost opportunities, and a consensus confidence that does
+  not order outcomes (calibration).
+
+**Nothing is applied automatically.** A person records a decision (`POST /brain/improvements/{id}`:
+testing, validated, rejected or applied). A change is built as a new version and follows
+PROPOSE → VERSION → TEST → BACKTEST → WALK-FORWARD → PAPER EVALUATION → COMPARE → PROMOTE ONLY IF
+VALIDATED. The strategy lab implements that pipeline for strategies; agent versions are compared on
+graded calls because each version keeps its own record. Risk controls are never the subject of a
+proposal.
+
 ### The Brain page
 
 *Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
@@ -1357,6 +1380,7 @@ validates up to two. It never promotes.
   enough calls are graded), decision-vs-outcome reflections by quadrant, and failure analyses.
 * **Strategy lab:** versions with their status, gates, walk-forward and paper results; propose,
   validate, paper-track, promote and retire.
+* **Improvements:** proposals with their evidence and validation plan, and the decision buttons.
 * **Supervisor & events:** the supervisor's state, its queued wake-ups and recent work, a pause/resume
   button, and the event stream.
 * **Memory** and **History.**
@@ -1394,6 +1418,7 @@ There is no execution mode: the brain cannot place orders in Phase 1.
 | `GET /brain/supervisor` · `POST /brain/supervisor {"paused": true}` | Supervisor state (session, schedule, queued wake-ups, recent work) · pause or resume |
 | `GET /brain/events?type=&subject=` | Recorded events, newest first |
 | `GET /brain/lab/templates` · `/lab/strategies?status=` · `/lab/strategies/{id}/{version}` · `/lab/compare?keys=` | Strategy templates · versions · one version with its runs · versions side by side |
+| `GET /brain/improvements?status=` · `POST /brain/improvements/review` · `POST /brain/improvements/{id} {"status": …, "note": …}` | Improvement proposals · review the record now · record a person's decision (nothing is applied automatically) |
 | `POST /brain/lab/propose` · `/lab/strategies {"template": …}` · `/lab/strategies/{id}/{version}/validate` · `/lab/strategies/{id}/{version}/status {"status": "paper"\|"promoted"\|"retired"}` · `/lab/paper` | Propose templates · create a version · validate (202 while running) · paper / promote (gated) / retire · update paper portfolios |
 
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need

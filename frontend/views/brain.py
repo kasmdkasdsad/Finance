@@ -630,6 +630,63 @@ def _lab() -> None:
         )
 
 
+def _improvements() -> None:
+    st.markdown(
+        "The Brain reviews its own record and writes **proposals** — problem, evidence, proposed change, expected "
+        "improvement and validation plan. **Nothing is applied automatically**; changes are built as new versions and "
+        "must pass PROPOSE → VERSION → TEST → BACKTEST → WALK-FORWARD → PAPER EVALUATION → COMPARE → PROMOTE ONLY IF "
+        "VALIDATED. Risk controls are never a subject."
+    )
+    review = st.button("Review the record now", icon=":material/rule:", key="improve-review")
+    if review and guarded(lambda: api().post(f"{BASE}/improvements/review"), "review") is not None:
+        st.rerun()
+    rows = guarded(lambda: api().get(f"{BASE}/improvements"), "improvements") or []
+    if not rows:
+        st.info("No proposals: the record does not show a problem yet (or has too few graded calls).")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "id": r["id"],
+                    "kind": r["kind"],
+                    "target": r["target"],
+                    "problem": r["title"],
+                    "status": r["status"],
+                }
+                for r in rows
+            ]
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+    pick = st.selectbox(
+        "Proposal",
+        [r["id"] for r in rows],
+        format_func=lambda i: next(f"#{r['id']} {r['title']}" for r in rows if r["id"] == i),
+        key="improve-pick",
+    )
+    chosen = next(r for r in rows if r["id"] == pick)
+    p = chosen["proposal"]
+    st.markdown(_md(f"**Problem:** {chosen['title']}"))
+    st.markdown(_md(f"**Evidence:** {chosen['evidence']}"))
+    st.markdown(_md(f"**Proposed change:** {p.get('change')}"))
+    st.markdown(_md(f"**Expected improvement:** {p.get('expected_improvement')}"))
+    st.markdown(
+        "**Validation plan:**\n"
+        + "\n".join(f"{i + 1}. {_md(s)}" for i, s in enumerate(p.get("validation_plan", [])))
+    )
+    note = st.text_input("Note (optional)", key="improve-note")
+    cols = st.columns(4)
+    for col, status in zip(cols, ("testing", "validated", "rejected", "applied"), strict=True):
+        pressed = col.button(status.capitalize(), key=f"improve-{status}")
+        if pressed and guarded(
+            lambda s=status: api().post(f"{BASE}/improvements/{pick}", {"status": s, "note": note or None}),
+            "decision",
+        ):
+            st.rerun()
+
+
 def _operations() -> None:
     st.markdown(
         "While the server runs, the **supervisor** decides what the Brain does: full cycles during the session, a "
@@ -814,6 +871,7 @@ def render() -> None:
             "Proposed actions",
             "Learning",
             "Strategy lab",
+            "Improvements",
             "Supervisor & events",
             "Memory",
             "History",
@@ -834,8 +892,10 @@ def render() -> None:
     with tabs[6]:
         _lab()
     with tabs[7]:
-        _operations()
+        _improvements()
     with tabs[8]:
-        _memory()
+        _operations()
     with tabs[9]:
+        _memory()
+    with tabs[10]:
         _history(cycles)
