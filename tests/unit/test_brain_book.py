@@ -5,8 +5,11 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from quantpulse.brain.book import MIN_DAYS, fill_price, metrics
-from quantpulse.db.models import BrainBookTradeRow
+from quantpulse.brain.book import MIN_DAYS, _daily, fill_price, metrics
+from quantpulse.db.models import (
+    BrainBookEquityRow,
+    BrainBookTradeRow,
+)
 from quantpulse.services.trading_data import QuoteQuality
 
 
@@ -53,3 +56,14 @@ def test_performance_comes_from_marks_and_fills_only():
     assert short["too_short_to_judge"] and short["sessions"] < MIN_DAYS
     assert short["current_drawdown"] == pytest.approx(-0.04) and short["max_drawdown"] < 0
     assert metrics([], [], 100_000)["sessions"] == 0
+
+
+def test_only_trading_sessions_count_on_the_equity_curve():
+    def mark(day, equity):
+        return BrainBookEquityRow(at=datetime(2026, 9, 25, 20, tzinfo=UTC), day=day, equity=equity, cash=0.0,
+                                  invested=equity, positions=1, benchmark_price=500.0)  # fmt: skip
+
+    marks = [mark(date(2026, 9, 25), 100.0), mark(date(2026, 9, 25), 101.0),  # Friday, two marks: the last counts
+             mark(date(2026, 9, 26), 101.0), mark(date(2026, 9, 27), 101.0),  # weekend research cycles
+             mark(date(2026, 9, 28), 102.0)]  # fmt: skip
+    assert _daily(marks) == [(date(2026, 9, 25), 101.0, 500.0), (date(2026, 9, 28), 102.0, 500.0)]

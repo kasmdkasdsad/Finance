@@ -43,7 +43,7 @@ from sqlalchemy import delete, select
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
-from quantpulse.core.market_calendar import NEW_YORK, sessions_after
+from quantpulse.core.market_calendar import NEW_YORK, is_trading_day, sessions_after
 from quantpulse.db.models import BrainBookEquityRow, BrainBookPositionRow, BrainBookTradeRow, BrainStateRow
 from quantpulse.db.session import Database
 from quantpulse.providers.alpaca_trading import BrokerAccount, BrokerPosition
@@ -465,10 +465,13 @@ def _trade(t: BrainBookTradeRow) -> dict[str, Any]:
 
 
 def _daily(marks: Sequence[BrainBookEquityRow]) -> list[tuple[date, float, float | None]]:
-    """The last mark of each day: (day, equity, benchmark price)."""
+    """The last mark of each trading session: (day, equity, benchmark price). Marks made at weekends or on
+    holidays (research cycles) are not sessions: counting them would add zero-return days and flatter the
+    volatility and the Sharpe ratio."""
     out: dict[date, tuple[float, float | None]] = {}
     for m in marks:
-        out[m.day] = (m.equity, m.benchmark_price)
+        if is_trading_day(m.day):
+            out[m.day] = (m.equity, m.benchmark_price)
     return [(d, e, b) for d, (e, b) in sorted(out.items())]
 
 

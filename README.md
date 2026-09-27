@@ -1535,7 +1535,9 @@ proposal.
 The brain works without a language model, and nothing pretends to be one. `brain/llm.py` defines the
 interface a model provider would plug into:
 
-* **What a model may do:** summarise, extract, classify, research questions, argue a case, synthesise.
+* **What a model may do:** summarise, extract, classify, research questions, argue a case, synthesise
+  findings and the relationships between them, and propose hypotheses (to be tested deterministically,
+  never assumed).
   A request for a calculation — RSI, ATR, beta, correlation, volatility, returns, position weights or
   size, spreads, quote age, risk limits, the account, P/L, orders — is refused before it reaches any
   provider. Model output is context for people and the record: it casts no vote, is never graded as a

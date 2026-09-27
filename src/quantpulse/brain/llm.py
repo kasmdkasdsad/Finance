@@ -4,8 +4,8 @@ The brain is deterministic. Indicators, statistics, correlations, betas, volatil
 weights, spreads, quote ages, risk limits and everything about the account are calculated in Python, the
 same way every time, and a language model is never asked for any of them (:data:`DETERMINISTIC_ONLY`
 refuses such a request outright). A model may only do the tasks in :class:`ModelTask` — summarise,
-extract, classify, research, argue, synthesise — and what it writes is context for people and for the
-record: no model output sizes, approves or sends an order. Orders still go only through the deterministic
+extract, classify, research, argue, synthesise, propose hypotheses — and what it writes is context for
+people and for the record: no model output sizes, approves or sends an order. Orders still go only through the deterministic
 chain (risk engine → live-data and spread checks → trading controls → order manager → Alpaca paper).
 
 **Providers.** :class:`ModelProvider` is the whole contract a vendor integration has to meet: say why it
@@ -58,7 +58,8 @@ class ModelTask(StrEnum):
     CLASSIFY = "classify"  # a label from a fixed set (the topic or tone of a news item)
     RESEARCH = "research"  # questions worth asking about an idea
     DEBATE = "debate"  # the strongest case for or against a view
-    SYNTHESIS = "synthesis"  # a narrative across many findings
+    SYNTHESIS = "synthesis"  # a narrative across many findings, and the relationships between them
+    HYPOTHESIS = "hypothesis"  # ideas worth testing (then tested deterministically, never assumed)
 
 
 TASK_TIER: dict[ModelTask, ModelTier] = {
@@ -68,6 +69,7 @@ TASK_TIER: dict[ModelTask, ModelTier] = {
     ModelTask.RESEARCH: ModelTier.STRONG,
     ModelTask.DEBATE: ModelTier.STRONG,
     ModelTask.SYNTHESIS: ModelTier.STRONG,
+    ModelTask.HYPOTHESIS: ModelTier.STRONG,
 }
 
 # Calculated by code, never asked of a model.
