@@ -21,6 +21,8 @@ from quantpulse.db.models import (
     BrainOpinionRow,
     BrainOpportunityRow,
     BrainPredictionRow,
+    BrainReflectionRow,
+    BrainStateRow,
 )
 from quantpulse.db.session import Database
 
@@ -415,3 +417,67 @@ class BrainStore:
             stmt = stmt.where(BrainPredictionRow.status == status)
         async with self._db.session() as s:
             return list((await s.scalars(stmt)).all())
+
+    # ------------------------------------------------------------------ learning
+    async def performance(self, window: str | None = None) -> list[dict[str, Any]]:
+        stmt = select(BrainAgentPerformanceRow).order_by(
+            BrainAgentPerformanceRow.agent_id,
+            BrainAgentPerformanceRow.regime,
+            BrainAgentPerformanceRow.window,
+        )
+        if window:
+            stmt = stmt.where(BrainAgentPerformanceRow.window == window)
+        async with self._db.session() as s:
+            rows = (await s.scalars(stmt)).all()
+        cols = ("agent_id", "agent_version", "regime", "horizon_days", "window", "n", "hits", "hit_rate", "brier",
+                "ic", "calibration", "reliability", "computed_at")  # fmt: skip
+        return [_cols(r, cols) for r in rows]
+
+    async def reflections(self, *, category: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        stmt = select(BrainReflectionRow).order_by(BrainReflectionRow.id.desc()).limit(limit)
+        if category:
+            stmt = stmt.where(BrainReflectionRow.category == category)
+        async with self._db.session() as s:
+            rows = (await s.scalars(stmt)).all()
+        cols = ("id", "subject_type", "subject_id", "category", "decision_quality", "outcome_quality", "questions",
+                "lessons", "evidence", "created_at")  # fmt: skip
+        return [_cols(r, cols) for r in rows]
+
+    async def prediction_summary(self) -> dict[str, Any]:
+        async with self._db.session() as s:
+            counts = dict(
+                (
+                    await s.execute(
+                        select(BrainPredictionRow.status, func.count()).group_by(BrainPredictionRow.status)
+                    )
+                ).all()
+            )
+            next_due = await s.scalar(
+                select(func.min(BrainPredictionRow.due_date)).where(BrainPredictionRow.status == "open")
+            )
+            hits = await s.scalar(
+                select(func.count()).where(
+                    BrainPredictionRow.status == "evaluated", BrainPredictionRow.hit.is_(True)
+                )
+            )
+        evaluated = int(counts.get("evaluated", 0))
+        return {
+            "open": int(counts.get("open", 0)),
+            "evaluated": evaluated,
+            "void": int(counts.get("void", 0)),
+            "next_due": next_due.isoformat() if next_due else None,
+            "hit_rate": round(int(hits or 0) / evaluated, 4) if evaluated else None,
+        }
+
+    async def get_state(self, key: str) -> dict[str, Any] | None:
+        async with self._db.session() as s:
+            row = await s.get(BrainStateRow, key)
+            return dict(row.value) if row is not None else None
+
+    async def set_state(self, key: str, value: dict[str, Any], now: datetime) -> None:
+        async with self._db.session() as s:
+            row = await s.get(BrainStateRow, key)
+            if row is None:
+                s.add(BrainStateRow(key=key, value=value, updated_at=now))
+            else:
+                row.value, row.updated_at = value, now

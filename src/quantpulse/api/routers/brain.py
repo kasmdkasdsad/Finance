@@ -7,6 +7,8 @@ deterministic risk engine and recorded — nothing reaches the Alpaca paper acco
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from quantpulse.api.deps import ContainerDep
@@ -131,3 +133,35 @@ async def opportunities(
 ) -> list[BrainOpportunityOut]:
     rows = await c.brain.store.opportunities(kind=kind, status=status, limit=limit)
     return [BrainOpportunityOut.model_validate(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------------------------- learning
+@router.post(
+    "/learn",
+    responses=RUNNING,  # type: ignore[arg-type]
+    dependencies=ControlAuth,
+    summary="Grade matured predictions against real prices, reflect on decisions, update track records",
+)
+async def learn(wait: float = Query(60.0, ge=0, le=600), c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.learn(wait=wait)
+
+
+@router.get("/learning", summary="Predictions (open / graded), last learning pass, consensus calibration")
+async def learning(c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.learning()
+
+
+@router.get("/performance", summary="Measured track records (only from graded predictions)")
+async def performance(
+    window: str | None = Query(None, pattern="^(all|90d)$"), c: Container = ContainerDep
+) -> list[dict[str, Any]]:
+    return await c.brain.store.performance(window)
+
+
+@router.get("/reflections", summary="Decision-vs-outcome reflections and failure analyses, newest first")
+async def reflections(
+    category: str | None = Query(None, max_length=32),
+    limit: int = Query(100, ge=1, le=1000),
+    c: Container = ContainerDep,
+) -> list[dict[str, Any]]:
+    return await c.brain.store.reflections(category=category, limit=limit)

@@ -174,7 +174,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         status = (await api.get(f"{BRAIN}/status")).json()
         assert status["paper_only"] and status["last_cycle"]["id"] == cycle["id"]
         assert status["agents"] == {"registered": 15, "enabled": 15} and not status["running"]
-        assert status["open_predictions"] == len(preds) and "not built yet" in status["learning"]
+        assert status["open_predictions"] == len(preds) and "predictions graded" in status["learning"]
 
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
         assert set(agents) == AGENTS
@@ -471,4 +471,66 @@ async def test_the_kill_switch_makes_the_brain_defensive(tmp_path):
         assert upa["action"] in {"hold", "de_risk", "rebalance"}
         if upa["action"] == "de_risk":
             assert upa["risk"]["checks"] and upa["quantity"] == 13  # a third of 40, whole shares
+        assert only_reads(api.fake)
+
+
+def extend_feed(feed: TrendFeed, until: date) -> None:
+    """Let the fake market keep trading after the cycle: each symbol follows its drift to ``until``."""
+    from datetime import UTC, datetime, time
+
+    import numpy as np
+
+    from quantpulse.core.market_calendar import NEW_YORK, next_trading_day
+    from quantpulse.schemas.market import Bar
+
+    rng = np.random.default_rng(99)
+    for symbol, bars in feed.bars.items():
+        price = feed.live_price(symbol)
+        day = feed.clock.now().astimezone(NEW_YORK).date()
+        while day <= until:
+            new = price * float(np.exp(feed.drifts.get(symbol, 0.0) + rng.normal(0, 0.006)))
+            stamp = datetime.combine(day, time(16, 0), NEW_YORK).astimezone(UTC)
+            bars.append(Bar(timestamp=stamp, open=price, high=max(price, new) * 1.004, low=min(price, new) * 0.996,
+                            close=new, volume=4_000_000))  # fmt: skip
+            price, day = new, next_trading_day(day)
+
+
+async def test_predictions_mature_and_the_brain_learns_from_them(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock):
+        cycle = await run_cycle(api)
+        assert cycle["predictions_recorded"] > 0
+        before = (await api.get(f"{BRAIN}/learning")).json()
+        assert before["predictions"]["evaluated"] == 0 and before["predictions"]["open"] > 0
+
+        # nothing is graded before its due date
+        early = (await api.post(f"{BRAIN}/learn")).json()
+        assert early["evaluated"] == 0 and early["reflections"] == 0
+
+        extend_feed(api.feed, date(2026, 11, 6))
+        clock.advance(40 * 86400)  # ~27 sessions later: the 5-, 10- and 21-day calls have matured
+        learned = (await api.post(f"{BRAIN}/learn")).json()
+        assert learned["evaluated"] > 0 and learned["voided"] == 0
+        state = (await api.get(f"{BRAIN}/learning")).json()
+        assert state["predictions"]["evaluated"] == learned["evaluated"]
+        assert state["predictions"]["open"] == 0  # every horizon here (5 to 21 sessions) has matured
+        assert state["last_run"]["evaluated"] == learned["evaluated"]
+        assert state["calibration"] and all(b["n"] > 0 for b in state["calibration"])
+
+        perf_rows = (await api.get(f"{BRAIN}/performance", params={"window": "all"})).json()
+        assert {r["agent_id"] for r in perf_rows} >= {"technical", "consensus"}
+        assert all(r["reliability"] is None for r in perf_rows)  # one cycle is never a track record
+        assert state["measured_agents"] == []
+
+        trades = [d for d in cycle["decisions"] if d["action"] in TRADES]
+        reflections = (await api.get(f"{BRAIN}/reflections")).json()
+        assert learned["reflections"] == len(reflections) >= len(trades)
+        for r in reflections:
+            assert r["category"] in {"earned", "unlucky", "lucky", "process_failure", "inconclusive",
+                                     "block_saved_money", "block_cost_opportunity"}  # fmt: skip
+            assert r["decision_quality"] in {"good", "fair", "poor"} and r["lessons"]
+        again = (await api.post(f"{BRAIN}/learn")).json()
+        assert again["evaluated"] == 0 and again["reflections"] == 0
+        status = (await api.get(f"{BRAIN}/status")).json()
+        assert f"{learned['evaluated']} predictions graded" in status["learning"]
         assert only_reads(api.fake)

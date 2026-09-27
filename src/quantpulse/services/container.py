@@ -209,6 +209,7 @@ class Container:
             self.reference,
             self.model,
             self.options,
+            self.market,
         )
 
         from quantpulse.workers.poller import Poller  # local import avoids a cycle

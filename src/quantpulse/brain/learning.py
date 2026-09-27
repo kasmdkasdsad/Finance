@@ -1,36 +1,45 @@
-"""The learning ledger: predictions written when they are made, so they can be graded against reality later.
+"""The learning loop: predictions are written when they are made and graded against reality later.
 
-Lifecycle (the arrows after ``open`` are the future outcome engine — not built yet)::
+::
 
-    opinion / consensus / decision ──► prediction (status "open", outcome columns empty)
-        ──► horizon passes ──► evaluation (realised return vs the benchmark, hit or miss)
-        ──► reflection (what was wrong: thesis, timing, regime, data, confidence)
-        ──► agent / strategy performance (only from evaluated predictions)
-        ──► improvement proposals
+    opinion / consensus ──► prediction (status "open")
+        ──► horizon passes ──► evaluation against real closes (hit or miss, relative return)
+        ──► decision outcome ──► reflection (decision quality vs outcome quality, lessons)
+        ──► agent / consensus performance (hit rate, Brier, IC, calibration, reliability)
+        ──► failure analysis ──► lessons in memory ──► consensus weights (and improvement proposals)
 
-What is recorded now, and why it can be graded honestly later:
+What is recorded, and why it can be graded honestly:
 
-* only **gradeable forecasts** — directional opinions of *forecast* agents (not data-quality or portfolio
-  constraints), and directional consensus that was not "unknown";
+* only **gradeable forecasts** — directional opinions of *forecast* agents (not data-quality, portfolio or
+  research context), and directional consensus that was not "unknown";
 * each with its horizon (in sessions), the benchmark it is measured against, the regime it was made in,
   the entry price and benchmark level, and the due date;
 * symbols are graded on their return **relative to the benchmark**; ``@market`` views on the benchmark's
   own return.
 
-Nothing is scored here and no agent gets a reliability number from this module.
+No agent gets a reliability number until its own predictions have matured and been graded
+(:mod:`~quantpulse.brain.performance`); decisions are judged on process and outcome separately
+(:mod:`~quantpulse.brain.reflection`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 
+from quantpulse.core.clock import Clock
 from quantpulse.core.market_calendar import NEW_YORK, sessions_after
 from quantpulse.db.models import BrainPredictionRow
 from quantpulse.db.session import Database
 
+from . import performance as perf
+from . import reflection
 from .consensus import Consensus
 from .context import BrainContext
+from .evaluation import PriceSource, evaluate_due
+from .memory import AGENT, LONG_TERM, MemoryStore
+from .reflection import reflect_on_decisions
 from .types import MARKET, Opinion
 
 
@@ -138,3 +147,70 @@ class PredictionRecorder:
             async with self._db.session() as s:
                 s.add_all(rows)
         return len(rows)
+
+
+class Learner:
+    """One learning pass: evaluate due predictions, give decisions their outcomes, reflect, recompute
+    track records, analyse failures and remember the lessons. Safe to run at any time: nothing is graded
+    before its due date's close exists."""
+
+    def __init__(self, db: Database, prices: PriceSource, clock: Clock, memory: MemoryStore, benchmark: str,
+                 min_observations: int) -> None:  # fmt: skip
+        self._db = db
+        self._prices = prices
+        self._clock = clock
+        self._memory = memory
+        self._benchmark = benchmark
+        self._min = min_observations
+
+    async def learn(self) -> dict[str, Any]:
+        now = self._clock.now()
+        evaluated = await evaluate_due(self._db, self._prices, self._clock, self._benchmark)
+        reflections = await reflect_on_decisions(self._db, now)
+        rows = await perf.recompute(self._db, now, self._min)
+        findings = reflection.failure_analysis(await perf.graded(self._db), self._min)
+        notable = await reflection.record_failure_analysis(self._db, findings, now)
+        for r in reflections:
+            if r["category"] in ("process_failure", "lucky", "block_saved_money", "block_cost_opportunity"):
+                await self._memory.remember(
+                    LONG_TERM,
+                    "lesson",
+                    r["subject"],
+                    f"{r['category'].replace('_', ' ')}: {r['lessons'][0]}",
+                    now,
+                    data=r,
+                    tags=["lesson", r["category"], r["decision_quality"], r["outcome_quality"]],
+                    importance=0.8 if r["category"] == "process_failure" else 0.6,
+                )
+        for f in findings:
+            await self._memory.remember(
+                AGENT,
+                "performance",
+                f["agent_id"],
+                f"{f['agent_id']} v{f['version']}: {f['hit_rate']:.0%} over {f['n']} graded calls"
+                + (f"; {'; '.join(f['notes'])}" if f["notes"] else ""),
+                now,
+                key=f"performance:{f['agent_id']}:{f['version']}",
+                data=f,
+                tags=["performance", f["agent_id"]],
+                importance=0.7 if f["notes"] else 0.4,
+            )
+        summary = {
+            "at": now.isoformat(),
+            "evaluated": evaluated.evaluated,
+            "voided": evaluated.voided,
+            "pending": evaluated.pending,
+            "decision_outcomes": evaluated.decisions,
+            "reflections": len(reflections),
+            "by_category": _tally(r["category"] for r in reflections),
+            "performance_rows": rows,
+            "agents_with_findings": notable,
+        }
+        return summary
+
+
+def _tally(values: Any) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for v in values:
+        out[v] = out.get(v, 0) + 1
+    return out
