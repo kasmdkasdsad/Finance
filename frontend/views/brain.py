@@ -101,6 +101,13 @@ def _overview(cycle: dict[str, Any]) -> None:
     c[3].metric("Duration", f"{(cycle.get('duration_ms') or 0) / 1000:.1f}s")
     if regime.get("description"):
         st.markdown(_md(f"**{regime['description']}.** " + "; ".join(regime.get("reasons") or [])))
+    situation = market.get("situation") or {}
+    if situation:
+        posture = situation.get("posture", "normal")
+        color = {"normal": "green", "cautious": "orange", "defensive": "red"}.get(posture, "gray")
+        st.badge(f"Risk posture: {posture}", icon=":material/shield:", color=color)
+        if situation.get("reasons"):
+            st.caption(_md("Why: " + "; ".join(situation["reasons"])))
     c = st.columns(6)
     c[0].metric("Agents run", summary.get("agents_run", 0))
     c[1].metric("Failed", summary.get("agents_failed", 0))
@@ -227,7 +234,9 @@ def _consensus(cycle: dict[str, Any]) -> None:
         for c in items
     ]
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    subject = st.selectbox("Look inside one subject", [c["subject"] for c in items], key="brain-subject")
+    subjects = [c["subject"] for c in items]
+    first_stock = next((i for i, s in enumerate(subjects) if not s.startswith("@")), 0)
+    subject = st.selectbox("Look inside one subject", subjects, index=first_stock, key="brain-subject")
     chosen = next(c for c in items if c["subject"] == subject)
     detail = chosen.get("detail") or {}
     dispute = detail.get("primary_disagreement")
@@ -237,7 +246,7 @@ def _consensus(cycle: dict[str, Any]) -> None:
             _md(f"**For** ({dispute['for']['agent_id']}): {dispute['for']['thesis']}"),
             icon=":material/thumb_up:",
         )
-        right.error(
+        right.warning(
             _md(f"**Against** ({dispute['against']['agent_id']}): {dispute['against']['thesis']}"),
             icon=":material/thumb_down:",
         )
@@ -263,7 +272,53 @@ def _consensus(cycle: dict[str, Any]) -> None:
         )
     for reason in chosen.get("reasons") or []:
         st.caption(_md(f"• {reason}"))
+    _debate(cycle, subject)
     _opinions(cycle, subject)
+
+
+VERDICT_COLOR = {"stands": "green", "weakened": "orange", "challenged": "red", "no view to challenge": "gray"}
+
+
+def _debate(cycle: dict[str, Any], subject: str) -> None:
+    debate = next((d for d in cycle.get("debates") or [] if d["subject"] == subject), None)
+    if debate is None:
+        return
+    st.markdown(
+        "**Debate** — the strongest case each way, then the devil's advocate attacks the leading view."
+    )
+    st.badge(
+        f"Devil's advocate: {debate['verdict']} · confidence {debate['confidence_before']:.2f} → "
+        f"{debate['confidence_after']:.2f}",
+        color=VERDICT_COLOR.get(debate["verdict"], "gray"),
+        icon=":material/gavel:",
+    )
+    bull, bear = st.columns(2)
+    with bull:
+        st.markdown("🐂 **Bull case**")
+        for a in debate.get("bull") or []:
+            st.markdown(_md(f"- {a['text']} *({a['agent_id']})*"))
+        if not debate.get("bull"):
+            st.caption("No argument for.")
+    with bear:
+        st.markdown("🐻 **Bear case**")
+        for a in debate.get("bear") or []:
+            st.markdown(_md(f"- {a['text']} *({a['agent_id']})*"))
+        if not debate.get("bear"):
+            st.caption("No argument against.")
+    objections = debate.get("objections") or []
+    if objections:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"objection": o["text"], "severity": o["severity"], "confidence ×": o["haircut"]}
+                    for o in objections
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    if debate.get("change_our_mind"):
+        st.caption(_md("What would change our mind: " + "; ".join(debate["change_our_mind"])))
 
 
 def _opinions(cycle: dict[str, Any], subject: str) -> None:
@@ -280,9 +335,21 @@ def _opinions(cycle: dict[str, Any], subject: str) -> None:
             if o.get("invalidation"):
                 st.caption(_md(f"Would be proven wrong by: {o['invalidation']}"))
             if o.get("evidence"):
-                st.dataframe(pd.DataFrame(o["evidence"]), hide_index=True, use_container_width=True)
+                ev = pd.DataFrame(o["evidence"])
+                ev["value"] = ev["value"].map(
+                    lambda v: "" if v is None else str(v)
+                )  # mixed types: show as text
+                st.dataframe(ev, hide_index=True, use_container_width=True)
             if o.get("data_missing"):
                 st.caption(_md("Missing: " + ", ".join(o["data_missing"])))
+
+
+def _fit(fit: dict[str, Any]) -> str:
+    if not fit:
+        return ""
+    return ("fits" if fit.get("ok") else "poor fit") + (
+        f": {'; '.join(fit['notes'])}" if fit.get("notes") else ""
+    )
 
 
 def _decisions(cycle: dict[str, Any]) -> None:
@@ -306,6 +373,7 @@ def _decisions(cycle: dict[str, Any]) -> None:
             "weight now → target": f"{pct(d.get('current_weight'), 1)} → {pct(d.get('target_weight'), 1)}",
             "confidence": round(d.get("confidence") or 0, 2),
             "③ risk preview": STATUS_LABEL.get(d["status"], d["status"]),
+            "portfolio fit": _fit((d.get("rationale") or {}).get("fit") or {}),
             "④ execution": "not sent (the Brain never sends orders)",
             "why": "; ".join((d.get("rationale") or {}).get("reasons") or []),
         }
@@ -325,6 +393,60 @@ def _decisions(cycle: dict[str, Any]) -> None:
             checks = risk.get("checks") or []
             if checks:
                 st.dataframe(pd.DataFrame(checks), hide_index=True, use_container_width=True)
+
+
+OPP_STATUS = {
+    "recommended": "risk engine would allow (recommendation)",
+    "dry_run_approved": "risk engine would allow (dry run)",
+    "risk_rejected": "risk engine rejected",
+    "watch": "watching (not acted on)",
+    "no_action": "no action",
+    "hold": "held: no change",
+    "not_analysed": "not analysed (focus budget)",
+    "rejected_data": "rejected: data not trustworthy",
+    "context": "market context",
+    "no_view": "no agent had a view",
+}
+
+
+def _opportunities(cycle: dict[str, Any]) -> None:
+    ops = cycle.get("opportunities") or []
+    st.markdown(
+        "Ideas the Brain found **by itself** this cycle. Finding one is not a recommendation: each goes through "
+        "data validation → the relevant agents → research → bull / bear / devil's advocate → consensus → portfolio "
+        "fit → risk preview, and most stop along the way."
+    )
+    if not ops:
+        st.info("Nothing unusual detected this cycle.", icon=":material/search_off:")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "kind": o["kind"].replace("_", " "),
+                    "subject": o["subject"],
+                    "idea": {1: "long", -1: "avoid / reduce", 0: "look closer"}.get(o["direction"], ""),
+                    "strength": round(o["strength"], 2),
+                    "what": o["headline"],
+                    "outcome": OPP_STATUS.get(o["status"], o["status"]),
+                }
+                for o in ops
+            ]
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+    pick = st.selectbox(
+        "Follow one idea through the pipeline",
+        range(len(ops)),
+        format_func=lambda i: f"{ops[i]['kind'].replace('_', ' ')} · {ops[i]['subject']}",
+        key="brain-opp",
+    )
+    for stage in ops[pick]["stages"]:
+        extra = {k: v for k, v in stage.items() if k not in ("stage", "result") and v}
+        st.markdown(_md(f"**{stage['stage'].replace('_', ' ')}** — {stage['result']}"))
+        if extra:
+            st.caption(_md("; ".join(f"{k}: {v}" for k, v in extra.items())))
 
 
 def _memory() -> None:
@@ -414,16 +536,20 @@ def render() -> None:
     if cycle["status"] == "failed":
         st.error(_md(f"This cycle failed: {cycle.get('error')}"), icon=":material/error:")
     agents = guarded(lambda: api().get(f"{BASE}/agents"), "agents") or []
-    tabs = st.tabs(["Overview", "Agents", "Consensus & opinions", "Proposed actions", "Memory", "History"])
+    tabs = st.tabs(
+        ["Overview", "Opportunities", "Agents", "Consensus & debate", "Proposed actions", "Memory", "History"]
+    )
     with tabs[0]:
         _overview(cycle)
     with tabs[1]:
-        _agents(cycle, agents)
+        _opportunities(cycle)
     with tabs[2]:
-        _consensus(cycle)
+        _agents(cycle, agents)
     with tabs[3]:
-        _decisions(cycle)
+        _consensus(cycle)
     with tabs[4]:
-        _memory()
+        _decisions(cycle)
     with tabs[5]:
+        _memory()
+    with tabs[6]:
         _history(cycles)

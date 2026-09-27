@@ -159,7 +159,7 @@ flowchart LR
     CB --> PR[providers<br/>strict wire schemas]
     PR --> HTTP[HttpClient<br/>token buckets · retries · concurrency caps]
     HTTP --> EXT[(Yahoo · Polygon · Alpaca · Treasury · SEC · FMP · EIA · fueleconomy.gov · ESPN · Odds API)]
-    G --> WH[(SQLite warehouse<br/>Alembic 0001-0011)]
+    G --> WH[(SQLite warehouse<br/>Alembic 0001-0012)]
     S --> BRK[Alpaca paper broker<br/>alpaca-py, paper=True]
     G --> SYN[synthetic generators]
 ```
@@ -1163,16 +1163,62 @@ the vote and keeps its facts for the planner: position size uses the larger of t
 the GARCH forecast, and no new position or increase is proposed within
 `max(QP_BRAIN_EARNINGS_CAUTION_DAYS, QP_TRADING_EARNINGS_BLACKOUT_DAYS)` days of an earnings release.
 
+### Opportunities, research and debate
+
+The brain looks for ideas itself. Every cycle it scans the **whole universe** (the indicator table it
+already computes, the stock model's features, sectors and pair statistics) for momentum shifts, breakouts
+on volume, abnormal volume (judged intraday only after the first hour), valuation dislocations with
+adequate quality, mean-reversion extremes, volatility events, sector rotation, relative-value pairs (highly
+correlated same-sector names whose spread is ≥ 2σ from its 60-day relation) and regime changes. The
+strongest ideas (`QP_BRAIN_MAX_OPPORTUNITIES`) join the focus; after their option chains and earnings
+calendars are read, a second pass adds upcoming earnings, recent earnings surprises and unusual options
+activity. Detection is not a recommendation: each idea is traced through **data validation → the
+relevant agents → research → bull case → bear case → devil's advocate → consensus → portfolio fit → risk
+preview**, and the trace records where and why it stopped.
+
+Two second-stage agents read what the specialists found:
+
+* **Research** answers a checklist per symbol from the cycle's data: is the move the stock's own or the
+  market's, is volume confirming, is the sector confirming, is there an event ahead, is it extended, is it
+  liquid enough, plus opportunity-specific questions (did a breakout hold on volume, is quality good
+  enough to avoid a value trap, is the long-term trend on the side of a rebound). It casts no vote.
+* **Situational awareness** sets a risk **posture**: *defensive* (kill switch on, risk-off regime, VIX ≥ 30
+  in a bearish market, day P/L within 60% of the daily loss limit), *cautious* (bearish or high-volatility
+  regime, VIX ≥ 22, weak breadth, day P/L past 30% of the limit, ≥ 90% invested, margin, degraded data)
+  or *normal*.
+
+Then every consensus is **debated**: the bull and bear cases are the strongest evidence each way from all
+agents (plus risks such as an earnings release inside the horizon, an elevated volatility regime or a
+value-trap flag), and a devil's advocate attacks the leading view with known failure modes — one idea
+counted several times, a single voice, credible opposition, chasing an extended move, an event inside the
+horizon, fighting the regime, stale data, a short-term view against a long-term one, a value trap. Each
+objection cuts the confidence; a high-severity one marks the view *challenged*.
+
+The decision step now also:
+
+* opens no new position on a challenged view;
+* halves new positions and scales size to 60% when cautious, and when defensive proposes no new risk and
+  trims a third of every holding that is not confidently bullish (`DE_RISK`);
+* rejects a new position that is nearly the same bet as a holding (return correlation ≥ 0.85) or would
+  push a sector over 45% (`portfolio fit`), and notes a high resulting beta;
+* trims a bullish holding that has grown to more than 1.5× its target weight (`REBALANCE`).
+
+`QP_BRAIN_MIN_CONFIDENCE` now applies after the devil's advocate. Its default is 0.45: the scale moved
+when more agents and the debate were added, and the calibration report (learning) is what should confirm
+or change it.
+
 ### The Brain page
 
 *Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
 
-* **Overview:** regime, market, data quality, the paper portfolio (read only), what was studied and why.
+* **Overview:** regime, risk posture, market, data quality, the paper portfolio (read only), what was
+  studied and why.
+* **Opportunities:** what the brain found by itself and how far each idea got, stage by stage.
 * **Agents:** who ran, who was skipped and why, their run history, and their track record ("unproven"
   until predictions are graded). Agents can be switched on or off here.
-* **Consensus & opinions:** each subject's combined view (supporting/neutral/opposing, disagreement, data
-  quality, vetoes), the strongest argument for and against, every vote with its weight, and each agent's
-  own thesis, evidence and invalidation.
+* **Consensus & debate:** each subject's combined view (supporting/neutral/opposing, disagreement, data
+  quality, vetoes), the bull case, the bear case and the devil's advocate's objections, every vote with
+  its weight, and each agent's own thesis, evidence and invalidation.
 * **Proposed actions:** each action, the risk engine's preview and the checks behind it, and the execution
   column — always "not sent".
 * **Memory** and **History.**
@@ -1204,6 +1250,7 @@ There is no execution mode: the brain cannot place orders in Phase 1.
 | `POST /brain/run?wait=` `{"symbols": ["NVDA"], "kind": "full"}` | Run one cycle now (202 with progress if it takes longer than `wait`); never sends an order |
 | `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |
 | `GET /brain/memory?tier=&kind=&subject=&text=` | Structured memory, newest first |
+| `GET /brain/opportunities?kind=&status=` | Detected opportunities and their pipeline trace, newest first |
 
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
 `QP_API_TOKEN`.
@@ -1242,6 +1289,7 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0008_prediction_ledger` | `predictions` |
 | `0009_reference_data` | `company_profiles`, `earnings_events`, `reference_blobs` (S&P membership snapshot, download bookkeeping), `fundamental_facts` (SEC XBRL frames); `predictions.origin` |
 | `0010_alpaca_paper_trading` | `trading_cycles`, `broker_orders`, `trading_events`, `trading_state` (runtime kill switch, per-position memory, P/L baseline) |
+| `0012_brain_research` | `brain_opportunities` (with the pipeline trace), `brain_debates` |
 | `0011_brain` | `brain_agents`, `brain_cycles`, `brain_agent_runs`, `brain_opinions`, `brain_consensus`, `brain_decisions`, `brain_predictions`, `brain_memory`; reserved for later phases and still empty: `brain_reflections`, `brain_agent_performance`, `brain_improvements`, `brain_events`, `brain_state` |
 
 ```bash
@@ -1293,7 +1341,7 @@ src/quantpulse/
   domain/                vehicle · sports · screener · paper_broker · trading_agent · features · alpha_model · research · regime · universe (point-in-time S&P 500) · sectors (SIC → FF12) · earnings · fundamental_factors · trading_signals · trading_regime · trading_portfolio · trading_performance
   providers/             yahoo · polygon · alpaca · treasury · sec_edgar · sp500 (Wikipedia) · fmp · eia · fueleconomy · espn · odds_api · synthetic · alpaca_trading (paper broker)
   schemas/               Pydantic v2 request/response/ingestion models
-  db/                    models · repositories · session · migrate · migrations/versions/0001-0011
+  db/                    models · repositories · session · migrate · migrations/versions/0001-0012
   services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · forecast · model · reference · facts · stocks · predictions · backfill · notifications · trading · trading_data · trading_risk · order_manager · container
   brain/                 multi-agent analysis: types · perception · indicators · agents/* · registry · consensus · decisions · memory · learning (prediction records) · store · orchestrator · service
   workers/poller.py      market-hours-aware refresh, scheduled email, sandbox scheduler, prediction ledger, model warm-up, paper-trading cycles and reconciliation

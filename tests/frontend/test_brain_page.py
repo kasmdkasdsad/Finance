@@ -92,7 +92,7 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert "Orders sent by the Brain" in text and "Mode" in text
     frames = [d.value for d in at.dataframe]
     agents = next(f for f in frames if "track record" in f.columns)
-    assert len(agents) == 13 and set(agents["this cycle"]) <= {"ok", "skipped", "failed", "timeout", "—"}
+    assert len(agents) == 15 and set(agents["this cycle"]) <= {"ok", "skipped", "failed", "timeout", "—"}
     assert (agents["track record"] == "unproven (no evaluated predictions yet)").all()
     consensus = next(f for f in frames if "disagreement" in f.columns)
     assert {"supporting", "neutral", "opposing", "confidence", "data"} <= set(consensus.columns)
@@ -104,6 +104,15 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
         "Blocked by a data veto",
         "No trade proposed",
     }
+    opportunities = next(f for f in frames if "outcome" in f.columns)
+    assert len(opportunities) and {"kind", "subject", "idea", "strength", "what"} <= set(
+        opportunities.columns
+    )
+    assert any("Risk posture" in m.value for m in at.markdown)
+    assert any("detection" in m.value for m in at.markdown)  # one idea followed through the pipeline
+    assert any("Bull case" in m.value for m in at.markdown) and any(
+        "Bear case" in m.value for m in at.markdown
+    )
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}
 
 
