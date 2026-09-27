@@ -24,6 +24,7 @@ from .agents import default_agents
 from .context import BrokerView
 from .evaluation import MarketPrices
 from .events import Event, EventBus, EventType
+from .improvement import ImprovementEngine
 from .lab.service import StrategyLab
 from .learning import Learner, PredictionRecorder
 from .memory import MemoryStore
@@ -99,6 +100,9 @@ class BrainService:
             else None
         )
         self.lab = StrategyLab(settings, clock, db, market, data, self.store)
+        self.improvements = ImprovementEngine(
+            db, settings.brain_min_reliability_observations, settings.brain_min_confidence
+        )
         self.supervisor = Supervisor(settings, clock, self, self.bus)
 
     async def _sync(self) -> None:

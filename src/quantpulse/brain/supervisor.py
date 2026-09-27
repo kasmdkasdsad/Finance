@@ -12,8 +12,8 @@ market open        a *full* cycle every ``QP_BRAIN_CYCLE_MINUTES``; a quote *mon
                    become events); the trading service's audit trail is read for orders and risk limits;
                    event wake-ups run focused cycles, at most ``QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR``
 after hours        once a day (from 16:40): a learning pass (grade the day's matured predictions, reflect,
-                   update track records), a *portfolio* review of the holdings, and the strategy lab's
-                   paper (shadow) portfolios
+                   update track records), a *portfolio* review of the holdings, the strategy lab's
+                   paper (shadow) portfolios, and a self-improvement review (proposals only)
 weekend, holiday   once a day: a learning pass; a *deep* research cycle; the strategy lab proposes
                    untried templates and validates up to two (it never promotes: that is a person's call)
 =================  =========================================================================================
@@ -193,6 +193,7 @@ class Supervisor:
                 await run("learn", self._brain.learn(wait=None))
                 await run("review", self._cycle("portfolio", (), "after-hours review"))
                 await run("lab_paper", self._brain.lab.paper_update())
+                await run("improve", self._improve())
                 last["after_hours"] = now.isoformat()
         else:  # weekend or holiday
             if due("offday_learn", daily_from=time(9, 0)):
@@ -216,6 +217,11 @@ class Supervisor:
             self._event_cycles.append(now)
             label = f"{wake.kind}:{','.join(wake.symbols) or '-'}"
             await run(label, self._cycle(wake.kind, wake.symbols, wake.reason))
+
+    async def _improve(self) -> dict[str, Any]:
+        """Look at the record and write improvement proposals (never applied automatically)."""
+        found = await self._brain.improvements.review(self._clock.now())
+        return {"proposals": len(found)}
 
     async def _lab(self) -> dict[str, Any]:
         """Weekend lab work: propose untried templates, validate up to two proposals (never promotes)."""

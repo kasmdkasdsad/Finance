@@ -22,6 +22,7 @@ from quantpulse.schemas.brain import (
     BrainOpportunityOut,
     BrainRunIn,
     BrainStatusOut,
+    ImprovementDecisionIn,
     StrategyIn,
     StrategyStatusIn,
     SupervisorIn,
@@ -270,3 +271,37 @@ async def lab_compare(
     c: Container = ContainerDep,
 ) -> list[dict[str, Any]]:
     return await c.brain.lab.compare([k.strip() for k in keys.split(",") if k.strip()])
+
+
+# ---------------------------------------------------------------------------------------------- improvement
+@router.get("/improvements", summary="Improvement proposals (problem, evidence, change, validation plan)")
+async def improvements(
+    status: str | None = Query(None, pattern="^(proposed|testing|validated|rejected|applied)$"),
+    c: Container = ContainerDep,
+) -> list[dict[str, Any]]:
+    return await c.brain.improvements.proposals(status)
+
+
+@router.post(
+    "/improvements/review", dependencies=ControlAuth, summary="Analyse the record and propose improvements"
+)
+async def review_improvements(c: Container = ContainerDep) -> list[dict[str, Any]]:
+    return await c.brain.improvements.review(c.clock.now())
+
+
+@router.post(
+    "/improvements/{improvement_id}",
+    dependencies=ControlAuth,
+    summary="Record a person's decision on a proposal (nothing is applied automatically)",
+)
+async def decide_improvement(
+    body: ImprovementDecisionIn, improvement_id: int = Path(..., ge=1), c: Container = ContainerDep
+) -> dict[str, Any]:
+    from quantpulse.core.errors import NotFoundError
+
+    try:
+        return await c.brain.improvements.decide(
+            improvement_id, body.status, "user", body.note, c.clock.now()
+        )
+    except KeyError:
+        raise NotFoundError(f"improvement {improvement_id} not found") from None

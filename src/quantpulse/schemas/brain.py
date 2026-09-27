@@ -55,6 +55,11 @@ class StrategyStatusIn(StrictModel):
     status: Literal["paper", "promoted", "retired"]
 
 
+class ImprovementDecisionIn(StrictModel):
+    status: Literal["testing", "validated", "rejected", "applied"]
+    note: str | None = Field(default=None, max_length=1000)
+
+
 class BrainAgentOut(StrictModel):
     id: str
     name: str
