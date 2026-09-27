@@ -45,12 +45,13 @@ synthetic data with a visible status badge.
 9. [Daily picks and the email digest](#daily-picks-and-the-email-digest)
 10. [Trading sandbox (paper trading)](#trading-sandbox-paper-trading)
 11. [Alpaca paper trading (automated strategy)](#alpaca-paper-trading-automated-strategy)
-12. [Vehicle module reference data](#vehicle-module-reference-data)
-13. [Database and migrations](#database-and-migrations)
-14. [Testing and quality gates](#testing-and-quality-gates)
-15. [Project layout](#project-layout)
-16. [Security and operations](#security-and-operations)
-17. [Known limitations](#known-limitations)
+12. [The Brain (multi-agent analysis)](#the-brain-multi-agent-analysis)
+13. [Vehicle module reference data](#vehicle-module-reference-data)
+14. [Database and migrations](#database-and-migrations)
+15. [Testing and quality gates](#testing-and-quality-gates)
+16. [Project layout](#project-layout)
+17. [Security and operations](#security-and-operations)
+18. [Known limitations](#known-limitations)
 
 ---
 
@@ -158,7 +159,7 @@ flowchart LR
     CB --> PR[providers<br/>strict wire schemas]
     PR --> HTTP[HttpClient<br/>token buckets · retries · concurrency caps]
     HTTP --> EXT[(Yahoo · Polygon · Alpaca · Treasury · SEC · FMP · EIA · fueleconomy.gov · ESPN · Odds API)]
-    G --> WH[(SQLite warehouse<br/>Alembic 0001-0010)]
+    G --> WH[(SQLite warehouse<br/>Alembic 0001-0011)]
     S --> BRK[Alpaca paper broker<br/>alpaca-py, paper=True]
     G --> SYN[synthetic generators]
 ```
@@ -1088,6 +1089,92 @@ Commands are PowerShell (Windows); `curl` works the same elsewhere. If `QP_API_T
 10. Re-enable the scheduler (`QP_TRADING_SCHEDULER_ENABLED=true`, restart) when you want it to trade on
     its own.
 
+## The Brain (multi-agent analysis)
+
+The brain (`src/quantpulse/brain/`) is a set of small, specialised agents that look at the market and the
+Alpaca paper portfolio, argue from evidence, and propose portfolio actions. **It never sends an order.**
+Every trade it proposes is previewed by the same deterministic risk engine that guards real orders
+(`services/trading_risk.RiskBook`), and the verdict is recorded. The brain has no broker access beyond a
+read-only view (account, positions, open orders, clock): every Alpaca request it makes is a `GET`.
+
+**Phase 1 status (built and tested):** the agent interface, registry, orchestrator, five deterministic
+agents, working memory, consensus with visible disagreement, proposed actions with a risk preview, and
+persistence of every cycle. **Not built yet:** language-model agents, grading of predictions against
+outcomes (they are recorded, not evaluated), reflection, measured agent reliability, the strategy lab,
+continuous scheduling, a UI page, and any hand-off of proposals to the trading service for execution.
+
+### One cycle
+
+1. **Perceive.** Reads the paper account and Alpaca's market clock, loads daily prices for the trading
+   universe (the same `TradingDataLoader` the strategy uses), appends today's live row while the market is
+   open, computes indicators (`raw_signals` plus trend, MACD, Bollinger, breakout, correlation and tail
+   statistics), picks the **focus** (holdings, requested symbols and the best of a pre-screen), then
+   enriches the focus (fundamentals, model scores, implied volatility, earnings dates), classifies the
+   regime with the strategy's own classifier, and grades each symbol's data: `fresh`, `live`, `stale`,
+   `market_closed`, `unavailable` or `provider_error`.
+2. **Select and run agents.** Each skip is recorded with its reason (disabled, not enough data, nothing
+   to analyse). Agents run concurrently by dependency level. A failing or slow agent is recorded as
+   `failed` or `timeout`, and the cycle goes on.
+3. **Consensus** per subject from the *forecasting* agents. Each vote is weighted by the agent's
+   confidence × data quality × measured reliability. Reliability stays **unproven** (weight 1.0) until an
+   agent has `QP_BRAIN_MIN_RELIABILITY_OBSERVATIONS` evaluated predictions, so no track record is
+   invented. Supporting, neutral, opposing and abstaining counts, a disagreement measure (0 unanimous …
+   1 split) and the strongest voice on each side are kept. The answer is **unknown** (no action) when
+   there is one unsure voice, heavy disagreement or low combined confidence. Vetoes from the
+   *constraint* agents stay attached.
+4. **Decide.** Holdings: CLOSE at a stop, REDUCE when overweight or bearish, INCREASE when confidently
+   bullish below target, otherwise HOLD. New names: BUY only on a confident bullish consensus with no
+   veto, outside a risk-off market, with a free slot and unborrowed cash, sized by a volatility budget
+   and within the per-order limit, at most `QP_BRAIN_MAX_NEW_POSITIONS_PER_CYCLE` per cycle. Everything
+   else is WATCH or NO_ACTION, with the reason.
+5. **Risk preview.** Every proposed trade goes through `RiskBook` (sells first). The status is
+   `recommended` (paper_recommendation mode), `dry_run_approved` (dry_run), `risk_rejected` (with the
+   failed check), `blocked` (a data veto) or `not_checked` (the account could not be read).
+6. **Remember.** Stores the cycle, every agent run (including skips and failures), every opinion with its
+   evidence and invalidation level, the consensus, the decisions, **open predictions** for later grading
+   (per agent and per consensus, with entry prices and due dates) and structured memory:
+   * short term: the latest market and portfolio state;
+   * working: this cycle's investigation;
+   * long term: regime changes and proposed trades.
+
+### Agents (Phase 1, all deterministic)
+
+| Agent | Role | What it looks at |
+|---|---|---|
+| `data_quality` | constraint | Quote freshness, spreads, price anomalies, history length, broker and provider health. Vetoes any action on data that cannot be trusted, and everything when the market is closed or the account is unreadable |
+| `market_regime` | forecast (market) | The strategy's regime classifier, breadth, correlation regime, benchmark volatility, VIX |
+| `technical` | forecast (5 days) | Trend (price vs 50/200-day), ADX, MACD, RSI, 20-day breakout/breakdown, VWAP, distance to support/resistance; gives invalidation levels |
+| `momentum` | forecast (21 days) | Cross-sectional z-scores of 12-1, 6-1 and 3-month momentum, 1-month return, relative strength and persistence; acceleration or deterioration |
+| `portfolio` | constraint | Position weights, concentration (HHI), sector weights, beta, average correlation, margin, positions at their stop; hints close / reduce / hold |
+
+An agent returns structured `Opinion`s: stance, score (−1…1), confidence, horizon, thesis, evidence,
+data used and missing, data quality, invalidation and veto. A language-model agent will implement the
+same `Agent` interface with a `model_tier` of `fast` or `strong`; none exists yet.
+
+### Modes
+
+`QP_BRAIN_MODE`:
+
+* `research_only`: analysis, consensus, predictions and memory only; no proposed actions.
+* `dry_run`: proposed actions previewed by the risk engine.
+* `paper_recommendation` (default): the same, labelled as recommendations for the paper account.
+
+There is no execution mode: the brain cannot place orders in Phase 1.
+
+### API
+
+| Method & path | Purpose |
+|---|---|
+| `GET /brain/status` | Mode, agents registered/enabled, last cycle, open predictions, learning status |
+| `GET /brain/agents` · `/agents/{id}` | Agents with their spec, run statistics and measured performance (empty until predictions are evaluated) |
+| `POST /brain/agents/{id}` `{"enabled": false}` | Switch an agent off or on |
+| `POST /brain/run?wait=` `{"symbols": ["NVDA"], "kind": "full"}` | Run one cycle now (202 with progress if it takes longer than `wait`); never sends an order |
+| `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |
+| `GET /brain/memory?tier=&kind=&subject=&text=` | Structured memory, newest first |
+
+The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
+`QP_API_TOKEN`.
+
 ## Vehicle module reference data
 
 The packaged profile (`src/quantpulse/data/elantra_2025_limited.json`) was verified when it was built:
@@ -1122,6 +1209,7 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0008_prediction_ledger` | `predictions` |
 | `0009_reference_data` | `company_profiles`, `earnings_events`, `reference_blobs` (S&P membership snapshot, download bookkeeping), `fundamental_facts` (SEC XBRL frames); `predictions.origin` |
 | `0010_alpaca_paper_trading` | `trading_cycles`, `broker_orders`, `trading_events`, `trading_state` (runtime kill switch, per-position memory, P/L baseline) |
+| `0011_brain` | `brain_agents`, `brain_cycles`, `brain_agent_runs`, `brain_opinions`, `brain_consensus`, `brain_decisions`, `brain_predictions`, `brain_memory`; reserved for later phases and still empty: `brain_reflections`, `brain_agent_performance`, `brain_improvements`, `brain_events`, `brain_state` |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)
@@ -1172,8 +1260,9 @@ src/quantpulse/
   domain/                vehicle · sports · screener · paper_broker · trading_agent · features · alpha_model · research · regime · universe (point-in-time S&P 500) · sectors (SIC → FF12) · earnings · fundamental_factors · trading_signals · trading_regime · trading_portfolio · trading_performance
   providers/             yahoo · polygon · alpaca · treasury · sec_edgar · sp500 (Wikipedia) · fmp · eia · fueleconomy · espn · odds_api · synthetic · alpaca_trading (paper broker)
   schemas/               Pydantic v2 request/response/ingestion models
-  db/                    models · repositories · session · migrate · migrations/versions/0001-0010
+  db/                    models · repositories · session · migrate · migrations/versions/0001-0011
   services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · forecast · model · reference · facts · stocks · predictions · backfill · notifications · trading · trading_data · trading_risk · order_manager · container
+  brain/                 multi-agent analysis: types · perception · indicators · agents/* · registry · consensus · decisions · memory · learning (prediction records) · store · orchestrator · service
   workers/poller.py      market-hours-aware refresh, scheduled email, sandbox scheduler, prediction ledger, model warm-up, paper-trading cycles and reconciliation
   api/                   app factory · middleware · error handlers · routers/*
   data/                  packaged vehicle profile · S&P 500 constituents and change-history snapshot
