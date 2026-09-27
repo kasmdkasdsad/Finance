@@ -29,6 +29,7 @@ from .debate import Debate, review
 from .decisions import Proposal, plan, risk_preview
 from .events import EventBus, from_cycle
 from .learning import PredictionRecorder
+from .llm import ModelRouter
 from .memory import LONG_TERM, SHORT_TERM, WORKING, MemoryStore
 from .opportunities import trace
 from .perception import Perception
@@ -65,6 +66,7 @@ class Orchestrator:
         memory: MemoryStore,
         recorder: PredictionRecorder,
         bus: EventBus | None = None,
+        models: ModelRouter | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -74,6 +76,7 @@ class Orchestrator:
         self._memory = memory
         self._recorder = recorder
         self._bus = bus
+        self._models = models
         self._lock = asyncio.Lock()
         self.last_ctx: BrainContext | None = None  # the latest completed cycle's picture (for the monitor)
 
@@ -115,6 +118,7 @@ class Orchestrator:
                 opportunity_budget=plan_route.opportunities,
             )
             ctx.strategy_signals = await self._store.get_state("promoted_signals") or {}
+            ctx.llm = self._models
             result.ctx = ctx
             wanted = only if only is not None else plan_route.agents
             selections, skips = self.registry.select(ctx, wanted)

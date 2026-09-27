@@ -186,7 +186,7 @@ def test_registry_rejects_duplicates_and_unknown_dependencies():
         reg.register(Probe(agent_id="later", deps=("nobody",)))
 
 
-def test_default_agents_are_deterministic_specialists():
+def test_default_agents_are_deterministic_except_the_optional_briefing():
     reg = AgentRegistry(default_agents())
     ids = {a.spec.id: a.role for a in reg.all()}
     assert ids == {
@@ -206,9 +206,12 @@ def test_default_agents_are_deterministic_specialists():
         "portfolio": "constraint",
         "research": "context",
         "situational_awareness": "context",
+        "briefing": "context",
     }
     assert {a.spec.id for a in reg.all() if a.spec.stage == 1} == {"research", "situational_awareness"}
-    assert all(a.spec.model_tier.value == "deterministic" for a in reg.all())
+    # the only model-backed agent runs last and never votes
+    assert {a.spec.id for a in reg.all() if a.spec.model_tier.value != "deterministic"} == {"briefing"}
+    assert reg.get("briefing").spec.stage == 2 and reg.get("briefing").role == "context"
 
 
 def test_selection_explains_every_skip():

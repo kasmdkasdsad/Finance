@@ -554,6 +554,31 @@ class Settings(BaseSettings):
         le=120,
         description="Time budget for each extra evidence fetch (options, earnings).",
     )
+    brain_llm_provider: str = Field(
+        default="none",
+        description="Language-model provider for the optional model-backed agents ('none': every analysis is "
+        "deterministic and those agents skip themselves). Calculations never go to a model.",
+    )
+    brain_llm_fast_model: str = Field(
+        default="", description="Model for fast tasks (summaries, extraction, classification); empty: none."
+    )
+    brain_llm_strong_model: str = Field(
+        default="", description="Model for strong tasks (research, debate, synthesis); empty: none."
+    )
+    brain_llm_daily_token_budget: int = Field(
+        default=0,
+        ge=0,
+        description="Input + output tokens the brain may spend on language models per day (0: no calls).",
+    )
+    brain_llm_max_output_tokens: int = Field(default=600, ge=16, le=8000)
+    brain_llm_timeout_seconds: float = Field(default=45.0, gt=0, le=600)
+    brain_llm_max_concurrency: int = Field(default=2, ge=1, le=16)
+    brain_llm_cache_minutes: int = Field(
+        default=240, ge=0, le=10080, description="Identical requests are answered from the cache."
+    )
+    brain_llm_max_briefings: int = Field(
+        default=3, ge=0, le=20, description="Focus symbols summarised by the briefing agent per cycle."
+    )
 
     # --- Prediction ledger ------------------------------------------------------------------------
     predictions_enabled: bool = Field(

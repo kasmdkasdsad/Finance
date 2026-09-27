@@ -118,6 +118,7 @@ class BrainStatusOut(StrictModel):
     last_cycle: BrainCycleSummaryOut | None
     open_predictions: int
     learning: str
+    language_models: str
 
 
 class BrainMemoryOut(StrictModel):

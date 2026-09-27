@@ -182,6 +182,13 @@ async def pause_supervisor(body: SupervisorIn, c: Container = ContainerDep) -> d
     return await c.brain.supervisor.set_paused(body.paused)
 
 
+@router.get(
+    "/models", summary="Language models: provider, tiers, today's token budget and usage, recent calls"
+)
+async def models(c: Container = ContainerDep) -> dict[str, Any]:
+    return c.brain.models.status()
+
+
 @router.get("/events", summary="What happened (market, portfolio, orders, agents, learning), newest first")
 async def events(
     type: str | None = Query(None, max_length=40),

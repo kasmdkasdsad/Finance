@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -31,6 +31,9 @@ from quantpulse.services.trading_risk import RiskLimits
 
 from .opportunities import Opportunity
 from .types import BrainMode, BrainSession, DataState, Opinion
+
+if TYPE_CHECKING:
+    from .llm import ModelRouter
 
 
 class BrokerView:
@@ -173,6 +176,7 @@ class BrainContext:
     notes: list[str] = field(default_factory=list)
     provider_errors: dict[str, str] = field(default_factory=dict)
     working: WorkingMemory = field(default_factory=WorkingMemory)
+    llm: ModelRouter | None = None  # language models for the model-backed agents (never for calculations)
 
     @property
     def held(self) -> list[str]:

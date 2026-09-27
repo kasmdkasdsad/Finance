@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .base import Agent
+from .briefing import BriefingAgent
 from .catalyst import CatalystAgent
 from .data_quality import DataQualityAgent
 from .factor import FactorAgent
@@ -37,11 +38,13 @@ def default_agents() -> list[Agent]:
         PortfolioAgent(),
         ResearchAgent(),
         SituationalAwarenessAgent(),
+        BriefingAgent(),  # model-backed: skips itself unless a language model is configured
     ]
 
 
 __all__ = [
     "Agent",
+    "BriefingAgent",
     "CatalystAgent",
     "DataQualityAgent",
     "FactorAgent",

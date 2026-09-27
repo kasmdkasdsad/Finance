@@ -5,12 +5,14 @@ agents, builds a consensus per subject, proposes portfolio actions, has the exis
 each trade and persists everything. It never sends an order: every Alpaca request it makes is a read.
 """
 
+import json
 from datetime import date, timedelta
 
 import pandas as pd
 import pytest
 
 from quantpulse.brain.agents.technical import TechnicalAgent
+from quantpulse.brain.llm import ModelResponse, register_provider, unregister_provider
 from quantpulse.core.clock import FakeClock
 from tests.fakes.alpaca_paper import FakeAlpacaPaper
 from tests.fakes.market import DRIFTS, TrendFeed
@@ -36,10 +38,12 @@ AGENTS = {
     "research",
     "situational_awareness",
     "strategy_lab",
+    "briefing",
 }
 # without a stock model run, live option chains or an earnings calendar (the fakes have none) these skip
 NEEDS_RESEARCH = {"fundamental", "valuation", "factor", "options", "catalyst", "strategy_lab"}
-RAN = AGENTS - NEEDS_RESEARCH
+NEEDS_MODEL = {"briefing"}  # skips itself unless a language model is configured (none is, by default)
+RAN = AGENTS - NEEDS_RESEARCH - NEEDS_MODEL
 TRADES = {"buy", "increase", "reduce", "close", "sell"}
 
 # a cross-section wide enough for momentum ranking: the standard trend names plus more of each kind
@@ -110,6 +114,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         assert status_of == {a: "ok" if a in RAN else "skipped" for a in AGENTS}
         reasons = {r["agent_id"]: r["reason"] for r in cycle["runs"] if r["status"] == "skipped"}
         assert "stock model" in reasons["factor"] and "option chains" in reasons["options"]
+        assert "QP_BRAIN_LLM_PROVIDER=none" in reasons["briefing"]
 
         # structured findings: each focus symbol seen by data quality, technical and momentum
         seen: dict[str, set[str]] = {}
@@ -174,7 +179,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
 
         status = (await api.get(f"{BRAIN}/status")).json()
         assert status["paper_only"] and status["last_cycle"]["id"] == cycle["id"]
-        assert status["agents"] == {"registered": 16, "enabled": 16} and not status["running"]
+        assert status["agents"] == {"registered": 17, "enabled": 17} and not status["running"]
         assert status["open_predictions"] == len(preds) and "predictions graded" in status["learning"]
 
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
@@ -316,7 +321,7 @@ async def test_agent_controls_and_background_runs(tmp_path):
         assert (await api.get(f"{BRAIN}/agents/momentum")).json()["enabled"] is False
         assert (await api.get(f"{BRAIN}/agents/nobody")).status_code == 404
         assert (await api.post(f"{BRAIN}/agents/nobody", json={"enabled": True})).status_code == 404
-        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 16, "enabled": 15}
+        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 17, "enabled": 16}
 
         cycle = await run_cycle(api, symbols=["DNA"])
         runs = by(cycle["runs"], "agent_id")
@@ -398,7 +403,8 @@ async def test_every_agent_takes_part_when_its_data_exists(tmp_path, monkeypatch
         cycle = await run_cycle(api)
         assert cycle["status"] == "completed"
         statuses = {r["agent_id"]: r["status"] for r in cycle["runs"]}
-        assert statuses == {a: "skipped" if a == "strategy_lab" else "ok" for a in AGENTS}  # nothing promoted
+        # nothing promoted, no language model
+        assert statuses == {a: "skipped" if a in ("strategy_lab", "briefing") else "ok" for a in AGENTS}
         voters = {v["agent_id"] for c in cycle["consensus"] for v in c["detail"]["votes"]}
         assert {"fundamental", "valuation", "factor", "options", "technical", "momentum"} <= voters
         catalyst = [o for o in cycle["opinions"] if o["agent_id"] == "catalyst"]
@@ -450,6 +456,73 @@ async def test_opportunities_debates_and_posture_are_recorded(tmp_path):
         research = [o for o in cycle["opinions"] if o["agent_id"] == "research"]
         assert research and all(o["stance"] == "abstain" and o["meta"]["findings"] for o in research)
         assert only_reads(api.fake)
+
+
+class ScriptedModel:
+    """A test-only language-model provider: a fixed structured answer, every request recorded."""
+
+    name = "scripted-test"
+
+    def __init__(self) -> None:
+        self.requests: list = []
+
+    def unavailable(self):
+        return None
+
+    async def complete(self, request, model):
+        self.requests.append((request, model))
+        answer = {
+            "summary": "The agents lean one way.",
+            "supporting": ["trend"],
+            "opposing": [],
+            "watch": "x",
+        }
+        return ModelResponse(json.dumps(answer), model, 400, 60, "end_turn")
+
+
+async def test_a_configured_model_writes_briefings_that_never_vote_or_trade(tmp_path):
+    model = ScriptedModel()
+    register_provider("scripted-test", lambda _s: model)
+    clock = FakeClock(NOW)
+    try:
+        async for api in brain_client(
+            tmp_path,
+            clock,
+            brain_llm_provider="scripted-test",
+            brain_llm_fast_model="fast-test",
+            brain_llm_daily_token_budget=50_000,
+            brain_llm_max_briefings=2,
+        ):
+            cycle = await run_cycle(api)
+            run = by(cycle["runs"], "agent_id")["briefing"]
+            assert run["status"] == "ok" and run["model_tier"] == "fast"
+            briefs = [o for o in cycle["opinions"] if o["agent_id"] == "briefing"]
+            assert len(briefs) == 2 == len(model.requests)
+            for o in briefs:  # context for people, never a vote or a graded forecast
+                assert o["stance"] == "abstain" and o["thesis"].startswith("briefing (fast-test)")
+                assert o["meta"]["briefing"]["summary"] == "The agents lean one way."
+            voters = {v["agent_id"] for c in cycle["consensus"] for v in c["detail"]["votes"]}
+            assert "briefing" not in voters
+            preds = await api.container.brain.store.predictions()
+            assert preds and all(p.source_id != "briefing" for p in preds)
+            request, name = model.requests[0]
+            assert name == "fast-test" and request.task.value == "summarize" and request.purpose == "briefing"
+
+            usage = (await api.get(f"{BRAIN}/models")).json()
+            assert usage["available"] and usage["models"] == {"fast": "fast-test", "strong": None}
+            assert usage["usage"]["calls"] == 2 and usage["usage"]["tokens"] == 2 * 460
+            assert usage["usage"]["by_purpose"] == {"briefing": 920} and len(usage["recent"]) == 2
+            status = (await api.get(f"{BRAIN}/status")).json()
+            assert (
+                "scripted-test" in status["language_models"] and "920 of 50,000" in status["language_models"]
+            )
+
+            portfolio = await run_cycle(api, kind="portfolio")  # cheaper cycles leave the model out
+            reason = by(portfolio["runs"], "agent_id")["briefing"]["reason"]
+            assert reason == "not needed for a portfolio cycle" and len(model.requests) == 2
+            assert only_reads(api.fake)
+    finally:
+        unregister_provider("scripted-test")
 
 
 async def test_the_kill_switch_makes_the_brain_defensive(tmp_path):

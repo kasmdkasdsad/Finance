@@ -27,6 +27,7 @@ from .events import Event, EventBus, EventType
 from .improvement import ImprovementEngine
 from .lab.service import StrategyLab
 from .learning import Learner, PredictionRecorder
+from .llm import ModelRouter
 from .memory import MemoryStore
 from .orchestrator import Orchestrator
 from .perception import Perception
@@ -73,6 +74,7 @@ class BrainService:
         self.registry = AgentRegistry(default_agents())
         self.store = BrainStore(db)
         self.memory = MemoryStore(db)
+        self.models = ModelRouter(settings, clock, store=self.store)  # 'none' unless a provider is configured
         self.perception = Perception(
             settings, clock, data, BrokerView(broker), trading, reference, model, options
         )
@@ -85,6 +87,7 @@ class BrainService:
             self.memory,
             PredictionRecorder(db),
             self.bus,
+            self.models,
         )
         self._synced = False
         self.learner = (
@@ -218,6 +221,17 @@ class BrainService:
     async def memories(self, **filters: Any) -> list[dict[str, Any]]:
         return await self.memory.recall(now=self._clock.now(), **filters)
 
+    def _models_line(self) -> str:
+        m = self.models.status()
+        if not m["available"]:
+            return f"not in use — {m['reason']}; every analysis is deterministic"
+        u = m["usage"]
+        return (
+            f"{m['provider']} (fast: {m['models']['fast'] or '—'}, strong: {m['models']['strong'] or '—'}); "
+            f"{u['tokens'] + u['estimated']:,} of {m['daily_token_budget']:,} tokens used today, "
+            f"{u['calls']} calls, {u['cached']} answered from cache"
+        )
+
     async def status(self) -> dict[str, Any]:
         await self._sync()
         recent = await self.store.cycles(1)
@@ -235,6 +249,7 @@ class BrainService:
                 "enabled": sum(1 for a in self.registry.all() if self.registry.enabled(a.spec.id)),
             },
             "running": bool(job is not None and job.task is not None and not job.task.done()),
+            "language_models": self._models_line(),
             "last_cycle": recent[0] if recent else None,
             "open_predictions": preds["open"],
             "learning": (

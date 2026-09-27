@@ -9,8 +9,9 @@ or the network directly — everything it needs is in the context.
 against what the market did) from *constraints* (data quality, portfolio fit: they veto or shape actions
 but are not price forecasts and are never graded as such).
 
-A language-model agent implements the same interface; its spec says ``model_tier`` FAST or STRONG and the
-model router decides whether it may run (budget, availability). No such agent exists yet.
+A language-model agent implements the same interface; its spec says ``model_tier`` FAST or STRONG, it
+reaches the model only through the context's :class:`~quantpulse.brain.llm.ModelRouter` (budget, cache,
+timeout), and it skips itself when no model is available. The briefing agent is the only one.
 """
 
 from __future__ import annotations
