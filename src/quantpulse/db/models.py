@@ -987,3 +987,65 @@ class BrainStrategyRunRow(Base):
     kind: Mapped[str] = mapped_column(String(16))  # validation | paper
     result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainBookPositionRow(Base):
+    """A position in the Brain's hypothetical paper book (never an Alpaca position)."""
+
+    __tablename__ = "brain_book_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(24), unique=True)
+    qty: Mapped[float] = mapped_column(Float)
+    avg_cost: Mapped[float] = mapped_column(Float)  # per share, including simulated slippage and costs
+    last_price: Mapped[float] = mapped_column(Float)
+    opened_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    invalidation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    thesis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    horizon_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    review_after: Mapped[date | None] = mapped_column(Date, nullable=True)
+    entry_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class BrainBookTradeRow(Base):
+    """A simulated fill in the Brain's paper book: what was proposed, what the simulation paid, and why."""
+
+    __tablename__ = "brain_book_trades"
+    __table_args__ = (Index("ix_brain_book_trades_symbol", "symbol", "executed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    executed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    symbol: Mapped[str] = mapped_column(String(24))
+    side: Mapped[str] = mapped_column(String(4))  # buy | sell
+    action: Mapped[str] = mapped_column(String(16))
+    qty: Mapped[float] = mapped_column(Float)
+    proposed_price: Mapped[float] = mapped_column(Float)
+    fill_price: Mapped[float] = mapped_column(Float)
+    notional: Mapped[float] = mapped_column(Float)
+    slippage_bps: Mapped[float] = mapped_column(Float)  # fill vs proposed, positive = worse
+    cost: Mapped[float] = mapped_column(Float)  # simulated fees
+    price_source: Mapped[str] = mapped_column(String(64))
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holding_days: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BrainBookEquityRow(Base):
+    """The paper book marked to market after a cycle (the last one of each day is that day's close)."""
+
+    __tablename__ = "brain_book_equity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    equity: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    invested: Mapped[float] = mapped_column(Float)
+    positions: Mapped[int] = mapped_column(Integer)
+    benchmark_price: Mapped[float | None] = mapped_column(Float, nullable=True)

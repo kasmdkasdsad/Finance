@@ -84,9 +84,9 @@ class DataQualityAgent(Agent):
         )
         if ctx.price_status is DataStatus.SYNTHETIC:
             problems.append("price history is synthetic")
-        if not ctx.portfolio.available:
-            problems.append(f"broker unavailable ({ctx.portfolio.error})")
-        elif ctx.portfolio.account is not None and ctx.portfolio.account.blocked:
+        if not ctx.account.available:  # the market clock and the trading controls cannot be confirmed
+            problems.append(f"broker unavailable ({ctx.account.error})")
+        elif ctx.account.account is not None and ctx.account.account.blocked:
             problems.append("Alpaca reports the account blocked")
         for source, err in ctx.provider_errors.items():
             ev.append(
@@ -117,7 +117,7 @@ class DataQualityAgent(Agent):
             state, thesis = DataState.MARKET_CLOSED, "market closed: daily data only, nothing is executable"
         elif problems:
             state, thesis = (
-                DataState.PROVIDER_ERROR if not ctx.portfolio.available else DataState.STALE,
+                DataState.PROVIDER_ERROR if not ctx.account.available else DataState.STALE,
                 "; ".join(problems),
             )
         else:

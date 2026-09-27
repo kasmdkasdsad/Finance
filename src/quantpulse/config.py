@@ -554,6 +554,26 @@ class Settings(BaseSettings):
         le=120,
         description="Time budget for each extra evidence fetch (options, earnings).",
     )
+    brain_book_capital: float = Field(
+        default=100_000.0,
+        gt=0,
+        description="Starting capital of the Brain's hypothetical paper book (simulated; never an Alpaca account).",
+    )
+    brain_book_slippage_bps: float = Field(
+        default=5.0,
+        ge=0,
+        le=200,
+        description="Simulated slippage beyond half the quoted spread on every paper-book fill.",
+    )
+    brain_book_cost_bps: float = Field(
+        default=1.0, ge=0, le=100, description="Simulated fees on every paper-book fill (of notional)."
+    )
+    brain_book_default_half_spread_bps: float = Field(
+        default=5.0,
+        ge=0,
+        le=200,
+        description="Half-spread assumed when no believable bid/ask exists (an assumption, labelled on each fill).",
+    )
     brain_llm_provider: str = Field(
         default="none",
         description="Language-model provider for the optional model-backed agents ('none': every analysis is "

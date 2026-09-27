@@ -23,7 +23,8 @@ from typing import Any
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
 
-from .consensus import Consensus, ReliabilityBook, build_consensus
+from .book import Fill, PaperBook, expected_by_subject
+from .consensus import CONSENSUS_VERSION, Consensus, ReliabilityBook, build_consensus
 from .context import BrainContext
 from .debate import Debate, review
 from .decisions import Proposal, plan, risk_preview
@@ -52,6 +53,8 @@ class CycleResult:
     proposals: list[Proposal] = field(default_factory=list)
     debates: dict[str, Debate] = field(default_factory=dict)
     predictions: int = 0
+    fills: list[Fill] = field(default_factory=list)  # simulated in the Brain's paper book
+    mark: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
 
@@ -67,6 +70,7 @@ class Orchestrator:
         recorder: PredictionRecorder,
         bus: EventBus | None = None,
         models: ModelRouter | None = None,
+        book: PaperBook | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -77,6 +81,7 @@ class Orchestrator:
         self._recorder = recorder
         self._bus = bus
         self._models = models
+        self._book = book
         self._lock = asyncio.Lock()
         self.last_ctx: BrainContext | None = None  # the latest completed cycle's picture (for the monitor)
 
@@ -165,7 +170,19 @@ class Orchestrator:
             now = self._clock.now()
             await self._store.save_runs(cycle_id, runs, skips, now)
             consensus_ids = await self._store.save_consensus(cycle_id, result.consensus, now)
-            await self._store.save_decisions(cycle_id, result.proposals, consensus_ids, mode.value, now)
+            decision_ids = await self._store.save_decisions(
+                cycle_id, result.proposals, consensus_ids, mode.value, now
+            )
+            if self._book is not None:  # the Brain's paper book: simulated fills, never a broker order
+                result.fills = await self._book.execute(
+                    ctx,
+                    result.proposals,
+                    cycle_id=cycle_id,
+                    decision_ids=decision_ids,
+                    expected=expected_by_subject(result.consensus, reliability, CONSENSUS_VERSION),
+                )
+                await self._store.record_book_fills(decision_ids, result.fills)
+                result.mark = await self._book.mark(ctx, cycle_id)
             await self._store.save_debates(cycle_id, result.debates, now)
             await self._store.save_opportunities(cycle_id, ctx.opportunities, now)
             forecasts = [
@@ -427,8 +444,16 @@ class Orchestrator:
                 "situation": ctx.working.facts.get("situation") or {},
             },
             "portfolio": {
+                "owner": "the Brain's paper book (hypothetical)"
+                if self._book is not None
+                else "Alpaca account",
                 **ctx.portfolio.summary(),
                 "constraints": ctx.working.facts.get("portfolio_constraints"),
+                "book": {"fills": [f.to_dict() for f in result.fills], "mark": result.mark},
+                "alpaca_account": {
+                    "owner": "the trading strategy (the Brain only reads it)",
+                    **ctx.account.summary(),
+                },
                 "trading_controls": {
                     "orders_would_reach_alpaca": not ctx.trading_blockers,
                     "blockers": ctx.trading_blockers,
@@ -469,6 +494,7 @@ class Orchestrator:
                 "risk_approved": sum(1 for p in result.proposals if p.risk_approved),
                 "predictions_recorded": result.predictions,
                 "orders_sent": 0,
+                "book_fills": len(result.fills),
                 "opportunities": _count(o.status for o in ctx.opportunities),
                 "debates": _count(d.verdict for d in result.debates.values()),
                 "posture": (ctx.working.facts.get("situation") or {}).get("posture"),

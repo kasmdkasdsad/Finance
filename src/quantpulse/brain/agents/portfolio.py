@@ -1,5 +1,6 @@
-"""Portfolio agent: the Alpaca paper portfolio as a whole — concentration, sector exposure, beta,
-correlation, cash (margin), and positions at their stop — and whether each holding still fits.
+"""Portfolio agent: the Brain's paper book as a whole — concentration, sector exposure, beta, correlation,
+cash, and positions at their stop — and whether each holding still fits. (The Alpaca paper account belongs
+to the trading strategy; the Brain's decisions manage its own book.)
 
 It is a *constraint*: it does not forecast prices. Its findings (``meta['constraints']``) tell the
 decision step what must be reduced or closed, and what the portfolio cannot absorb, using the same limits
@@ -24,11 +25,11 @@ class PortfolioAgent(Agent):
     role = "constraint"
     spec = AgentSpec(
         id="portfolio",
-        source="account",
+        source="book",
         failure="no portfolio hints; the decision step still checks portfolio fit and the risk engine still checks every limit",
         name="Portfolio",
-        description="Concentration, sector exposure, beta, correlation, cash and stop-losses of the paper "
-        "portfolio; whether each holding still fits.",
+        description="Concentration, sector exposure, beta, correlation, cash and stop-losses of the Brain's "
+        "paper book; whether each holding still fits.",
         family=AgentFamily.PORTFOLIO,
         capabilities=("concentration", "sector_exposure", "beta", "correlation", "cash", "stop_loss"),
         inputs=("portfolio", "limits"),
@@ -39,7 +40,7 @@ class PortfolioAgent(Agent):
 
     def unavailable(self, ctx: BrainContext) -> str | None:
         if not ctx.portfolio.available:
-            return f"the paper account could not be read ({ctx.portfolio.error})"
+            return f"the paper book could not be read ({ctx.portfolio.error})"
         return None
 
     def subjects(self, ctx: BrainContext) -> list[str]:
@@ -66,7 +67,7 @@ class PortfolioAgent(Agent):
             horizon_days=0,
             thesis=thesis,
             evidence=ev,
-            data_used=["Alpaca paper account"],
+            data_used=["the Brain's paper book"],
             data_quality=DataState.LIVE,
             meta={"gradeable": False, **meta},
         )

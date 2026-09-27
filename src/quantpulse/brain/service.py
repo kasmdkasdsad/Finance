@@ -21,6 +21,7 @@ from quantpulse.services.trading import TradingService
 from quantpulse.services.trading_data import TradingDataLoader
 
 from .agents import default_agents
+from .book import PaperBook
 from .context import BrokerView
 from .evaluation import MarketPrices
 from .events import Event, EventBus, EventType
@@ -75,8 +76,9 @@ class BrainService:
         self.store = BrainStore(db)
         self.memory = MemoryStore(db)
         self.models = ModelRouter(settings, clock, store=self.store)  # 'none' unless a provider is configured
+        self.book = PaperBook(settings, db, clock)  # the Brain's own hypothetical portfolio
         self.perception = Perception(
-            settings, clock, data, BrokerView(broker), trading, reference, model, options, market
+            settings, clock, data, BrokerView(broker), trading, reference, model, options, market, self.book
         )
         self.orchestrator = Orchestrator(
             settings,
@@ -88,6 +90,7 @@ class BrainService:
             PredictionRecorder(db),
             self.bus,
             self.models,
+            self.book,
         )
         self._synced = False
         self.learner = (

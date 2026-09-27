@@ -1101,9 +1101,10 @@ read-only view (account, positions, open orders, clock): every Alpaca request it
 agents and one optional model-backed agent; working memory; opportunity detection; consensus with visible
 disagreement and an adversarial debate; proposed actions with a risk preview; grading of predictions
 against real prices, reflection and measured track records; a supervisor that runs by session and by
-event; a strategy lab; self-improvement proposals; a provider-agnostic language-model layer (no provider
-is built in); persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Paper
-Trading*). What is not built is listed under [Known limitations](#known-limitations).
+event; the Brain's own paper book; a strategy lab; self-improvement proposals; a provider-agnostic
+language-model layer (no provider is built in); persistence of every cycle; and the **Brain** page in
+the UI (under *Alpaca Paper Trading*). What is not built is listed under
+[Known limitations](#known-limitations).
 
 ### One cycle
 
@@ -1532,17 +1533,57 @@ An agent returns structured `Opinion`s: stance, score (−1…1), confidence, ho
 data used and missing, data quality, invalidation and veto. A model-backed agent implements the same
 `Agent` interface with a `model_tier` of `fast` or `strong`.
 
+### Portfolio ownership
+
+There are two portfolios, and each has exactly one owner:
+
+| Portfolio | Owner | Who sets its targets | Who can trade it |
+|---|---|---|---|
+| **Alpaca paper account** | the trading strategy (`services/trading.py`) | the strategy's signals and portfolio construction | only the trading service, through its risk engine, live-data and spread checks, trading controls and order manager |
+| **Brain paper book** (hypothetical) | the Brain | the Brain's decisions | nobody: trades are simulated in QuantPulse's database |
+
+The Brain *reads* the Alpaca account (as context, and to check the broker's clock and trading controls)
+and never decides anything for it. Its decisions (buy, increase, reduce, close, rebalance, de-risk) are
+made for its own book. They are previewed by the **same** deterministic risk engine and limits that guard
+real orders (`RiskBook` with `RiskLimits` from the `QP_TRADING_*` settings: position and order size, cash
+reserve, daily loss, kill switch, live data, spread). There is one risk layer, not a second one.
+
+Letting the Brain manage the Alpaca paper account would mean deciding who owns that account's targets:
+the strategy, the Brain, or the Brain feeding the strategy. Any such orders would still have to go
+through the trading service's existing controls. That decision, and the first human-confirmed
+Brain-originated paper order, are yours; nothing in this release makes them.
+
+### The paper book
+
+`GET /brain/book` and the page's *Paper book* tab. Every trade the risk engine allows (`recommended` or
+`dry_run_approved`) is simulated as follows:
+
+* **Fills.** The price is the proposed price (the live last trade) plus half the spread the quote
+  validation believed. That is the consolidated SIP quote when available, otherwise the single venue's,
+  or `QP_BRAIN_BOOK_DEFAULT_HALF_SPREAD_BPS` when no spread could be believed (labelled as an
+  assumption). `QP_BRAIN_BOOK_SLIPPAGE_BPS` is added, against the trade's direction, and fees are
+  `QP_BRAIN_BOOK_COST_BPS` of notional.
+* **Order and cash.** Sells go first. A buy never uses more than the book's cash (no margin).
+* **Positions.** Each carries its entry, a stop (`QP_TRADING_MAX_POSITION_LOSS_PCT` below the average
+  cost, the same stop the portfolio agent enforces), the thesis and invalidation it was bought on, the
+  expected return (once the consensus is calibrated; otherwise empty), its horizon and a review date.
+* **Tracking.** The book is marked to market after every cycle; the last mark of a day is that day's
+  close. Performance comes only from these marks and fills: return against the benchmark over the same
+  days, volatility, Sharpe, Sortino, information ratio, beta, maximum and current drawdown, turnover,
+  slippage, fees, and closed trades' hit rate and holding time. It is flagged *too short to judge* below
+  20 sessions.
+* **Reset.** `POST /brain/book/reset {"confirm": "RESET BOOK"}` starts the book again from
+  `QP_BRAIN_BOOK_CAPITAL` and deletes its history.
+
 ### Modes
 
 `QP_BRAIN_MODE`:
 
 * `research_only`: analysis, consensus, predictions and memory only; no proposed actions.
-* `dry_run`: proposed actions previewed by the risk engine.
-* `paper_recommendation` (default): the same, labelled as recommendations for the paper account.
+* `dry_run`: proposed actions previewed by the risk engine, and simulated in the paper book.
+* `paper_recommendation` (default): the same, labelled as recommendations.
 
-There is no execution mode: the brain cannot place orders. Its proposals are recommendations; the
-existing trading service (with its own risk engine, live-data, spread and trading-control checks and order
-manager) is the only path to the Alpaca paper account.
+There is no execution mode: the brain cannot place orders.
 
 ### API
 
@@ -1559,6 +1600,7 @@ manager) is the only path to the Alpaca paper account.
 | `GET /brain/learning` · `/performance?window=` · `/reflections?category=` | Prediction counts, last pass and calibration · measured track records · reflections and failure analyses |
 | `GET /brain/supervisor` · `POST /brain/supervisor {"paused": true}` | Supervisor state (session, schedule, queued wake-ups, recent work) · pause or resume |
 | `GET /brain/events?type=&subject=` | Recorded events, newest first |
+| `GET /brain/book?trades=` · `POST /brain/book/reset {"confirm": "RESET BOOK"}` | The Brain's paper book: positions, simulated fills, equity curve, performance · start it again |
 | `GET /brain/models` | Language models: provider, tier models, today's token budget and usage, recent calls (never prompts, answers or keys) |
 | `GET /brain/lab/templates` · `/lab/strategies?status=` · `/lab/strategies/{id}/{version}` · `/lab/compare?keys=` | Strategy templates · versions · one version with its runs · versions side by side |
 | `GET /brain/improvements?status=` · `POST /brain/improvements/review` · `POST /brain/improvements/{id} {"status": …, "note": …}` | Improvement proposals · review the record now · record a person's decision (nothing is applied automatically) |
@@ -1604,6 +1646,7 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0011_brain` | `brain_agents`, `brain_cycles`, `brain_agent_runs`, `brain_opinions`, `brain_consensus`, `brain_decisions`, `brain_predictions`, `brain_memory`, `brain_reflections`, `brain_agent_performance`, `brain_improvements`, `brain_events`, `brain_state` |
 | `0012_brain_research` | `brain_opportunities` (with the pipeline trace), `brain_debates` |
 | `0013_brain_strategy_lab` | `brain_strategies` (versioned specs, status, validation and paper results), `brain_strategy_runs` |
+| `0015_brain_paper_book` | `brain_book_positions`, `brain_book_trades` (simulated fills), `brain_book_equity` (marks) |
 | `0014_brain_prediction_quality` | `brain_predictions.expected_return`; `brain_agent_performance`: independent observations, Wilson interval, p- and q-values, verdict, mean excess (raw and in risk units) |
 
 ```bash
@@ -1742,8 +1785,11 @@ tests/                   unit · providers · integration · frontend · fixture
   * Cycles need the API process to be running. Performance statistics need weeks of recorded cycles
     before they mean anything.
 * **The Brain:**
-  * It recommends; it never trades. There is no hand-off from a Brain proposal to the order manager:
-    acting on one is a person's decision, through the trading service and all of its checks.
+  * It never trades. Its decisions are simulated in its own paper book. There is no hand-off from a
+    Brain decision to the Alpaca paper account: who owns that account's targets, and whether a person
+    confirms Brain-originated paper orders, is still to be decided (see *Portfolio ownership*).
+  * The paper book's fills are modelled (spread, slippage, fees); real fills can differ, especially in
+    thin names or fast markets.
   * Track records start empty. Every agent is *unproven* (weight 1.0) until its calls are graded, which
     takes weeks; thresholds such as `QP_BRAIN_MIN_CONFIDENCE` are starting values until calibration
     confirms or changes them.

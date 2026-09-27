@@ -23,6 +23,12 @@ class AgentToggleIn(StrictModel):
     enabled: bool
 
 
+class BookResetIn(StrictModel):
+    confirm: str = Field(
+        ..., max_length=32, description='Type exactly "RESET BOOK": the book\'s history is deleted.'
+    )
+
+
 class SupervisorIn(StrictModel):
     paused: bool
 

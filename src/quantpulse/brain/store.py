@@ -300,32 +300,44 @@ class BrainStore:
         consensus_ids: dict[str, int],
         mode: str,
         now: datetime,
-    ) -> None:
+    ) -> dict[str, int]:
+        """Decisions of one cycle; returns their ids by subject."""
+        ids: dict[str, int] = {}
         async with self._db.session() as s:
             for p in proposals:
                 d = p.to_dict()
-                s.add(
-                    BrainDecisionRow(
-                        cycle_id=cycle_id,
-                        consensus_id=consensus_ids.get(p.subject),
-                        subject=p.subject,
-                        action=p.action.value,
-                        mode=mode,
-                        status=p.status,
-                        confidence=d["confidence"],
-                        quantity=p.quantity,
-                        est_price=p.est_price,
-                        notional=d["notional"],
-                        current_weight=p.current_weight,
-                        target_weight=p.target_weight,
-                        rationale={"reasons": p.reasons, "blocked_by": p.blocked_by, "fit": p.fit},
-                        risk_approved=p.risk_approved,
-                        risk=p.risk,
-                        execution={"sent": False, "reason": "the brain never sends orders itself"},
-                        outcome={},
-                        created_at=now,
-                    )
+                row = BrainDecisionRow(
+                    cycle_id=cycle_id,
+                    consensus_id=consensus_ids.get(p.subject),
+                    subject=p.subject,
+                    action=p.action.value,
+                    mode=mode,
+                    status=p.status,
+                    confidence=d["confidence"],
+                    quantity=p.quantity,
+                    est_price=p.est_price,
+                    notional=d["notional"],
+                    current_weight=p.current_weight,
+                    target_weight=p.target_weight,
+                    rationale={"reasons": p.reasons, "blocked_by": p.blocked_by, "fit": p.fit},
+                    risk_approved=p.risk_approved,
+                    risk=p.risk,
+                    execution={"sent": False, "reason": "the brain never sends orders itself"},
+                    outcome={},
+                    created_at=now,
                 )
+                s.add(row)
+                await s.flush()
+                ids[p.subject] = row.id
+        return ids
+
+    async def record_book_fills(self, ids: dict[str, int], fills: Sequence[Any]) -> None:
+        """Note on each decision how the Brain's paper book simulated it (never a broker order)."""
+        async with self._db.session() as s:
+            for f in fills:
+                row = await s.get(BrainDecisionRow, ids.get(f.symbol, -1))
+                if row is not None:
+                    row.execution = {**(row.execution or {}), "book": f.to_dict()}
 
     async def save_opportunities(self, cycle_id: int, items: Sequence[Opportunity], now: datetime) -> None:
         async with self._db.session() as s:

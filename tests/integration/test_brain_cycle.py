@@ -79,6 +79,22 @@ async def brain_client(tmp_path, clock, fake=None, feed=None, client_host="127.0
         yield api
 
 
+async def seed_book(api, positions: dict[str, tuple[float, float]]) -> None:
+    """Positions already in the Brain's paper book (test data): symbol -> (quantity, price paid)."""
+    from quantpulse.db.models import BrainBookPositionRow, BrainStateRow
+
+    await api.container.brain.book.load()  # opens the book at its starting capital
+    now = api.container.clock.now()
+    async with api.container.db.session() as s:
+        row = await s.get(BrainStateRow, "book")
+        cash = float(row.value["cash"])
+        for sym, (qty, price) in positions.items():
+            s.add(BrainBookPositionRow(symbol=sym, qty=qty, avg_cost=price, last_price=price, opened_at=now,
+                                       updated_at=now, stop_price=round(price * 0.92, 4)))  # fmt: skip
+            cash -= qty * price
+        row.value = {**row.value, "cash": cash}
+
+
 def with_stock_model(monkeypatch) -> None:
     """A completed stock-model run as test data (through the real service interface): the fundamental,
     valuation and factor agents then see the uptrend names as better — a second and third source of
@@ -116,7 +132,8 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
     with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
     async for api in brain_client(tmp_path, clock, brain_use_stock_model=True):
-        api.fake.hold("UPA", 40, 60.0)  # a small existing position
+        api.fake.hold("UPA", 40, 60.0)  # the strategy's Alpaca position: context only for the Brain
+        await seed_book(api, {"UPA": (40, 60.0)})  # the Brain's own (hypothetical) position
         cycle = await run_cycle(api)
 
         # perception: session, regime, the paper account, focus
@@ -124,6 +141,9 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         assert cycle["mode"] == "paper_recommendation" and cycle["session"] == "market_open"
         assert cycle["regime"]["label"] == "bullish" and cycle["market"]["clock"] == "alpaca"
         assert cycle["portfolio"]["available"] and cycle["portfolio"]["positions"]["UPA"]["qty"] == 40
+        assert "paper book" in cycle["portfolio"]["owner"]  # two portfolios, one owner each
+        alpaca = cycle["portfolio"]["alpaca_account"]
+        assert "trading strategy" in alpaca["owner"] and alpaca["positions"]["UPA"]["qty"] == 40
         controls = cycle["portfolio"]["trading_controls"]  # read, never acted on
         assert not controls["orders_would_reach_alpaca"]
         assert any("QP_ALPACA_TRADING_ENABLED=false" in b for b in controls["blockers"])
@@ -173,10 +193,19 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         assert trades and sum(d["action"] == "buy" for d in trades) <= 2  # brain_max_new_positions_per_cycle
         for d in trades:
             assert d["risk"]["checks"] and d["status"] in {"recommended", "risk_rejected", "blocked"}
-            assert d["execution"] == {"sent": False, "reason": "the brain never sends orders itself"}
+            ex = d["execution"]
+            assert ex["sent"] is False and ex["reason"] == "the brain never sends orders itself"
             if d["risk_approved"]:
                 assert d["notional"] <= 15_000  # sized within the risk engine's per-order limit
+            if d["status"] == "recommended":  # simulated in the Brain's paper book, not sent anywhere
+                fill = ex["book"]
+                side = 1 if fill["side"] == "buy" else -1
+                assert side * (fill["fill_price"] - d["est_price"]) > 0 and fill["slippage_bps"] > 0
+                assert fill["cost"] > 0 and fill["qty"] <= d["quantity"]
+            else:
+                assert "book" not in ex  # blocked or rejected: nothing simulated either
         assert any(d["status"] == "recommended" for d in trades)
+        assert cycle["summary"]["book_fills"] == sum(d["status"] == "recommended" for d in trades)
         for d in cycle["decisions"]:
             if d["action"] not in TRADES:
                 assert d["status"] == "no_trade" and d["rationale"]["reasons"]
@@ -437,12 +466,14 @@ async def test_broker_unavailable_degrades_to_analysis_only(tmp_path):
     async for api in brain_client(tmp_path, clock, fake=fake):
         cycle = await run_cycle(api)
         assert cycle["status"] == "completed"
-        assert cycle["portfolio"]["available"] is False and cycle["portfolio"]["error"]
+        alpaca = cycle["portfolio"]["alpaca_account"]
+        assert alpaca["available"] is False and alpaca["error"]
         assert cycle["market"]["clock"] == "calendar"  # fell back to the exchange calendar
         assert "broker unavailable" in cycle["data_quality"]["market"]["veto"]
         assert cycle["consensus"]  # the analysis still happened
         trades = [d for d in cycle["decisions"] if d["action"] in TRADES]
-        assert all(d["status"] == "not_checked" and not d["risk_approved"] for d in trades)
+        assert all(d["status"] in ("blocked", "risk_rejected") for d in trades)  # nothing executable
+        assert cycle["summary"]["book_fills"] == 0
         assert ("POST", "/v2/orders") not in fake.log
 
 
@@ -675,7 +706,7 @@ async def test_a_configured_model_writes_briefings_that_never_vote_or_trade(tmp_
 async def test_the_kill_switch_makes_the_brain_defensive(tmp_path):
     clock = FakeClock(NOW)
     async for api in brain_client(tmp_path, clock):
-        api.fake.hold("UPA", 40, 60.0)
+        await seed_book(api, {"UPA": (40, 60.0)})
         r = await api.post(
             "/api/v1/trading/kill-switch",
             json={"active": True, "reason": "test", "cancel_open_orders": False},
@@ -764,3 +795,86 @@ async def test_predictions_mature_and_the_brain_learns_from_them(tmp_path):
         status = (await api.get(f"{BRAIN}/status")).json()
         assert f"{learned['evaluated']} predictions graded" in status["learning"]
         assert only_reads(api.fake)
+
+
+async def next_session(api, clock: FakeClock) -> None:
+    """Close today's session in the fake market and move to 11:00 New York on the next trading day."""
+    from datetime import UTC, datetime, time
+
+    from quantpulse.core.market_calendar import NEW_YORK, next_trading_day
+
+    today = clock.now().astimezone(NEW_YORK).date()
+    extend_feed(api.feed, today)
+    nxt = datetime.combine(next_trading_day(today), time(11, 0), NEW_YORK).astimezone(UTC)
+    clock.advance((nxt - clock.now()).total_seconds())
+    for s in api.feed.bars:
+        api.fake.prices[s] = api.feed.live_price(s)
+
+
+async def test_the_brain_manages_its_own_paper_book_over_several_sessions(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, brain_use_stock_model=True):
+        api.fake.hold("UPC", 25, 70.0)  # the strategy's account: never touched by the Brain's book
+        first = await run_cycle(api)
+        bought = {f["symbol"] for f in first["portfolio"]["book"]["fills"] if f["side"] == "buy"}
+        assert bought and first["summary"]["book_fills"] >= len(bought)
+        for _ in range(3):
+            await next_session(api, clock)
+            await run_cycle(api)
+        book = (await api.get(f"{BRAIN}/book")).json()
+        assert "hypothetical" in book["owner"] and book["capital"] == 100_000
+        held = {p["symbol"]: p for p in book["positions"]}
+        assert bought <= set(held)  # positions persist across cycles and days
+        for p in held.values():  # every position says why it exists and what would end it
+            assert p["qty"] > 0 and p["avg_cost"] > 0 and p["thesis"]
+            assert p["stop_price"] == pytest.approx(p["avg_cost"] * 0.92, rel=0.01)
+            assert p["review_after"] and p["expected_return"] is None  # uncalibrated: nothing invented
+        assert len(book["equity_curve"]) == 4  # one close per session
+        perf = book["performance"]
+        assert perf["sessions"] == 4 and perf["too_short_to_judge"] and perf["trades"] == len(book["trades"])
+        assert perf["costs"] > 0 and perf["slippage"] > 0 and "benchmark_return" in perf
+        spent = sum(t["notional"] + t["cost"] for t in book["trades"] if t["side"] == "buy")
+        received = sum(t["notional"] - t["cost"] for t in book["trades"] if t["side"] == "sell")
+        assert book["cash"] == pytest.approx(
+            100_000 - spent + received, abs=0.05
+        )  # every dollar accounted for
+        assert "UPC" not in held and only_reads(api.fake)  # zero orders; the Alpaca account is untouched
+        assert api.fake.positions["UPC"]["qty"] == 25
+
+
+async def test_a_book_position_at_its_stop_is_closed_and_its_loss_recorded(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock):
+        price = api.feed.live_price("DNA")
+        await seed_book(api, {"DNA": (10, price / 0.85)})  # bought 15% higher: past the 8% stop
+        cycle = await run_cycle(api)
+        dna = by(cycle["decisions"])["DNA"]
+        assert dna["action"] == "close" and dna["status"] == "recommended"
+        fill = dna["execution"]["book"]
+        assert fill["side"] == "sell" and fill["qty"] == 10 and fill["realized_pnl"] < 0
+        book = (await api.get(f"{BRAIN}/book")).json()
+        assert "DNA" not in {p["symbol"] for p in book["positions"]}
+        assert book["performance"]["closed_trades"] == 1 and book["performance"]["closed_hit_rate"] == 0.0
+        spent = sum(t["notional"] + t["cost"] for t in book["trades"] if t["side"] == "buy")
+        received = sum(t["notional"] - t["cost"] for t in book["trades"] if t["side"] == "sell")
+        assert book["cash"] == pytest.approx(100_000 - 10 * price / 0.85 - spent + received, abs=0.05)
+        assert fill["realized_pnl"] == pytest.approx(
+            (fill["fill_price"] - price / 0.85) * 10 - fill["cost"], abs=0.01
+        )
+        assert only_reads(api.fake)
+
+
+async def test_the_book_is_reset_only_deliberately(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock):
+        await seed_book(api, {"UPA": (10, 60.0)})
+        refused = await api.post(f"{BRAIN}/book/reset", json={"confirm": "yes"})
+        assert refused.status_code == 422 and len((await api.get(f"{BRAIN}/book")).json()["positions"]) == 1
+        done = await api.post(f"{BRAIN}/book/reset", json={"confirm": "RESET BOOK"})
+        assert done.status_code == 200 and done.json()["positions"] == [] and done.json()["cash"] == 100_000
+    async for api in brain_client(tmp_path / "remote", clock, client_host="203.0.113.9"):
+        assert (await api.post(f"{BRAIN}/book/reset", json={"confirm": "RESET BOOK"})).status_code in (
+            401,
+            403,
+        )

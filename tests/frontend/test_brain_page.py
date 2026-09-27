@@ -97,7 +97,11 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     consensus = next(f for f in frames if "disagreement" in f.columns)
     assert {"supporting", "neutral", "opposing", "confidence", "data"} <= set(consensus.columns)
     actions = next(f for f in frames if "④ execution" in f.columns)
-    assert (actions["④ execution"] == "not sent (the Brain never sends orders)").all()
+    assert all(
+        e == "not sent (the Brain never sends orders)"
+        or (e.startswith("paper book:") and "not sent to Alpaca" in e)
+        for e in actions["④ execution"]
+    )
     assert set(actions["③ risk preview"]) <= {
         "Risk engine: would allow (recommendation only)",
         "Risk engine: rejected",
@@ -119,6 +123,8 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert any("Nothing is applied automatically" in m.value for m in at.markdown)
     assert any("Every analysis is deterministic" in i.value for i in at.info)  # no language model configured
     assert "Language models: not in use" in text
+    assert any("The Brain's paper book" in m.value for m in at.markdown)  # its own, hypothetical portfolio
+    assert any("owned by the trading strategy" in e.label for e in at.expander)
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
     assert "AgentCompleted" in set(events["event"])
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}

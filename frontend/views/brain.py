@@ -129,23 +129,35 @@ def _overview(cycle: dict[str, Any]) -> None:
 
     left, right = st.columns(2)
     with left:
-        st.subheader("Portfolio (Alpaca paper, read only)")
+        st.subheader("The Brain's paper book (hypothetical)")
         pf = cycle.get("portfolio") or {}
-        if not pf.get("available"):
-            st.warning(_md(f"Paper account unavailable: {pf.get('error')}"), icon=":material/cloud_off:")
-        else:
-            st.markdown(
-                f"Equity **{money(pf.get('equity'))}** · cash {money(pf.get('cash'))} · "
-                f"{len(pf.get('positions') or {})} positions · {pf.get('open_orders', 0)} open orders"
+        st.caption(
+            "Owned by the Brain: its decisions are simulated here at modelled prices after the risk engine allows "
+            "them. Never sent to a broker."
+        )
+        st.markdown(
+            f"Equity **{money(pf.get('equity'))}** · cash {money(pf.get('cash'))} · "
+            f"{len(pf.get('positions') or {})} positions · {len((pf.get('book') or {}).get('fills') or [])} "
+            "simulated fills this cycle"
+        )
+        rows = [{"symbol": s, **p} for s, p in (pf.get("positions") or {}).items()]
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        cons = pf.get("constraints") or {}
+        if cons:
+            st.caption(
+                f"Exposure {pct(cons.get('exposure'), 1)} · spendable cash {money(cons.get('spendable_cash'))} · "
+                f"free slots {cons.get('free_slots')} · beta {num(cons.get('beta'))}"
             )
-            rows = [{"symbol": s, **p} for s, p in (pf.get("positions") or {}).items()]
-            if rows:
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-            cons = pf.get("constraints") or {}
-            if cons:
-                st.caption(
-                    f"Exposure {pct(cons.get('exposure'), 1)} · spendable cash {money(cons.get('spendable_cash'))} · "
-                    f"free slots {cons.get('free_slots')} · beta {num(cons.get('beta'))}"
+        alpaca = pf.get("alpaca_account") or {}
+        with st.expander("Alpaca paper account — owned by the trading strategy (read only here)"):
+            if not alpaca.get("available"):
+                st.warning(_md(f"Unavailable: {alpaca.get('error')}"), icon=":material/cloud_off:")
+            else:
+                st.markdown(
+                    f"Equity {money(alpaca.get('equity'))} · cash {money(alpaca.get('cash'))} · "
+                    f"{len(alpaca.get('positions') or {})} positions · {alpaca.get('open_orders', 0)} open orders. "
+                    "The Brain makes no decisions for this account."
                 )
     with right:
         st.subheader("Data quality")
@@ -423,6 +435,67 @@ def _fit(fit: dict[str, Any]) -> str:
     )
 
 
+def _execution(d: dict[str, Any]) -> str:
+    fill = (d.get("execution") or {}).get("book")
+    if fill:
+        return (
+            f"paper book: {fill['side']} {fill['qty']:g} @ ${fill['fill_price']:,.2f} "
+            f"({fill['slippage_bps']:+.1f}bp) — not sent to Alpaca"
+        )
+    return "not sent (the Brain never sends orders)"
+
+
+def _book() -> None:
+    st.markdown(
+        "**The Brain's paper book** — a hypothetical portfolio the Brain manages. Every trade the risk engine "
+        "allows is simulated at the proposed price plus half the believed spread plus slippage, less fees. "
+        "Nothing here reaches a broker; the Alpaca paper account belongs to the trading strategy."
+    )
+    book = guarded(lambda: api().get(f"{BASE}/book"), "paper book")
+    if book is None:
+        return
+    perf = book.get("performance") or {}
+    c = st.columns(5)
+    c[0].metric("Equity", money(book["equity"]), help=f"started at {money(book['capital'])}")
+    c[1].metric("Return", pct(perf.get("total_return"), 2))
+    c[2].metric("Benchmark", pct(perf.get("benchmark_return"), 2))
+    c[3].metric("Max drawdown", pct(perf.get("max_drawdown"), 2))
+    c[4].metric("Sharpe", num(perf.get("sharpe")))
+    if perf.get("too_short_to_judge"):
+        st.info(
+            f"{perf.get('sessions', 0)} session(s) recorded: too short to judge (needs 20). The numbers are "
+            "reported, not trusted.",
+            icon=":material/hourglass_empty:",
+        )
+    st.caption(
+        f"Turnover {num(perf.get('turnover'))}× · slippage {money(perf.get('slippage'))} "
+        f"({num(perf.get('slippage_bps'))}bp) · fees {money(perf.get('costs'))} · closed trades "
+        f"{perf.get('closed_trades', 0)} (hit rate {pct(perf.get('closed_hit_rate'), 0)}) · realised "
+        f"{money(perf.get('realized_pnl'))}"
+    )
+    curve = book.get("equity_curve") or []
+    if len(curve) >= 2:
+        frame = pd.DataFrame(curve).set_index("day")
+        base = frame.iloc[0]
+        rebased = pd.DataFrame({"paper book": frame["equity"] / base["equity"]})
+        if frame["benchmark"].notna().all() and base["benchmark"]:
+            rebased["benchmark"] = frame["benchmark"] / base["benchmark"]
+        st.line_chart(rebased)
+    if book["positions"]:
+        st.markdown("**Positions** (entry, stop, the thesis and what would invalidate it)")
+        st.dataframe(pd.DataFrame(book["positions"]).astype(str), hide_index=True, use_container_width=True)
+    else:
+        st.caption("No positions.")
+    if book["trades"]:
+        st.markdown("**Simulated fills** (proposed price vs fill price)")
+        st.dataframe(pd.DataFrame(book["trades"]).astype(str), hide_index=True, use_container_width=True)
+    a = book.get("assumptions") or {}
+    st.caption(
+        f"Assumptions: slippage {a.get('slippage_bps')}bp, fees {a.get('cost_bps')}bp, "
+        f"{a.get('default_half_spread_bps')}bp half-spread when no bid/ask can be believed."
+    )
+
+
 def _decisions(cycle: dict[str, Any]) -> None:
     decisions = cycle.get("decisions") or []
     if not decisions:
@@ -432,7 +505,8 @@ def _decisions(cycle: dict[str, Any]) -> None:
         return
     st.markdown(
         "**Proposed portfolio actions → ③ risk preview → ④ execution.** The risk preview is the deterministic "
-        'risk engine\'s answer; *execution is always "not sent"* — the Brain has no order access.'
+        "risk engine's answer. The Brain has no order access: an allowed trade is only *simulated* in its paper "
+        "book, and nothing is ever sent to Alpaca."
     )
     rows = [
         {
@@ -445,7 +519,7 @@ def _decisions(cycle: dict[str, Any]) -> None:
             "confidence": round(d.get("confidence") or 0, 2),
             "③ risk preview": STATUS_LABEL.get(d["status"], d["status"]),
             "portfolio fit": _fit((d.get("rationale") or {}).get("fit") or {}),
-            "④ execution": "not sent (the Brain never sends orders)",
+            "④ execution": _execution(d),
             "why": "; ".join((d.get("rationale") or {}).get("reasons") or []),
         }
         for d in decisions
@@ -1001,6 +1075,7 @@ def render() -> None:
             "Strategy lab",
             "Improvements",
             "Supervisor & events",
+            "Paper book",
             "Memory",
             "History",
         ]
@@ -1024,6 +1099,8 @@ def render() -> None:
     with tabs[8]:
         _operations()
     with tabs[9]:
-        _memory()
+        _book()
     with tabs[10]:
+        _memory()
+    with tabs[11]:
         _history(cycles)

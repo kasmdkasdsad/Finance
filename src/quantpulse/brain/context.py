@@ -163,10 +163,12 @@ class BrainContext:
     model_z: dict[str, float]
     fundamentals: pd.DataFrame | None
     sectors: dict[str, str]
-    portfolio: PortfolioState
+    portfolio: PortfolioState  # the Brain's own paper book (hypothetical): what its decisions manage
     data_states: dict[str, DataState]
     limits: RiskLimits
     kill_switch: bool
+    # the Alpaca paper account, owned by the trading strategy: read only, context for the Brain
+    account: PortfolioState = field(default_factory=lambda: PortfolioState(available=False, error="not read"))
     data_health: dict[str, QuoteDiagnosis] = field(default_factory=dict)  # precise quote status per symbol
     feed: dict[str, Any] = field(default_factory=dict)  # the cycle's data report (feeds, clock skew, causes)
     trading_blockers: list[str] = field(default_factory=list)  # trading controls read now (never acted on)

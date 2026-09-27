@@ -15,6 +15,7 @@ from quantpulse.api.deps import ContainerDep
 from quantpulse.api.routers.trading import LOOPBACK
 from quantpulse.schemas.brain import (
     AgentToggleIn,
+    BookResetIn,
     BrainAgentOut,
     BrainCycleOut,
     BrainCycleSummaryOut,
@@ -180,6 +181,23 @@ async def supervisor(c: Container = ContainerDep) -> dict[str, Any]:
 @router.post("/supervisor", dependencies=ControlAuth, summary="Pause or resume the supervisor")
 async def pause_supervisor(body: SupervisorIn, c: Container = ContainerDep) -> dict[str, Any]:
     return await c.brain.supervisor.set_paused(body.paused)
+
+
+@router.get("/book", summary="The Brain's paper book: positions, simulated fills, equity curve, performance")
+async def book(trades: int = Query(100, ge=1, le=2000), c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.book.view(trades_limit=trades)
+
+
+@router.post(
+    "/book/reset", dependencies=ControlAuth, summary="Start the paper book again (deletes its history)"
+)
+async def reset_book(body: BookResetIn, c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.core.errors import DomainError
+
+    if body.confirm.strip() != "RESET BOOK":
+        raise DomainError('type exactly "RESET BOOK" to delete the paper book\'s history')
+    await c.brain.book.reset()
+    return await c.brain.book.view(trades_limit=10)
 
 
 @router.get(

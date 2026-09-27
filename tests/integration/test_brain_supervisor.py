@@ -12,7 +12,7 @@ from quantpulse.db.models import BrainEventRow, TradingEventRow
 from tests.fakes.alpaca_paper import FakeAlpacaPaper
 
 from .conftest import NOW
-from .test_brain_cycle import BRAIN, _no_network, brain_client, only_reads  # noqa: F401
+from .test_brain_cycle import BRAIN, _no_network, brain_client, only_reads, seed_book  # noqa: F401
 
 SATURDAY = datetime(2026, 9, 26, 15, 30, tzinfo=UTC)  # 11:30 New York
 AFTER_HOURS = datetime(2026, 9, 25, 20, 50, tzinfo=UTC)  # Friday 16:50 New York
@@ -72,13 +72,13 @@ async def test_the_trading_bridge_reads_orders_and_risk_events_without_writing(d
 async def test_cycles_emit_events_and_notice_portfolio_changes(tmp_path):
     clock = FakeClock(NOW)
     async for api in brain_client(tmp_path, clock):
-        api.fake.hold("UPA", 40, 60.0)
+        await seed_book(api, {"UPA": (40, 60.0)})
         await api.post(f"{BRAIN}/run")
         events = (await api.get(f"{BRAIN}/events", params={"limit": 500})).json()
         types = {e["type"] for e in events}
         assert "AgentCompleted" in types and "OpportunityDetected" in types
         assert "PortfolioChanged" not in types  # nothing to compare with yet
-        api.fake.hold("UPB", 10, 80.0)
+        await seed_book(api, {"UPB": (10, 80.0)})
         clock.advance(600)
         await api.post(f"{BRAIN}/run")
         changed = (await api.get(f"{BRAIN}/events", params={"type": "PositionChanged"})).json()
@@ -195,7 +195,7 @@ async def test_trading_events_wake_a_portfolio_review(tmp_path):
 async def test_routing_narrows_or_widens_the_cycle(tmp_path, kind):
     clock = FakeClock(NOW)
     async for api in brain_client(tmp_path, clock):
-        api.fake.hold("UPA", 40, 60.0)
+        await seed_book(api, {"UPA": (40, 60.0)})
         cycle = (
             await api.post(f"{BRAIN}/run", json={"kind": kind, "symbols": ["DNA"] if kind == "event" else []})
         ).json()

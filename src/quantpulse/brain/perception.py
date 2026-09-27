@@ -40,6 +40,7 @@ from quantpulse.services.trading import TradingService
 from quantpulse.services.trading_data import LiveQuote, TradingDataLoader, TradingInputs
 from quantpulse.services.trading_risk import RiskLimits
 
+from .book import PaperBook
 from .context import BrainContext, BrokerView, PortfolioState, brain_session
 from .data_health import closed_reason, diagnose, feed_report
 from .indicators import compute_indicators, market_statistics
@@ -106,6 +107,7 @@ class Perception:
         model: ModelService | None = None,
         options: OptionsService | None = None,
         market: MarketService | None = None,
+        book: PaperBook | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -116,6 +118,7 @@ class Perception:
         self._model = model
         self._options = options
         self._market = market
+        self._book = book  # the Brain's paper book: the portfolio its decisions manage
 
     async def _portfolio(self, errors: dict[str, str]) -> PortfolioState:
         if not self._broker.configured():
@@ -229,11 +232,25 @@ class Perception:
         self._notes: list[str] = []
         now = self._clock.now()
         errors: dict[str, str] = {}
-        portfolio = await self._portfolio(errors)
+        account = await self._portfolio(errors)  # the strategy's Alpaca account: read only, context
         market_open, clock_source, skew = await self._market_open(now, errors)
-        held = [s for s, p in portfolio.positions.items() if p.qty > 0]
+        book = await self._book.load() if self._book is not None else None
+        held = (
+            [s for s, p in book.positions.items() if p.qty > 0]
+            if book is not None
+            else [s for s, p in account.positions.items() if p.qty > 0]
+        )
         requested = [s.strip().upper() for s in requested if s.strip()]
         inputs = await self._data.load(list(dict.fromkeys([*held, *requested])))
+
+        def last_price(symbol: str) -> float | None:
+            q = inputs.quotes.get(symbol)
+            if q is not None:
+                return q.price
+            col = inputs.close[symbol].dropna() if symbol in inputs.close.columns else None
+            return float(col.iloc[-1]) if col is not None and len(col) else None
+
+        portfolio = PaperBook.portfolio(book, last_price) if book is not None else account
 
         live_row = inputs.session_open and market_open and bool(inputs.quotes)
         close, high, low, volume = inputs.close, inputs.high, inputs.low, inputs.volume
@@ -378,6 +395,7 @@ class Perception:
             ),
             sectors=sectors,
             portfolio=portfolio,
+            account=account,
             data_states=states,
             limits=RiskLimits.from_settings(self._s),
             kill_switch=kill.active,
