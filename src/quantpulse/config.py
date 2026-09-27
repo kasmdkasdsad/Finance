@@ -462,6 +462,34 @@ class Settings(BaseSettings):
         description="Extra entry score required per regime.",
     )
 
+    # --- Brain (multi-agent analysis; proposes, never sends orders) --------------------------------
+    brain_mode: Literal["research_only", "dry_run", "paper_recommendation"] = Field(
+        default="paper_recommendation",
+        description=(
+            "research_only: analysis and memory only; dry_run / paper_recommendation: proposed actions, each "
+            "checked by the deterministic risk engine. The brain never sends orders itself."
+        ),
+    )
+    brain_focus_candidates: int = Field(
+        default=8,
+        ge=0,
+        le=50,
+        description="Non-held symbols studied closely per cycle (best of a pre-screen).",
+    )
+    brain_agent_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    brain_min_confidence: float = Field(
+        default=0.55, ge=0, le=1, description="Consensus confidence needed before a buy/sell is proposed."
+    )
+    brain_fresh_quote_seconds: float = Field(
+        default=60.0, gt=0, description="A live quote younger than this is FRESH (older but allowed: LIVE)."
+    )
+    brain_min_reliability_observations: int = Field(
+        default=30,
+        ge=5,
+        description="Evaluated predictions an agent needs before its measured reliability affects its weight.",
+    )
+    brain_max_new_positions_per_cycle: int = Field(default=2, ge=0, le=20)
+
     # --- Prediction ledger ------------------------------------------------------------------------
     predictions_enabled: bool = Field(
         default=True, description="Log forecasts and model predictions after each close and grade them later."

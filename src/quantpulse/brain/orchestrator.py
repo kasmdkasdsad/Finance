@@ -1,0 +1,318 @@
+"""The orchestrator (chief intelligence): one brain cycle, end to end.
+
+1. **Perceive** — the market, the portfolio and data quality (:mod:`~quantpulse.brain.perception`).
+2. **Select** — which agents are relevant and able to run, and on which subjects (each choice explained).
+3. **Run** — agents concurrently by dependency level; failures and timeouts are recorded, not fatal.
+4. **Consensus** — per subject from the forecasting agents; vetoes from constraint agents stay attached;
+   disagreement is measured and kept; "unknown" when the evidence does not support a view.
+5. **Decide** — proposed portfolio actions (HOLD / REDUCE / CLOSE / INCREASE / BUY / WATCH / NO_ACTION).
+6. **Risk preview** — every proposed trade through the existing deterministic risk engine. Nothing is sent
+   to Alpaca: the brain has no broker access beyond a read-only view.
+7. **Remember** — the cycle, agent runs, opinions, consensus, decisions, gradeable predictions and memory.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any
+
+from quantpulse.config import Settings
+from quantpulse.core.clock import Clock
+
+from .consensus import Consensus, ReliabilityBook, build_consensus
+from .context import BrainContext
+from .decisions import Proposal, plan, risk_preview
+from .learning import PredictionRecorder
+from .memory import LONG_TERM, SHORT_TERM, WORKING, MemoryStore
+from .perception import Perception
+from .registry import AgentRegistry, AgentRun, Skip
+from .store import BrainStore
+from .types import MARKET, PORTFOLIO, BrainMode
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CycleResult:
+    cycle_id: int
+    status: str
+    ctx: BrainContext | None = None
+    runs: list[AgentRun] = field(default_factory=list)
+    skips: list[Skip] = field(default_factory=list)
+    consensus: dict[str, Consensus] = field(default_factory=dict)
+    proposals: list[Proposal] = field(default_factory=list)
+    predictions: int = 0
+    error: str | None = None
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        settings: Settings,
+        clock: Clock,
+        perception: Perception,
+        registry: AgentRegistry,
+        store: BrainStore,
+        memory: MemoryStore,
+        recorder: PredictionRecorder,
+    ) -> None:
+        self._s = settings
+        self._clock = clock
+        self._perception = perception
+        self.registry = registry
+        self._store = store
+        self._memory = memory
+        self._recorder = recorder
+        self._lock = asyncio.Lock()
+
+    @property
+    def mode(self) -> BrainMode:
+        return BrainMode(self._s.brain_mode)
+
+    async def run(
+        self,
+        *,
+        trigger: str = "manual",
+        kind: str = "full",
+        symbols: Sequence[str] = (),
+        only: Sequence[str] | None = None,
+    ) -> CycleResult:
+        async with self._lock:  # one cycle at a time
+            return await self._run(trigger, kind, symbols, only)
+
+    async def _run(
+        self, trigger: str, kind: str, symbols: Sequence[str], only: Sequence[str] | None
+    ) -> CycleResult:
+        from .context import brain_session
+
+        mode = self.mode
+        started = self._clock.now()
+        cycle_id = await self._store.start_cycle(
+            kind=kind, trigger=trigger, session=brain_session(started).value, mode=mode.value, now=started
+        )
+        result = CycleResult(cycle_id=cycle_id, status="running")
+        try:
+            ctx = await self._perception.perceive(mode, symbols)
+            result.ctx = ctx
+            selections, skips = self.registry.select(ctx, only)
+            runs = await self.registry.run(ctx, selections, self._s.brain_agent_timeout_seconds)
+            result.runs, result.skips = runs, skips
+
+            reliability = ReliabilityBook(
+                await self._store.reliability_rows(), self._s.brain_min_reliability_observations
+            )
+            result.consensus = self._consensus(ctx, reliability)
+            if mode is not BrainMode.RESEARCH_ONLY:
+                result.proposals = plan(
+                    ctx,
+                    result.consensus,
+                    min_confidence=self._s.brain_min_confidence,
+                    max_new=self._s.brain_max_new_positions_per_cycle,
+                    vol_budget=self._s.trading_position_vol_budget,
+                    vol_floor=self._s.trading_vol_floor,
+                )
+                risk_preview(ctx, result.proposals, mode)
+
+            now = self._clock.now()
+            await self._store.save_runs(cycle_id, runs, skips, now)
+            consensus_ids = await self._store.save_consensus(cycle_id, result.consensus, now)
+            await self._store.save_decisions(cycle_id, result.proposals, consensus_ids, mode.value, now)
+            forecasts = [
+                o for r in runs for o in r.opinions if self.registry.get(r.agent_id).role == "forecast"
+            ]
+            result.predictions = await self._recorder.record(ctx, cycle_id, forecasts, result.consensus)
+            await self._remember(ctx, cycle_id, result)
+            result.status = "completed"
+            await self._store.finish_cycle(
+                cycle_id, self._clock.now(), status="completed", **self._summary(ctx, result)
+            )
+        except Exception as exc:
+            logger.exception("brain cycle %s failed", cycle_id)
+            result.status, result.error = "failed", f"{type(exc).__name__}: {exc}"
+            await self._store.finish_cycle(cycle_id, self._clock.now(), status="failed", error=result.error)
+        return result
+
+    # ------------------------------------------------------------------ consensus
+    def _consensus(self, ctx: BrainContext, reliability: ReliabilityBook) -> dict[str, Consensus]:
+        out: dict[str, Consensus] = {}
+        horizons: dict[str, int] = {}
+        regime = ctx.working.facts.get("regime")
+        for subject, opinions in ctx.working.opinions.items():
+            if subject == PORTFOLIO:
+                continue
+            forecasts = [o for o in opinions if self.registry.get(o.agent_id).role == "forecast"]
+            constraints = [o for o in opinions if self.registry.get(o.agent_id).role == "constraint"]
+            if not forecasts:
+                continue
+            out[subject] = build_consensus(subject, forecasts, constraints, reliability, regime)
+            voting = [o for o in forecasts if o.directional]
+            if voting:
+                horizons[subject] = round(
+                    sum(o.horizon_days * o.confidence for o in voting)
+                    / max(sum(o.confidence for o in voting), 1e-9)
+                )
+        ctx.working.post("horizons", horizons)
+        return out
+
+    # ------------------------------------------------------------------ memory
+    async def _remember(self, ctx: BrainContext, cycle_id: int, result: CycleResult) -> None:
+        now = self._clock.now()
+        regime = ctx.regime
+        label = regime.label if regime else None
+        market = result.consensus.get(MARKET)
+        await self._memory.remember(
+            SHORT_TERM,
+            "market_state",
+            MARKET,
+            f"{label or 'unknown'} regime; market view {market.to_dict()['stance'] if market else 'n/a'}",
+            now,
+            key="market_state",
+            data={
+                "regime": label,
+                "trend_score": regime.trend_score if regime else None,
+                **ctx.market_stats,
+                "vix": ctx.vix,
+                "market_open": ctx.market_open,
+            },
+            tags=["market", label or "unknown"],
+            ttl=timedelta(days=1),
+            cycle_id=cycle_id,
+        )
+        await self._memory.remember(
+            SHORT_TERM,
+            "portfolio_state",
+            PORTFOLIO,
+            f"{len(ctx.held)} positions, equity {ctx.portfolio.equity:,.0f}"
+            if ctx.portfolio.available
+            else "paper account unavailable",
+            now,
+            key="portfolio_state",
+            data={**ctx.portfolio.summary(), "constraints": ctx.working.facts.get("portfolio_constraints")},
+            tags=["portfolio"],
+            ttl=timedelta(days=1),
+            cycle_id=cycle_id,
+        )
+        disputes = {
+            s: c.primary_disagreement["summary"]
+            for s, c in result.consensus.items()
+            if c.primary_disagreement
+        }
+        await self._memory.remember(
+            WORKING,
+            "investigation",
+            MARKET,
+            f"cycle {cycle_id}: {len(ctx.focus)} focus symbols, {len(disputes)} disagreements, "
+            f"{sum(1 for p in result.proposals if p.is_trade)} proposed trades",
+            now,
+            key=f"cycle:{cycle_id}",
+            data={
+                "focus": ctx.focus_reasons,
+                "disagreements": disputes,
+                "questions": ctx.working.questions,
+                "unknown": [s for s, c in result.consensus.items() if c.unknown],
+            },
+            tags=["cycle"],
+            ttl=timedelta(days=3),
+            cycle_id=cycle_id,
+        )
+        if label is not None:
+            last = await self._memory.latest(LONG_TERM, "regime_change", MARKET)
+            if last is None or last["data"].get("to") != label:
+                await self._memory.remember(
+                    LONG_TERM,
+                    "regime_change",
+                    MARKET,
+                    f"regime {last['data'].get('to') if last else 'first observed'} → {label}",
+                    now,
+                    data={
+                        "from": last["data"].get("to") if last else None,
+                        "to": label,
+                        "trend_score": regime.trend_score if regime else None,
+                    },
+                    tags=["regime", label],
+                    importance=0.8,
+                    cycle_id=cycle_id,
+                )
+        for p in result.proposals:
+            if p.is_trade:
+                await self._memory.remember(
+                    LONG_TERM,
+                    "decision",
+                    p.subject,
+                    f"{p.action.value} {p.quantity:g} {p.subject}: {p.status}"
+                    + (f" — {p.risk.get('summary')}" if p.risk else ""),
+                    now,
+                    data=p.to_dict() | {"consensus": p.consensus.to_dict() if p.consensus else None},
+                    tags=["decision", p.action.value, p.status],
+                    importance=0.7,
+                    cycle_id=cycle_id,
+                )
+
+    # ------------------------------------------------------------------ summary
+    def _summary(self, ctx: BrainContext, result: CycleResult) -> dict[str, Any]:
+        regime = ctx.regime
+        runs = result.runs
+        dq = [o for o in ctx.working.opinions.get(MARKET, []) if o.agent_id == "data_quality"]
+        by_status: dict[str, int] = {}
+        for p in result.proposals:
+            by_status[p.status] = by_status.get(p.status, 0) + 1
+        return {
+            "regime": {
+                "label": regime.label,
+                "trend_score": regime.trend_score,
+                "stressed": regime.stressed,
+                "description": regime.description,
+                "reasons": regime.reasons,
+            }
+            if regime
+            else {},
+            "market": {
+                "open": ctx.market_open,
+                "clock": ctx.clock_source,
+                "stats": ctx.market_stats,
+                "vix": ctx.vix,
+                "price_status": ctx.price_status.value,
+            },
+            "portfolio": {
+                **ctx.portfolio.summary(),
+                "constraints": ctx.working.facts.get("portfolio_constraints"),
+            },
+            "data_quality": {
+                "market": dq[0].to_dict() if dq else None,
+                "states": {s: ctx.state(s).value for s in ctx.focus},
+                "provider_errors": ctx.provider_errors,
+            },
+            "focus": [{"symbol": s, "reason": ctx.focus_reasons.get(s, "")} for s in ctx.focus],
+            "agents": [
+                *[
+                    {
+                        "agent_id": r.agent_id,
+                        "status": r.status,
+                        "duration_ms": round(r.duration_ms, 1),
+                        "opinions": len(r.opinions),
+                        "error": r.error,
+                    }
+                    for r in runs
+                ],
+                *[{"agent_id": s.agent_id, "status": "skipped", "reason": s.reason} for s in result.skips],
+            ],
+            "summary": {
+                "agents_run": sum(1 for r in runs if r.status == "ok"),
+                "agents_failed": sum(1 for r in runs if r.status != "ok"),
+                "agents_skipped": len(result.skips),
+                "opinions": sum(len(r.opinions) for r in runs),
+                "subjects": len(result.consensus),
+                "unknown": sum(1 for c in result.consensus.values() if c.unknown),
+                "disagreements": sum(1 for c in result.consensus.values() if c.primary_disagreement),
+                "proposals": by_status,
+                "trades_proposed": sum(1 for p in result.proposals if p.is_trade),
+                "risk_approved": sum(1 for p in result.proposals if p.risk_approved),
+                "predictions_recorded": result.predictions,
+                "orders_sent": 0,
+            },
+            "notes": ctx.notes,
+        }
