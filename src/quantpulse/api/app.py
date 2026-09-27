@@ -14,6 +14,7 @@ from quantpulse.api.deps import require_api_key
 from quantpulse.api.errors import install_error_handlers
 from quantpulse.api.middleware import RequestContextMiddleware
 from quantpulse.api.routers import (
+    brain,
     forecast,
     fundamentals,
     jobs,
@@ -116,6 +117,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         stocks,
         predictions,
         trading,
+        brain,
         jobs,
     )
     for module in modules:

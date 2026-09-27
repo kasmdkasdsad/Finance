@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException
 
+from quantpulse.brain.service import BrainCycleRunning
 from quantpulse.core.errors import DomainError, NotFoundError, ProviderError
 from quantpulse.providers.alpaca_trading import BrokerError, BrokerNotConfigured, OrderRejected
 from quantpulse.schemas.common import ErrorResponse
@@ -50,7 +51,10 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(ModelTraining)
     @app.exception_handler(TradingCycleRunning)
-    async def _training(request: Request, exc: ModelTraining | TradingCycleRunning) -> JSONResponse:
+    @app.exception_handler(BrainCycleRunning)
+    async def _training(
+        request: Request, exc: ModelTraining | TradingCycleRunning | BrainCycleRunning
+    ) -> JSONResponse:
         """Long computations answer 202 with the job's progress; clients poll ``/jobs/{id}``."""
         now = request.app.state.container.clock.now()
         body = JobOut.of(exc.job, now)

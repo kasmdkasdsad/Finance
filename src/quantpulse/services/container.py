@@ -194,6 +194,20 @@ class Container:
             TradingDataLoader(settings, self.clock, self.market, self.model, self.options, self.reference),
             self.jobs,
         )
+        # The brain: specialist agents over a read-only view of the paper account. It proposes; the trading
+        # service's deterministic risk engine is the only path to an order.
+        from quantpulse.brain.service import BrainService  # local import keeps the brain optional at import
+
+        self.brain = BrainService(
+            settings,
+            self.clock,
+            self.db,
+            self.jobs,
+            self.broker,
+            self.trading,
+            TradingDataLoader(settings, self.clock, self.market, self.model, self.options, self.reference),
+            self.reference,
+        )
 
         from quantpulse.workers.poller import Poller  # local import avoids a cycle
 
