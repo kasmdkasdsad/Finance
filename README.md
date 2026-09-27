@@ -1097,11 +1097,12 @@ Every trade it proposes is previewed by the same deterministic risk engine that 
 (`services/trading_risk.RiskBook`), and the verdict is recorded. The brain has no broker access beyond a
 read-only view (account, positions, open orders, clock): every Alpaca request it makes is a `GET`.
 
-**Phase 1 status (built and tested):** the agent interface, registry, orchestrator, five deterministic
-agents, working memory, consensus with visible disagreement, proposed actions with a risk preview, and
-persistence of every cycle. **Not built yet:** language-model agents, grading of predictions against
-outcomes (they are recorded, not evaluated), reflection, measured agent reliability, the strategy lab,
-continuous scheduling, a UI page, and any hand-off of proposals to the trading service for execution.
+**Status (built and tested):** the agent interface, registry and orchestrator; thirteen deterministic
+agents; working memory; consensus with visible disagreement; proposed actions with a risk preview;
+persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Paper Trading*). **Not built
+yet:** language-model agents, grading of predictions against outcomes (they are recorded, not
+evaluated), reflection, measured agent reliability, the strategy lab, continuous scheduling, and any
+hand-off of proposals to the trading service for execution.
 
 ### One cycle
 
@@ -1137,7 +1138,7 @@ continuous scheduling, a UI page, and any hand-off of proposals to the trading s
    * working: this cycle's investigation;
    * long term: regime changes and proposed trades.
 
-### Agents (Phase 1, all deterministic)
+### Agents (all deterministic)
 
 | Agent | Role | What it looks at |
 |---|---|---|
@@ -1145,7 +1146,39 @@ continuous scheduling, a UI page, and any hand-off of proposals to the trading s
 | `market_regime` | forecast (market) | The strategy's regime classifier, breadth, correlation regime, benchmark volatility, VIX |
 | `technical` | forecast (5 days) | Trend (price vs 50/200-day), ADX, MACD, RSI, 20-day breakout/breakdown, VWAP, distance to support/resistance; gives invalidation levels |
 | `momentum` | forecast (21 days) | Cross-sectional z-scores of 12-1, 6-1 and 3-month momentum, 1-month return, relative strength and persistence; acceleration or deterioration |
+| `mean_reversion` | forecast (5 days) | Stretch from the 20-day mean (z-score, RSI, 5-day move in sigmas), filtered by trend strength: buys pullbacks in uptrends, damps fading a strong trend, flags falling knives |
+| `volatility` | forecast (10 days, mostly context) | The existing GARCH(1,1)-t forecast, realised-vol regime, expansion/compression, tail shape, drawdown; a size scale the planner uses; VIX and benchmark vol for the market |
+| `statistical` | forecast (5 days) | Lo–MacKinlay variance ratio and autocorrelation (trending vs mean-reverting), market-model beta and the last ten days' idiosyncratic move |
+| `fundamental` | forecast (63 days) | The stock model's point-in-time SEC fundamentals: gross profitability, ROE, accruals, asset growth, latest earnings reaction, ranked against the universe |
+| `valuation` | forecast (63 days) | Earnings, free-cash-flow and book yields vs the universe and sector peers; ignores earnings yield for loss-makers; value-trap and "expensive can stay expensive" checks |
+| `factor` | forecast (21 days) | The walk-forward stock model's calibrated probability of beating the benchmark, with momentum, value, quality, low-vol and beta exposures; a stale model weighs less |
+| `options` | forecast (21 days) | Live option chains only: ATM implied vol and its premium, term structure, put/call skew, put/call volume and open interest, unusual turnover, implied move |
+| `catalyst` | forecast (21 days) | Earnings calendar and typical reaction (event risk, context only), post-earnings drift after a large surprise |
 | `portfolio` | constraint | Position weights, concentration (HHI), sector weights, beta, average correlation, margin, positions at their stop; hints close / reduce / hold |
+
+Agents that need data the cycle does not have (no stock-model run, no live option chain, no earnings
+calendar) are skipped with the reason, never fed made-up inputs. An agent whose evidence is context rather
+than a view (a volatility forecast without a signal, an upcoming release without a surprise) abstains from
+the vote and keeps its facts for the planner: position size uses the larger of the strategy's risk vol and
+the GARCH forecast, and no new position or increase is proposed within
+`max(QP_BRAIN_EARNINGS_CAUTION_DAYS, QP_TRADING_EARNINGS_BLACKOUT_DAYS)` days of an earnings release.
+
+### The Brain page
+
+*Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
+
+* **Overview:** regime, market, data quality, the paper portfolio (read only), what was studied and why.
+* **Agents:** who ran, who was skipped and why, their run history, and their track record ("unproven"
+  until predictions are graded). Agents can be switched on or off here.
+* **Consensus & opinions:** each subject's combined view (supporting/neutral/opposing, disagreement, data
+  quality, vetoes), the strongest argument for and against, every vote with its weight, and each agent's
+  own thesis, evidence and invalidation.
+* **Proposed actions:** each action, the risk engine's preview and the checks behind it, and the execution
+  column — always "not sent".
+* **Memory** and **History.**
+
+The page keeps four layers visibly apart: ① agent analysis, ② consensus, ③ risk preview, and ④ broker
+execution. There is no execution from the Brain.
 
 An agent returns structured `Opinion`s: stance, score (−1…1), confidence, horizon, thesis, evidence,
 data used and missing, data quality, invalidation and veto. A language-model agent will implement the
