@@ -936,3 +936,43 @@ class BrainDebateRow(Base):
     objections: Mapped[list[Any]] = mapped_column(JSON, default=list)
     change_our_mind: Mapped[list[Any]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainStrategyRow(Base):
+    """A versioned strategy in the lab. A version's spec never changes; its status moves through
+    proposed → validated / rejected → paper → promoted (or retired), and promotion is always a person's call."""
+
+    __tablename__ = "brain_strategies"
+    __table_args__ = (UniqueConstraint("strategy_id", "version", name="uq_brain_strategies_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String(48))
+    version: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(120))
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(
+        String(16)
+    )  # proposed | validated | rejected | paper | promoted | retired
+    source: Mapped[str] = mapped_column(String(24))  # template | user | improvement
+    parent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    validation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # verdict, gates, key metrics
+    paper: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # shadow-portfolio performance
+    decided_by: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    promoted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrainStrategyRunRow(Base):
+    """One lab run of a strategy version: a full validation report or a paper (shadow) rebalance."""
+
+    __tablename__ = "brain_strategy_runs"
+    __table_args__ = (Index("ix_brain_strategy_runs_kind", "strategy_row_id", "kind", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_row_id: Mapped[int] = mapped_column(
+        ForeignKey("brain_strategies.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16))  # validation | paper
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
