@@ -165,7 +165,10 @@ class BrainStore:
                 "agent_version": r.agent_version,
                 "regime": r.regime,
                 "n": r.n,
+                "n_effective": r.n_effective,
                 "reliability": r.reliability,
+                "verdict": r.verdict,
+                "calibration": r.calibration,
             }
             for r in rows
         ]
@@ -436,8 +439,9 @@ class BrainStore:
             stmt = stmt.where(BrainAgentPerformanceRow.window == window)
         async with self._db.session() as s:
             rows = (await s.scalars(stmt)).all()
-        cols = ("agent_id", "agent_version", "regime", "horizon_days", "window", "n", "hits", "hit_rate", "brier",
-                "ic", "calibration", "reliability", "computed_at")  # fmt: skip
+        cols = ("agent_id", "agent_version", "regime", "horizon_days", "window", "n", "n_effective", "hits",
+                "hit_rate", "ci_low", "ci_high", "p_value", "q_value", "verdict", "brier", "ic", "mean_excess",
+                "mean_excess_z", "calibration", "reliability", "computed_at")  # fmt: skip
         return [_cols(r, cols) for r in rows]
 
     async def reflections(self, *, category: str | None = None, limit: int = 100) -> list[dict[str, Any]]:

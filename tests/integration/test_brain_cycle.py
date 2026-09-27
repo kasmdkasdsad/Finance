@@ -160,7 +160,10 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         votes = upc["detail"]["votes"]
         assert {"technical", "momentum"} <= {v["agent_id"] for v in votes} <= with_model
         assert upc["supporting"] + upc["neutral"] + upc["opposing"] == len(votes)
-        assert all(v["reliability"] == {"weight": 1.0, "status": "unproven", "n": 0} for v in votes)
+        assert all(
+            v["reliability"] == {"weight": 1.0, "status": "unproven", "n": 0, "verdict": "unproven"}
+            for v in votes
+        )
 
         # proposed actions, each trade previewed by the deterministic risk engine; nothing sent
         decisions = by(cycle["decisions"])
@@ -194,6 +197,22 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
             "data_quality",
             "portfolio",
         }  # constraints are not forecasts
+        # each claim carries what it takes to judge it later — and no invented expectation
+        for p in preds:
+            assert p.expected_return is None  # uncalibrated until the source has a graded record
+            assert p.context["vol"] and p.context["portfolio"]["posture"] in (
+                "normal",
+                "cautious",
+                "defensive",
+            )
+            assert p.context["thesis"]
+            assert p.subject == "@market" or p.context["data_status"] in ("fresh", "live")
+        agent_pred = next(p for p in preds if p.source_type == "agent" and p.subject == "UPA")
+        assert agent_pred.context["portfolio"]["held"] and agent_pred.context["evidence"]
+        assert agent_pred.context["consensus"]["stance"] in ("bullish", "bearish", "neutral", "unknown")
+        team = [p for p in preds if p.source_type == "consensus"]
+        assert team and all(p.context["agents"]["supporting"] and p.context["sources"] for p in team)
+        assert all(p.source_version == "2" for p in team)
 
         # the same cycle, read back
         again = (await api.get(f"{BRAIN}/cycles/{cycle['id']}")).json()
@@ -233,6 +252,21 @@ async def test_modes_dry_run_and_research_only(tmp_path, monkeypatch):
         assert cycle["mode"] == "research_only" and cycle["decisions"] == []
         assert cycle["consensus"] and cycle["predictions_recorded"] > 0  # it still thinks and remembers
         assert only_reads(api.fake)
+
+
+async def test_a_repeated_view_is_recorded_once_a_day(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock):
+        first = await run_cycle(api)
+        clock.advance(1800)
+        second = await run_cycle(api)
+        assert first["predictions_recorded"] > 0
+        assert (
+            second["predictions_recorded"] < first["predictions_recorded"]
+        )  # the same views: not new claims
+        preds = await api.container.brain.store.predictions()
+        keys = [(p.source_id, p.subject, p.horizon_days, p.direction) for p in preds]
+        assert len(keys) == len(set(keys))
 
 
 async def test_memory_accumulates_across_cycles_without_duplicating_state(tmp_path):
@@ -708,7 +742,15 @@ async def test_predictions_mature_and_the_brain_learns_from_them(tmp_path):
         perf_rows = (await api.get(f"{BRAIN}/performance", params={"window": "all"})).json()
         assert {r["agent_id"] for r in perf_rows} >= {"technical", "consensus"}
         assert all(r["reliability"] is None for r in perf_rows)  # one cycle is never a track record
+        assert all(r["verdict"] == "unproven" and r["n_effective"] <= r["n"] for r in perf_rows)
         assert state["measured_agents"] == []
+        graded = [p for p in await api.container.brain.store.predictions() if p.status == "evaluated"]
+        for p in graded:  # accuracy, risk, luck, timing and data quality are kept apart
+            outcome = p.context["outcome"]
+            assert outcome["data_ok"] is True and "timing" in outcome and "after_next_close" in outcome
+            assert "relative_z" in outcome and isinstance(outcome["noise"], bool)
+            total = outcome["timing"] + outcome["after_next_close"]
+            assert total == pytest.approx(p.direction * p.realized_relative, abs=1e-5)
 
         trades = [d for d in cycle["decisions"] if d["action"] in TRADES]
         reflections = (await api.get(f"{BRAIN}/reflections")).json()

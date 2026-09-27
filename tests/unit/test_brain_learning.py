@@ -175,32 +175,95 @@ async def test_learning_pass_reflects_and_remembers(database):
 
 
 # ---------------------------------------------------------------------------------------------- performance
-def graded_rows(n, hit_rate, *, source="technical", regime="bullish", confidence=0.5):
+def graded_rows(n, hit_rate, *, source="technical", regime="bullish", confidence=0.5, prefix="S"):
     hits = round(n * hit_rate)
     return [
         perf.Graded(
-            source, "1.0.0", regime, 5, 0.5, confidence, 0.01 if i < hits else -0.01, i < hits, MADE, 1
+            source,
+            "1.0.0",
+            regime,
+            5,
+            0.5,
+            confidence,
+            0.01 if i < hits else -0.01,
+            i < hits,
+            MADE,
+            1,
+            subject=f"{prefix}{i}",  # different names: independent observations
         )
         for i in range(n)
     ]
 
 
-def test_reliability_needs_enough_graded_calls_and_is_shrunk():
-    assert perf.metrics(graded_rows(29, 0.9), 30)["reliability"] is None
+def test_reliability_moves_only_on_significant_evidence_and_by_the_conservative_bound():
+    assert perf.metrics(graded_rows(29, 0.9), 30)["reliability"] is None  # unproven
     m = perf.metrics(graded_rows(100, 0.6), 30)
-    assert m["hit_rate"] == 0.6 and m["reliability"] == pytest.approx(
-        1 + 4 * ((60 + 10) / 120 - 0.5), abs=1e-4
-    )
-    low = perf.metrics(graded_rows(100, 0.3), 30)["reliability"]
-    assert low == pytest.approx(1 + 4 * ((30 + 10) / 120 - 0.5), abs=1e-4)
+    lo, hi = perf.wilson(60, 100)
+    assert m["hit_rate"] == 0.6 and (m["ci_low"], m["ci_high"]) == (round(lo, 4), round(hi, 4))
+    assert m["verdict"] == "evidence of skill" and m["p_value"] < 0.05
+    assert m["reliability"] == pytest.approx(1 + 4 * (lo - 0.5), abs=1e-4)  # the lower bound, not 60%
+    harm = perf.metrics(graded_rows(100, 0.3), 30)
+    assert harm["verdict"] == "evidence of harm"
+    assert harm["reliability"] == pytest.approx(1 + 4 * (perf.wilson(30, 100)[1] - 0.5), abs=1e-4)
     assert perf.metrics(graded_rows(200, 0.0), 30)["reliability"] == 0.25  # bounded
+    meh = perf.metrics(graded_rows(50, 0.56), 30)
+    assert meh["verdict"] == "no evidence either way" and meh["reliability"] == 1.0
     assert m["brier"] is not None and m["calibration"][-1]["kind"] == "summary"
+
+
+def test_repeated_calls_on_one_subject_are_one_observation():
+    same = [
+        perf.Graded(
+            "technical",
+            "1.0.0",
+            "bullish",
+            5,
+            0.5,
+            0.6,
+            0.01,
+            True,
+            MADE + timedelta(hours=h),
+            1,
+            subject="AAA",
+        )
+        for h in range(0, 60, 2)
+    ]  # 30 calls in 2.5 days, one horizon: the same bet
+    m = perf.metrics(same, 20)
+    assert m["n"] == 30 and m["n_effective"] == 1 and m["verdict"] == "unproven" and m["reliability"] is None
+    spread = [
+        perf.Graded(
+            "technical",
+            "1.0.0",
+            "bullish",
+            5,
+            0.5,
+            0.6,
+            0.01,
+            True,
+            MADE + timedelta(days=7 * w),
+            1,
+            subject="AAA",
+        )
+        for w in range(4)
+    ]
+    assert perf.metrics(spread, 20)["n_effective"] == 4  # a week apart: separate outcomes
+
+
+def test_false_discovery_adjustment_and_data_problems():
+    q = perf.benjamini_hochberg([0.01, 0.04, 0.03, None, 0.5])
+    assert q[3] is None and q[0] == pytest.approx(0.04) and q[4] == pytest.approx(0.5)
+    assert q[1] == pytest.approx(0.04 * 4 / 3) and q[2] == pytest.approx(0.04 * 4 / 3)
+    rows = graded_rows(40, 0.8)
+    bad = [perf.Graded(**{**r.__dict__, "data_ok": False, "hit": False}) for r in graded_rows(40, 0.0)]
+    m = perf.metrics(rows + bad, 30)
+    assert m["n"] == 80 and m["n_effective"] == 40 and m["hit_rate"] == 0.8  # skill is measured on valid data
+    assert m["calibration"][-1]["data_problems"] == 40
 
 
 async def test_measured_reliability_reaches_the_consensus(database):
     async with database.session() as s:
         for i in range(40):
-            p = prediction(source="technical", confidence=0.6)
+            p = prediction(f"T{i}", source="technical", confidence=0.6)
             p.status, p.hit, p.realized_relative, p.realized_return = (
                 "evaluated",
                 i < 32,
@@ -208,7 +271,7 @@ async def test_measured_reliability_reaches_the_consensus(database):
                 0.0,
             )
             s.add(p)
-            q = prediction(source="momentum", confidence=0.6)
+            q = prediction(f"M{i}", source="momentum", confidence=0.6)
             q.status, q.hit, q.realized_relative, q.realized_return = (
                 "evaluated",
                 i < 12,
@@ -235,7 +298,7 @@ async def test_measured_reliability_reaches_the_consensus(database):
 
 def test_failure_analysis_names_where_an_agent_fails():
     rows = graded_rows(40, 0.3, regime="high_volatility", confidence=0.7) + graded_rows(
-        40, 0.6, regime="bullish", confidence=0.3
+        40, 0.6, regime="bullish", confidence=0.3, prefix="B"
     )
     findings = {f["agent_id"]: f for f in failure_analysis(rows, 30)}
     notes = " ".join(findings["technical"]["notes"])
@@ -247,7 +310,7 @@ def test_failure_analysis_names_where_an_agent_fails():
 async def test_agent_memory_holds_measured_performance(database):
     async with database.session() as s:
         for i in range(35):
-            p = prediction(source="technical", confidence=0.7, regime="high_volatility")
+            p = prediction(f"S{i}", source="technical", confidence=0.7, regime="high_volatility")
             p.status, p.hit, p.realized_relative, p.realized_return = (
                 "evaluated",
                 i < 10,

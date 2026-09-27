@@ -171,7 +171,9 @@ class Orchestrator:
             forecasts = [
                 o for r in runs for o in r.opinions if self.registry.get(r.agent_id).role == "forecast"
             ]
-            result.predictions = await self._recorder.record(ctx, cycle_id, forecasts, result.consensus)
+            result.predictions = await self._recorder.record(
+                ctx, cycle_id, forecasts, result.consensus, reliability, result.debates
+            )
             await self._remember(ctx, cycle_id, result)
             result.status = "completed"
             await self._store.finish_cycle(

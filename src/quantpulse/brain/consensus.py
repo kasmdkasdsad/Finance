@@ -50,25 +50,46 @@ MIN_CONFIDENCE = 0.2
 class Reliability:
     weight: float
     status: str  # "unproven" | "measured"
-    n: int
+    n: int  # independent graded observations
+    verdict: str = "unproven"  # see quantpulse.brain.performance.verdict
 
 
 class ReliabilityBook:
     """Measured reliability per (agent, version, regime). Empty until predictions have been evaluated —
-    and then only agents with enough observations get a weight other than 1.0."""
+    and then a weight differs from 1.0 only with enough independent observations and statistically
+    supported evidence (see :mod:`quantpulse.brain.performance`)."""
 
     def __init__(self, rows: Iterable[dict[str, Any]] = (), min_observations: int = 30) -> None:
         self.min_observations = min_observations
         self._rows = {(r["agent_id"], r["agent_version"], r.get("regime", "all")): r for r in rows}
 
-    def get(self, agent_id: str, version: str, regime: str | None = None) -> Reliability:
-        row = self._rows.get((agent_id, version, regime or "all")) or self._rows.get(
+    def _row(self, agent_id: str, version: str, regime: str | None) -> dict[str, Any] | None:
+        return self._rows.get((agent_id, version, regime or "all")) or self._rows.get(
             (agent_id, version, "all")
         )
-        n = int(row["n"]) if row else 0
+
+    def get(self, agent_id: str, version: str, regime: str | None = None) -> Reliability:
+        row = self._row(agent_id, version, regime)
+        n = int(row.get("n_effective") or row["n"]) if row else 0
         if row is None or n < self.min_observations or row.get("reliability") is None:
             return Reliability(1.0, "unproven", n)
-        return Reliability(float(row["reliability"]), "measured", n)
+        return Reliability(float(row["reliability"]), "measured", n, str(row.get("verdict") or "measured"))
+
+    def expected_return(self, agent_id: str, version: str, confidence: float, direction: int) -> float | None:
+        """The mean relative return this source's past calls at this confidence actually earned (signed by
+        ``direction``); ``None`` until the confidence bucket has ``min_observations`` independent calls."""
+        row = self._rows.get((agent_id, version, "all"))
+        for b in (row or {}).get("calibration") or []:
+            if b.get("kind") != "bucket" or b.get("mean_excess") is None:
+                continue
+            lo, _, hi = str(b["confidence"]).partition("–")
+            try:
+                inside = float(lo) <= confidence < (float(hi) if float(hi) < 1.0 else 1.01)
+            except ValueError:
+                continue
+            if inside and int(b.get("n") or 0) >= self.min_observations:
+                return round(direction * float(b["mean_excess"]), 6)
+        return None
 
 
 @dataclass
@@ -96,6 +117,7 @@ class Vote:
                 "weight": self.reliability.weight,
                 "status": self.reliability.status,
                 "n": self.reliability.n,
+                "verdict": self.reliability.verdict,
             },
             "thesis": self.thesis,
         }

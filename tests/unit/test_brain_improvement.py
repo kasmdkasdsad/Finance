@@ -15,10 +15,11 @@ from quantpulse.db.models import (
 NOW = datetime(2026, 9, 26, 15, 0, tzinfo=UTC)
 
 
-def perf(agent, regime, n, hit, reliability):
+def perf(agent, regime, n, hit, reliability, verdict=None, n_effective=None):
     return BrainAgentPerformanceRow(agent_id=agent, agent_version="1.0.0", regime=regime, horizon_days=5, window="all",
                                     n=n, hits=round(n * hit), hit_rate=hit, brier=0.26, ic=-0.05, calibration=[],
-                                    reliability=reliability, computed_at=NOW)  # fmt: skip
+                                    reliability=reliability, computed_at=NOW, verdict=verdict,
+                                    n_effective=n_effective)  # fmt: skip
 
 
 async def seed(database):
@@ -30,6 +31,9 @@ async def seed(database):
             perf("momentum", "all", 80, 0.56, 1.2),
             perf("momentum", "high_volatility", 30, 0.37, 0.6),  # fails in one regime
             perf("statistical", "all", 12, 0.25, None),  # too few calls to judge
+            # 44% on 400 predictions but only 60 independent ones and no significant evidence: no claim
+            perf("valuation", "all", 400, 0.44, 1.0, verdict="no evidence either way", n_effective=60),
+            perf("factor", "all", 400, 0.40, 0.7, verdict="evidence of harm", n_effective=200),
         ])  # fmt: skip
         for i in range(12):
             s.add(BrainAgentRunRow(cycle_id=cycle, agent_id="options", agent_version="1.0.0", status="skipped",
@@ -56,6 +60,8 @@ async def test_proposals_are_structured_evidence_based_and_deduplicated(database
     assert ("capability", "options") in by and ("data", "XYZ") in by
     assert ("strategy", "short_term_reversal@v1") in by
     assert not any(f["target"].startswith("statistical") for f in found)  # 12 calls: no judgement yet
+    assert not any(f["target"].startswith("valuation") for f in found)  # not significant: no finding
+    assert by[("agent", "factor@1.0.0")]["evidence"]["independent_calls"] == 200
     for f in found:
         p = f["proposal"]
         assert (

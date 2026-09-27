@@ -579,15 +579,27 @@ def _learning() -> None:
     rows = guarded(lambda: api().get(f"{BASE}/performance", window="all"), "track records") or []
     overall = [r for r in rows if r["regime"] == "all"]
     if overall:
-        st.markdown("**Track records** (all regimes, all time)")
+        st.markdown(
+            "**Track records** (all regimes, all time). Calls on one name whose horizons overlap share an outcome "
+            "and count once (*independent*). A verdict needs enough independent calls and a false-discovery-"
+            "adjusted q below 10%; a weight moves only then, and only to the conservative end of the interval."
+        )
         st.dataframe(
             pd.DataFrame(
                 [
                     {
                         "agent": r["agent_id"],
                         "version": r["agent_version"],
-                        "graded calls": r["n"],
+                        "calls": r["n"],
+                        "independent": r.get("n_effective"),
                         "hit rate": r["hit_rate"],
+                        "95% interval": f"{pct(r.get('ci_low'), 0)}–{pct(r.get('ci_high'), 0)}"
+                        if r.get("ci_low") is not None
+                        else "—",
+                        "q": r.get("q_value"),
+                        "verdict": r.get("verdict") or "unproven",
+                        "mean excess": pct(r.get("mean_excess"), 2),
+                        "in risk units": r.get("mean_excess_z"),
                         "Brier (0.25 = coin flip)": r["brier"],
                         "rank IC": r["ic"],
                         "consensus weight": r["reliability"]
@@ -596,7 +608,7 @@ def _learning() -> None:
                     }
                     for r in overall
                 ]
-            ),
+            ).astype(str),
             hide_index=True,
             use_container_width=True,
         )

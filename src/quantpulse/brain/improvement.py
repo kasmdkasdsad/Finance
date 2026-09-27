@@ -13,7 +13,7 @@ because every version keeps its own track record). Risk controls are never a sub
 
 What it looks for:
 
-* **weak agents** — measured reliability below 1, or a hit rate below 47%, once enough calls are graded;
+* **weak agents** — a significant *evidence of harm* verdict (enough independent calls, false-discovery adjusted);
 * **weak in one regime** — an agent failing in a specific market regime (a routing proposal);
 * **redundant agents** — two agents whose scores on the same subjects move together (≥ 0.9 correlation);
 * **missing capabilities** — agents that keep skipping for lack of data (options, earnings, the model);
@@ -176,21 +176,28 @@ class ImprovementEngine:
             ).all()
         out = []
         for r in rows:
-            if r.agent_id == "consensus" or r.n < self._min or r.hit_rate is None:
+            n = r.n_effective if r.n_effective is not None else r.n
+            if r.agent_id == "consensus" or n < self._min or r.hit_rate is None:
                 continue
-            if r.regime == "all" and (r.hit_rate < 0.47 or (r.reliability or 1.0) < 1.0):
+            harm = r.verdict == "evidence of harm" if r.verdict is not None else r.hit_rate < 0.47
+            evidence = {
+                "graded_calls": r.n,
+                "independent_calls": n,
+                "hit_rate": r.hit_rate,
+                "interval_95": [r.ci_low, r.ci_high],
+                "q_value": r.q_value,
+                "verdict": r.verdict,
+                "brier": r.brier,
+                "rank_ic": r.ic,
+                "reliability": r.reliability,
+            }
+            if r.regime == "all" and harm:
                 out.append(
                     _p(
                         "agent",
                         f"{r.agent_id}@{r.agent_version}",
-                        f"{r.agent_id} is below a coin flip on graded calls",
-                        {
-                            "graded_calls": r.n,
-                            "hit_rate": r.hit_rate,
-                            "brier": r.brier,
-                            "rank_ic": r.ic,
-                            "reliability": r.reliability,
-                        },
+                        f"{r.agent_id} is significantly below a coin flip on graded calls",
+                        evidence,
                         f"Review {r.agent_id}'s logic: its evidence does not predict the outcome it is graded on "
                         f"({r.horizon_days}-session relative return). Until then its measured reliability already "
                         "reduces its weight.",
@@ -198,13 +205,13 @@ class ImprovementEngine:
                         AGENT_PLAN,
                     )
                 )
-            elif r.regime not in ("all", "unknown") and r.n >= max(10, self._min // 2) and r.hit_rate < 0.45:
+            elif r.regime not in ("all", "unknown") and harm:
                 out.append(
                     _p(
                         "routing",
                         f"{r.agent_id}@{r.agent_version}",
                         f"{r.agent_id} performs poorly in {r.regime} markets",
-                        {"regime": r.regime, "graded_calls": r.n, "hit_rate": r.hit_rate, "brier": r.brier},
+                        {"regime": r.regime, **evidence},
                         f"Route {r.agent_id} out of cycles in {r.regime} regimes (or give it a regime-specific "
                         "version), keeping it everywhere else.",
                         f"Remove a systematically wrong voice in {r.regime} markets.",

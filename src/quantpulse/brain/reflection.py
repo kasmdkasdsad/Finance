@@ -236,41 +236,66 @@ async def reflect_on_decisions(db: Database, now: datetime) -> list[dict[str, An
 
 
 def failure_analysis(rows: Sequence[Graded], min_observations: int) -> list[dict[str, Any]]:
-    """Per agent with at least ``min_observations`` graded calls: where and how it fails."""
+    """Per agent with at least ``min_observations`` independent graded observations: where and how it
+    fails. A weakness is only named when the evidence supports it (the 95% interval of the hit rate lies
+    below a coin flip); a small or noisy sample is not a finding."""
     by_agent: dict[tuple[str, str], list[Graded]] = defaultdict(list)
     for r in rows:
         by_agent[(r.source, r.version)].append(r)
     findings: list[dict[str, Any]] = []
     for (agent, version), items in sorted(by_agent.items()):
-        if len(items) < min_observations:
-            continue
         overall = metrics(items, min_observations)
+        if overall["n_effective"] < min_observations:
+            continue
         notes: list[str] = []
         regimes: dict[str, list[Graded]] = defaultdict(list)
         for r in items:
             regimes[r.regime].append(r)
         for regime, sub in regimes.items():
-            if len(sub) >= max(10, min_observations // 3):
-                hr = sum(1 for r in sub if r.hit) / len(sub)
-                if hr < 0.45:
-                    notes.append(f"weak in {regime} markets: {hr:.0%} hit rate over {len(sub)} calls")
-        confident = [r for r in items if r.confidence >= 0.6]
-        if len(confident) >= 10:
-            wrong = sum(1 for r in confident if not r.hit) / len(confident)
-            if wrong > 0.5:
-                notes.append(f"confidently wrong: {wrong:.0%} of its ≥0.6-confidence calls missed")
-        cal = [c for c in overall["calibration"] if c.get("kind") == "bucket" and c["n"] >= 5]
-        if len(cal) >= 2 and cal[-1]["hit_rate"] < cal[0]["hit_rate"]:
+            m = metrics(sub, min_observations)
+            if m["n_effective"] >= max(10, min_observations // 3) and _below_coin(m):
+                notes.append(
+                    f"weak in {regime} markets: {m['hit_rate']:.0%} hit rate (95% interval "
+                    f"{m['ci_low']:.0%}–{m['ci_high']:.0%}) over {m['n_effective']} independent calls"
+                )
+        confident = metrics([r for r in items if r.confidence >= 0.6], min_observations)
+        if confident["n_effective"] >= 10 and _below_coin(confident):
+            notes.append(
+                f"confidently wrong: its ≥0.6-confidence calls hit {confident['hit_rate']:.0%} "
+                f"(interval {confident['ci_low']:.0%}–{confident['ci_high']:.0%})"
+            )
+        cal = [c for c in overall["calibration"] if c.get("kind") == "bucket" and c["n"] >= 10]
+        if len(cal) >= 2 and cal[-1]["hit_rate"] < cal[0]["hit_rate"] - 0.1:
             notes.append(
                 "miscalibrated: its most confident calls hit less often than its least confident ones"
             )
         share = overall["calibration"][-1].get("bullish_share")
         if share is not None and (share > 0.85 or share < 0.15):
             notes.append(f"directional bias: {share:.0%} of its calls are bullish")
-        if overall["hit_rate"] is not None and overall["hit_rate"] < 0.5:
-            notes.append(f"below a coin flip overall ({overall['hit_rate']:.0%} over {overall['n']} calls)")
-        findings.append({"agent_id": agent, "version": version, "n": overall["n"], "hit_rate": overall["hit_rate"], "ic": overall["ic"], "brier": overall["brier"], "notes": notes})  # fmt: skip
+        if _below_coin(overall):
+            notes.append(
+                f"below a coin flip: {overall['hit_rate']:.0%} (interval {overall['ci_low']:.0%}–"
+                f"{overall['ci_high']:.0%}) over {overall['n_effective']} independent calls"
+            )
+        findings.append(
+            {
+                "agent_id": agent,
+                "version": version,
+                "n": overall["n"],
+                "n_effective": overall["n_effective"],
+                "hit_rate": overall["hit_rate"],
+                "ci": [overall["ci_low"], overall["ci_high"]],
+                "verdict": overall["verdict"],
+                "ic": overall["ic"],
+                "brier": overall["brier"],
+                "notes": notes,
+            }
+        )
     return findings
+
+
+def _below_coin(m: dict[str, Any]) -> bool:
+    return m["ci_high"] is not None and m["ci_high"] < 0.5
 
 
 async def record_failure_analysis(db: Database, findings: list[dict[str, Any]], now: datetime) -> int:

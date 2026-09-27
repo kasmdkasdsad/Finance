@@ -8,12 +8,24 @@ history in production (synthetic prices are refused, exactly like the prediction
 tests. A prediction whose due-date close never arrives is voided after ``VOID_AFTER_DAYS``; one whose close is
 simply late stays open.
 
+Each graded prediction also gets an outcome breakdown in its context, so accuracy is never confused with
+luck, risk or timing:
+
+* ``benchmark_return`` — what the benchmark did over the same span;
+* ``relative_z`` — the relative return in units of the call's own risk (its volatility at entry over the
+  horizon): the *risk-adjusted* outcome; ``noise`` when it is within half a standard deviation;
+* ``timing`` — the favourable relative return between the entry reference and the next close (a decision
+  could first be acted on at that close, so this part is an execution effect, not capturable skill) and
+  ``after_next_close`` — the part that remained;
+* ``data_ok`` — whether it was made on usable data (fresh, live, or a closed market's last close).
+
 When a consensus prediction is graded, the decision made on it in the same cycle gets its outcome too.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -22,7 +34,7 @@ from typing import Protocol
 from sqlalchemy import select
 
 from quantpulse.core.clock import Clock
-from quantpulse.core.market_calendar import NEW_YORK
+from quantpulse.core.market_calendar import NEW_YORK, regular_close
 from quantpulse.db.models import BrainDecisionRow, BrainPredictionRow
 from quantpulse.db.session import Database
 from quantpulse.schemas.common import DataStatus
@@ -32,6 +44,8 @@ from quantpulse.services.predictions import last_completed_session
 from .types import MARKET
 
 VOID_AFTER_DAYS = 10
+NOISE_Z = 0.5
+USABLE_DATA = frozenset({"fresh", "live", "market_closed"})
 CONCURRENCY = 4
 
 
@@ -90,6 +104,48 @@ def grade(direction: int, entry: float, close: float, bench_entry: float | None,
     return ret, rel, direction * rel > 0
 
 
+def next_close(series: dict[date, float], made_at: datetime) -> tuple[date, float] | None:
+    """The first close at which a decision made at ``made_at`` could be acted on."""
+    local = made_at.astimezone(NEW_YORK)
+    start = local.date() if local.time() < regular_close(local.date()) else local.date() + timedelta(days=1)
+    days = sorted(d for d in series if d >= start)
+    return (days[0], series[days[0]]) if days else None
+
+
+def breakdown(
+    row: BrainPredictionRow,
+    relative: float,
+    series: dict[date, float],
+    bench: dict[date, float],
+    bench_close: float | None,
+) -> dict[str, object]:
+    """How the outcome divides into benchmark, risk, noise, timing and data quality (see the module)."""
+    ctx = row.context or {}
+    out: dict[str, object] = {}
+    absolute = row.benchmark == "absolute"
+    if bench_close and row.entry_benchmark:
+        out["benchmark_return"] = round(bench_close / row.entry_benchmark - 1, 6)
+    vol = ctx.get("vol")
+    if isinstance(vol, int | float) and vol > 0:
+        sigma = vol * math.sqrt(max(row.horizon_days, 1) / 252)
+        z = relative / sigma
+        out["relative_z"] = round(z, 4)
+        out["noise"] = abs(z) < NOISE_Z
+    nxt = next_close(series, row.made_at)
+    if nxt is not None and row.entry_price:
+        day, close = nxt
+        leg = close / row.entry_price - 1
+        if not absolute:
+            b = bench.get(day)
+            leg = leg - (b / row.entry_benchmark - 1) if b and row.entry_benchmark else float("nan")
+        if leg == leg:
+            out["timing"] = round(row.direction * leg, 6)
+            out["after_next_close"] = round(row.direction * relative - row.direction * leg, 6)
+    state = ctx.get("data_state")
+    out["data_ok"] = state is None or state in USABLE_DATA
+    return out
+
+
 async def evaluate_due(db: Database, prices: PriceSource, clock: Clock, benchmark: str) -> EvaluationResult:
     now = clock.now()
     cutoff = last_completed_session(now)
@@ -141,6 +197,7 @@ async def evaluate_due(db: Database, prices: PriceSource, clock: Clock, benchmar
                     result.pending += 1
                 continue
             row.realized_return, row.realized_relative, row.hit = graded
+            row.context = {**row.context, "outcome": breakdown(row, graded[1], series, bench, bench_close)}
             row.status, row.evaluated_at = "evaluated", now
             result.evaluated += 1
             done.append(row.id)

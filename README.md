@@ -1283,20 +1283,39 @@ or change it.
 ### Learning from outcomes
 
 Every directional call a forecasting agent makes, and every directional consensus, is recorded as a
-**prediction** with its horizon, benchmark, regime, entry prices and due date. A **learning pass**
-(`POST /brain/learn`, or the button on the page's *Learning* tab) then:
+**prediction**. A view repeated in later cycles of the same day is not a new claim: while an open
+prediction from the same source on the same subject, horizon and direction exists from today, nothing is
+added (a changed view is recorded). Each prediction carries:
+
+* what it claims: direction, confidence, horizon, benchmark, and the **expected return**. The expected
+  return is the mean relative return the source's past calls at that confidence actually earned. It
+  stays empty until that bucket has enough independent graded calls; it is never invented;
+* why: the thesis, top evidence and invalidation. For a consensus, the supporting and opposing agents,
+  the score by source, the disagreement, the independent sources, the reasons for uncertainty and the
+  devil's advocate's verdict;
+* the circumstances: entry price, benchmark level, volatility at entry, regime, session, data state and
+  quote age, and the portfolio context (held or not, weight, posture, number of positions).
+
+A **learning pass** (`POST /brain/learn`, or the button on the page's *Learning* tab) then:
 
 1. **grades** each prediction whose due date is a completed session against real closing prices only
    (the market service's daily history; synthetic prices are refused, like the prediction ledger).
    Symbols are graded on their return relative to the benchmark, `@market` calls on the benchmark's own
-   return. A call whose close never arrives is voided after 10 days.
+   return. A call whose close never arrives is voided after 10 days. The outcome is broken down so
+   accuracy is never confused with other effects:
+   * the benchmark's own return;
+   * the relative return in units of the call's risk (*risk-adjusted*), marked as **noise** when it is
+     within half a standard deviation (a hit or a miss that says little: luck);
+   * the **timing** part, earned before the next close, when a decision could first be acted on (an
+     execution effect, not capturable skill), and the part that remained;
+   * whether it was made on **usable data**.
 2. gives each **decision** the outcome of the consensus it was made on (same cycle, same subject);
 3. writes a **reflection** per decision that judges **decision quality** from what was known at the time
    and **outcome quality** separately. Decision quality is *poor* if the data was not executable, the risk
    engine did not allow it, or the devil's advocate challenged it; otherwise *good* when most soft checks
-   passed (confidence, agreement, no unresolved objection, evidence beyond one idea, agents with a measured
-   record) and *fair* otherwise. Outcome quality is *good* or *bad* beyond ±0.5% relative. The quadrants
-   are kept apart:
+   passed (confidence, agreement, no unresolved objection, evidence from more than one source, agents with
+   a measured record) and *fair* otherwise. Outcome quality is *good* or *bad* beyond ±0.5% relative.
+   The quadrants are kept apart:
    * *earned*: good decision, good outcome;
    * *unlucky*: good decision, bad outcome; do not change the rules because of it;
    * *lucky*: weak decision, good outcome; do not repeat it because it worked;
@@ -1305,13 +1324,26 @@ Every directional call a forecasting agent makes, and every directional consensu
    Blocked ideas (WATCH) are graded as counterfactuals: whether the block saved money or cost an
    opportunity. Lessons record which of the devil's advocate's objections were borne out and which agents
    were right.
-4. **recomputes track records** from graded calls only, per agent version, per regime, all time and last
-   90 days: hit rate (with its z-score), Brier score, rank IC, and calibration by confidence bucket.
-   The consensus weight stays 1.0 (*unproven*) until an agent has `QP_BRAIN_MIN_RELIABILITY_OBSERVATIONS`
-   graded calls in the slice. After that it becomes `1 + 4 × (shrunk hit rate − 0.5)`, bounded to
-   0.25–1.75, with the hit rate shrunk toward 50% by 20 pseudo-calls.
-5. runs **failure analysis** for agents with enough calls: weak regimes, confidently wrong calls,
-   miscalibration, directional bias, below a coin flip. Lessons and agent performance go to memory.
+4. **recomputes track records** per agent version (and for the consensus), per regime, all time and last
+   90 days. The statistics are built so a small or repetitive sample cannot make a claim:
+   * **Independent observations.** Calls on the same subject whose horizons overlap share one outcome
+     and form one block; every statistic counts blocks (`n_effective`), not raw predictions. Otherwise
+     an agent repeating a view all day would look significant.
+   * **Hit rate** with a 95% Wilson interval and a p-value against a coin flip, adjusted across all
+     agents, regimes and windows for the false-discovery rate (Benjamini–Hochberg), because with many
+     slices some look good by chance.
+   * **A verdict:** *unproven* (fewer than `QP_BRAIN_MIN_RELIABILITY_OBSERVATIONS` independent calls),
+     *no evidence either way*, *evidence of skill*, or *evidence of harm* (only when q < 10%).
+   * Brier score, rank IC, **mean excess** (benchmark-relative) and the same in **risk units**, the share
+     of noise outcomes, the timing effect, and calibration by confidence bucket.
+   * Calls made on unusable data are graded and counted but left out of the verdict and weight, which
+     measure skill on valid inputs.
+   * **The consensus weight** is 1.0 until a verdict is significant. It then moves to the conservative
+     end of the interval, `1 + 4 × (bound − 0.5)` (the lower bound for skill, the upper for harm),
+     bounded to 0.25–1.75.
+5. runs **failure analysis** for agents with enough independent calls. A weakness is named only when
+   the evidence supports it (the interval lies below a coin flip): weak regimes, confidently wrong calls,
+   miscalibration, directional bias. Lessons and agent performance go to memory.
 
 The consensus **calibration** (hit rate by post-debate confidence) is the evidence for or against
 `QP_BRAIN_MIN_CONFIDENCE`. Nothing is scored before it has matured, and nothing is graded twice.
@@ -1572,6 +1604,7 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0011_brain` | `brain_agents`, `brain_cycles`, `brain_agent_runs`, `brain_opinions`, `brain_consensus`, `brain_decisions`, `brain_predictions`, `brain_memory`, `brain_reflections`, `brain_agent_performance`, `brain_improvements`, `brain_events`, `brain_state` |
 | `0012_brain_research` | `brain_opportunities` (with the pipeline trace), `brain_debates` |
 | `0013_brain_strategy_lab` | `brain_strategies` (versioned specs, status, validation and paper results), `brain_strategy_runs` |
+| `0014_brain_prediction_quality` | `brain_predictions.expected_return`; `brain_agent_performance`: independent observations, Wilson interval, p- and q-values, verdict, mean excess (raw and in risk units) |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)

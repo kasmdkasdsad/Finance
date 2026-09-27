@@ -778,6 +778,8 @@ class BrainPredictionRow(Base):
     hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # the source's measured mean relative return for calls like this one; None until it is calibrated
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class BrainReflectionRow(Base):
@@ -823,6 +825,15 @@ class BrainAgentPerformanceRow(Base):
     calibration: Mapped[list[Any]] = mapped_column(JSON, default=list)
     reliability: Mapped[float | None] = mapped_column(Float, nullable=True)
     computed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    # independent observations (overlapping calls on one subject count once) and what they support
+    n_effective: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ci_low: Mapped[float | None] = mapped_column(Float, nullable=True)  # 95% Wilson interval of the hit rate
+    ci_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # two-sided, against a coin flip
+    q_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # false-discovery adjusted
+    verdict: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    mean_excess: Mapped[float | None] = mapped_column(Float, nullable=True)  # mean favourable relative return
+    mean_excess_z: Mapped[float | None] = mapped_column(Float, nullable=True)  # the same in units of risk
 
 
 class BrainImprovementRow(Base):
