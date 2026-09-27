@@ -6,7 +6,12 @@ import httpx
 import pytest
 import respx
 
-from quantpulse.core.errors import ProviderHTTPError, ProviderNotConfigured, ProviderParseError
+from quantpulse.core.errors import (
+    ProviderHTTPError,
+    ProviderNoData,
+    ProviderNotConfigured,
+    ProviderParseError,
+)
 from quantpulse.providers.alpaca import Alpaca
 from quantpulse.providers.base import occ_parse
 from quantpulse.providers.polygon import Polygon
@@ -313,6 +318,18 @@ async def test_polygon_snapshot_and_class_share_symbol(http):
     assert q.symbol == "BRK-B" and q.price == 483.2 and q.bid == 483.1 and q.ask == 483.3
     assert q.previous_close == 479.5
     assert route.calls[0].request.url.params["apiKey"] == "KEY"
+
+
+@respx.mock
+async def test_polygon_snapshot_without_a_timestamp_is_not_a_quote(http):
+    respx.get("https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/XYZ").mock(
+        return_value=httpx.Response(
+            200,
+            json={"status": "OK", "ticker": {"ticker": "XYZ", "day": {"c": 10.0}, "lastTrade": {"p": 10.1}}},
+        )
+    )
+    with pytest.raises(ProviderNoData, match="no timestamp"):
+        await Polygon(http, "KEY").quote("XYZ")
 
 
 @respx.mock

@@ -1,9 +1,12 @@
 """Data-quality agent: can the data behind each subject be trusted right now?
 
-It has no market view; it is a *constraint*. It reports each focus symbol's data state (FRESH, LIVE,
-STALE, UNAVAILABLE, MARKET_CLOSED, PROVIDER_ERROR), quote problems found by the existing quote validation
-(one-sided, crossed, stale or off-market bid/asks, prices inconsistent with history), thin history and
-provider errors — and *vetoes* any action on a subject whose data is not executable. A veto cannot be
+It has no market view; it is a *constraint*. It reports each focus symbol's precise quote status (see
+:mod:`quantpulse.brain.data_health`: fresh, live, stale, no print since the open, delayed, missing,
+refused by the subscription, provider error, invalid timestamp, market closed, holiday, synthetic), what
+the price and spread were measured on (IEX alone, SIP, delayed SIP), quote problems found by the existing
+quote validation, thin history and provider errors — and *vetoes* any action on a subject whose data is
+not executable. For the market it reports the cycle's data headline and causes, and vetoes everything
+when this computer's clock is so far from Alpaca's that quote ages cannot be trusted. A veto cannot be
 outvoted by bullish agents.
 """
 
@@ -15,6 +18,7 @@ from quantpulse.domain import trading_signals as ts
 from quantpulse.schemas.common import DataStatus
 
 from ..context import BrainContext
+from ..data_health import CLOCK_SKEW_VETO_SECONDS
 from ..types import (
     EXECUTABLE_STATES,
     MARKET,
@@ -94,6 +98,19 @@ class DataQualityAgent(Agent):
             )
         if ctx.market_open and live / n < 0.5:
             problems.append(f"only {live / n:.0%} of the universe has usable live quotes")
+        skew = ctx.feed.get("clock_skew_s")
+        if skew is not None:
+            ev.append(Evidence("clock_skew_s", skew, f"this computer's clock vs Alpaca's: {skew:+.1f}s"))
+            if ctx.market_open and abs(skew) > CLOCK_SKEW_VETO_SECONDS:
+                problems.append(
+                    f"system clock is {skew:+.0f}s off Alpaca's: quote ages cannot be trusted (synchronise it)"
+                )
+        for i, cause in enumerate(ctx.feed.get("causes") or []):
+            ev.append(
+                Evidence(
+                    f"data_cause:{i}", cause[:300], cause, direction=0 if ctx.feed.get("healthy") else -1
+                )
+            )
         if not ctx.market_open:
             state, thesis = DataState.MARKET_CLOSED, "market closed: daily data only, nothing is executable"
         elif problems:
@@ -102,7 +119,9 @@ class DataQualityAgent(Agent):
                 "; ".join(problems),
             )
         else:
-            state, thesis = DataState.LIVE, f"market data healthy ({live} live quotes)"
+            state, thesis = DataState.LIVE, f"market data usable ({live} live quotes)"
+            if ctx.feed and not ctx.feed.get("healthy"):
+                thesis += f"; {ctx.feed.get('headline')}"
         veto = "; ".join(problems) if problems else ("market closed" if not ctx.market_open else None)
         return self._opinion(MARKET, state, thesis, ev, veto)
 
@@ -110,6 +129,19 @@ class DataQualityAgent(Agent):
         state = ctx.state(symbol)
         ev: list[Evidence] = [Evidence("data_state", state.value, f"data state {state.value}", quality=state)]
         problems: list[str] = []
+        diag = ctx.data_health.get(symbol)
+        if diag is not None:
+            ev.append(
+                Evidence(
+                    "quote_status",
+                    diag.status.value,
+                    f"{diag.status.value.replace('_', ' ')}: priced on {diag.coverage}"
+                    + (f"; spread checked on {diag.spread_source}" if diag.spread_source else ""),
+                    quality=state,
+                )
+            )
+            if diag.reasons and state not in EXECUTABLE_STATES:
+                problems.append(diag.reasons[0])
         q = ctx.quotes.get(symbol)
         if q is not None:
             ev.append(
@@ -151,7 +183,8 @@ class DataQualityAgent(Agent):
         if symbol not in ctx.indicators.index:
             problems.append("no price history")
         if state not in EXECUTABLE_STATES:
-            problems.insert(0, f"data {state.value}")
+            label = diag.status.value.replace("_", " ") if diag is not None else state.value
+            problems.insert(0, f"data {label}")
         veto = "; ".join(problems) if problems else None
         thesis = f"{symbol}: data {state.value}" + (f" — {veto}" if veto else ", usable")
         return self._opinion(symbol, state, thesis, ev, veto)

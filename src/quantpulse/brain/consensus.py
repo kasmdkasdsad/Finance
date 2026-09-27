@@ -29,6 +29,7 @@ QUALITY_FACTOR = {
     DataState.STALE: 0.6,
     DataState.UNAVAILABLE: 0.3,
     DataState.PROVIDER_ERROR: 0.3,
+    DataState.INVALID: 0.3,
 }
 MAX_DISAGREEMENT = 0.5
 MIN_CONFIDENCE = 0.2

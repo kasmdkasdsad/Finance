@@ -26,56 +26,29 @@ import pandas as pd
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
-from quantpulse.core.market_calendar import NEW_YORK, is_market_open
+from quantpulse.core.market_calendar import NEW_YORK, Session, is_market_open, session_at
 from quantpulse.domain import trading_regime as regime_mod
 from quantpulse.domain import trading_signals as ts
 from quantpulse.domain.fundamental_factors import FUNDAMENTAL_FEATURES
 from quantpulse.providers.alpaca_trading import BrokerError
 from quantpulse.schemas.common import DataStatus
+from quantpulse.services.market import MarketService
 from quantpulse.services.model import ModelService, ModelSnapshot
 from quantpulse.services.options import OptionsService
 from quantpulse.services.reference import ReferenceService
 from quantpulse.services.trading import TradingService
-from quantpulse.services.trading_data import LiveQuote, QuoteQuality, TradingDataLoader, TradingInputs
+from quantpulse.services.trading_data import LiveQuote, TradingDataLoader, TradingInputs
 from quantpulse.services.trading_risk import RiskLimits
 
 from .context import BrainContext, BrokerView, PortfolioState, brain_session
+from .data_health import closed_reason, diagnose, feed_report
 from .indicators import compute_indicators, market_statistics
 from .opportunities import Opportunity, scan_focus, scan_universe
 from .research_data import earnings_events, option_metrics
-from .types import BrainMode, BrainSession, DataState
+from .types import BrainMode, BrainSession
 
 logger = logging.getLogger(__name__)
 FOCUS_SCREEN = ("mom_3m", "rel_strength", "persistence", "px_vs_sma50", "mom_accel")
-
-
-def data_state(
-    symbol: str,
-    *,
-    quote: LiveQuote | None,
-    quality: QuoteQuality | None,
-    missing_reason: str | None,
-    market_open: bool,
-    price_status: DataStatus,
-    fresh_seconds: float,
-    max_age_seconds: float,
-) -> DataState:
-    """How far a symbol's market data can be trusted right now (see :class:`DataState`)."""
-    if price_status is DataStatus.SYNTHETIC:
-        return DataState.UNAVAILABLE  # simulated prices are never data
-    if not market_open:
-        return DataState.MARKET_CLOSED
-    if quote is None:
-        reason = (missing_reason or "").lower()
-        return DataState.PROVIDER_ERROR if ("fail" in reason or "error" in reason) else DataState.UNAVAILABLE
-    age = quote.age_seconds
-    if quote.quote_age_seconds is not None:
-        age = max(age, quote.quote_age_seconds) if quality is not None and quality.usable_bid_ask else age
-    if age <= fresh_seconds:
-        return DataState.FRESH
-    if age <= max_age_seconds:
-        return DataState.LIVE
-    return DataState.STALE
 
 
 def choose_focus(
@@ -132,6 +105,7 @@ class Perception:
         reference: ReferenceService | None = None,
         model: ModelService | None = None,
         options: OptionsService | None = None,
+        market: MarketService | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -141,6 +115,7 @@ class Perception:
         self._reference = reference
         self._model = model
         self._options = options
+        self._market = market
 
     async def _portfolio(self, errors: dict[str, str]) -> PortfolioState:
         if not self._broker.configured():
@@ -160,13 +135,19 @@ class Perception:
             open_orders=[o for o in orders if o.is_open],
         )
 
-    async def _market_open(self, now: datetime, errors: dict[str, str]) -> tuple[bool, str]:
+    async def _market_open(self, now: datetime, errors: dict[str, str]) -> tuple[bool, str, float | None]:
+        """Whether the market is open (Alpaca's clock is authoritative), and how far this computer's clock
+        is from Alpaca's (seconds, positive when ours is ahead; ``None`` without a broker clock)."""
         if self._broker.configured():
             try:
-                return (await self._broker.clock()).is_open, "alpaca"
+                before = self._clock.now()
+                clock = await self._broker.clock()
+                after = self._clock.now()
+                local = before + (after - before) / 2  # the request's midpoint: network time cancels out
+                return clock.is_open, "alpaca", (local - clock.timestamp).total_seconds()
             except BrokerError as exc:
                 errors["clock"] = str(exc)
-        return is_market_open(now), "calendar"
+        return is_market_open(now), "calendar", None
 
     async def _sectors(self, errors: dict[str, str]) -> dict[str, str]:
         sectors = dict.fromkeys(self._s.trading_etfs, "ETF")
@@ -249,7 +230,7 @@ class Perception:
         now = self._clock.now()
         errors: dict[str, str] = {}
         portfolio = await self._portfolio(errors)
-        market_open, clock_source = await self._market_open(now, errors)
+        market_open, clock_source, skew = await self._market_open(now, errors)
         held = [s for s, p in portfolio.positions.items() if p.qty > 0]
         requested = [s.strip().upper() for s in requested if s.strip()]
         inputs = await self._data.load(list(dict.fromkeys([*held, *requested])))
@@ -326,19 +307,39 @@ class Perception:
         kill = await self._trading.kill_switch()
         # the trading controls, read only: why an order would not reach Alpaca right now (the brain never submits)
         blockers = await self._trading.submit_blockers(kill)
-        states = {
-            s: data_state(
+        closed = None
+        if not market_open:
+            closed = closed_reason(now) or (
+                "unscheduled closure (Alpaca says closed)"
+                if session_at(now) is Session.REGULAR
+                else "after hours"
+            )
+        feeds = self._market.feed_status() if self._market is not None else []
+        refused = next((f["stock_feed"] for f in feeds if f.get("stock_feed_error")), None)
+        diagnoses = {
+            s: diagnose(
                 s,
                 quote=inputs.quotes.get(s),
                 quality=inputs.quality.get(s),
                 missing_reason=inputs.missing_quotes.get(s),
                 market_open=market_open,
+                closed=closed,
                 price_status=inputs.price_status,
                 fresh_seconds=self._s.brain_fresh_quote_seconds,
                 max_age_seconds=self._s.trading_max_quote_age_seconds,
+                refused_feed=refused,
             )
             for s in dict.fromkeys([*inputs.universe, *focus])
         }
+        states = {s: d.state for s, d in diagnoses.items()}
+        feed = feed_report(
+            diagnoses,
+            market_open=market_open,
+            closed=closed,
+            feeds=feeds,
+            skew_seconds=skew,
+            max_age_seconds=self._s.trading_max_quote_age_seconds,
+        )
         session = brain_session(now)
         if session is BrainSession.OPEN and not market_open:
             session = BrainSession.HOLIDAY  # Alpaca says closed on a calendar trading day
@@ -381,6 +382,8 @@ class Perception:
             limits=RiskLimits.from_settings(self._s),
             kill_switch=kill.active,
             trading_blockers=blockers,
+            data_health=diagnoses,
+            feed=feed,
             model=model,
             options=options,
             events=events,

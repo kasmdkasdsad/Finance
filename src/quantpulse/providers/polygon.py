@@ -192,6 +192,8 @@ class Polygon:
         )
         require(price is not None, NAME, f"snapshot for {symbol} has no price")
         stamp_ns = last.t or snap.updated
+        if not stamp_ns:  # never stamped "now": its age would be invented
+            raise ProviderNoData(NAME, f"snapshot for {symbol} has no timestamp")
         quote = snap.lastQuote or _LastQuote()
         return Quote(
             symbol=symbol,
@@ -205,7 +207,7 @@ class Polygon:
             day_high=positive_or_none(day.h),
             day_low=positive_or_none(day.l),
             volume=finite_or_none(day.v),
-            timestamp=epoch_to_datetime(stamp_ns, "ns") if stamp_ns else datetime.now(UTC),
+            timestamp=epoch_to_datetime(stamp_ns, "ns"),
         )
 
     async def quotes(self, symbols: Sequence[str]) -> dict[str, Quote]:

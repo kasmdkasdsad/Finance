@@ -76,7 +76,7 @@ class BrainService:
         self.memory = MemoryStore(db)
         self.models = ModelRouter(settings, clock, store=self.store)  # 'none' unless a provider is configured
         self.perception = Perception(
-            settings, clock, data, BrokerView(broker), trading, reference, model, options
+            settings, clock, data, BrokerView(broker), trading, reference, model, options, market
         )
         self.orchestrator = Orchestrator(
             settings,

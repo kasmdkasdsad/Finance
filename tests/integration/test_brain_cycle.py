@@ -277,6 +277,37 @@ async def test_stale_quotes_are_vetoed(tmp_path):
         assert only_reads(api.fake)
 
 
+async def test_every_cycle_explains_its_market_data(tmp_path):
+    clock = FakeClock(NOW)
+    feed = TrendFeed(clock, drifts=WIDE)
+    feed.quote_age = timedelta(minutes=30)
+    async for api in brain_client(tmp_path, clock, feed=feed):
+        cycle = await run_cycle(api)
+        dq = cycle["data_quality"]
+        focus = [f["symbol"] for f in cycle["focus"]]
+        assert set(dq["diagnosis"]) == set(focus)
+        assert {d["status"] for d in dq["diagnosis"].values()} == {"stale"}
+        assert all("limit 600s" in d["reasons"][0] for d in dq["diagnosis"].values())
+        report = dq["feed"]
+        assert report["clock_skew_s"] == 0.0 and report["market_open"] and not report["healthy"]
+        assert report["counts"]["stale"] == report["symbols"]
+        assert only_reads(api.fake)
+
+
+async def test_a_wrong_system_clock_makes_nothing_executable(tmp_path):
+    clock = FakeClock(NOW)
+    alpaca_time = FakeClock(NOW - timedelta(seconds=90))  # this computer runs 90s ahead of Alpaca
+    fake = FakeAlpacaPaper(clock=alpaca_time)
+    async for api in brain_client(tmp_path, clock, fake=fake):
+        cycle = await run_cycle(api)
+        report = cycle["data_quality"]["feed"]
+        assert report["clock_skew_s"] == 90.0 and "90.0s ahead of Alpaca's" in report["headline"]
+        veto = cycle["data_quality"]["market"]["veto"]
+        assert "system clock is +90s off Alpaca's" in veto
+        assert not [d for d in cycle["decisions"] if d["status"] in {"recommended", "dry_run_approved"}]
+        assert only_reads(api.fake)
+
+
 async def test_market_closed_means_nothing_is_executable(tmp_path):
     clock = FakeClock(NOW)
     fake = FakeAlpacaPaper(clock=clock)

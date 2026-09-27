@@ -60,6 +60,9 @@ OFF_MARKET_DELAYED_PCT = 0.10  # the same for a 15-minute-old consolidated quote
 PRICE_JUMP_PCT = 0.25  # live price this far from the last close: bad tick, split or wrong symbol
 HISTORY_MISMATCH_PCT = 0.15  # stored close vs the vendor's previous close: split or mis-mapped history
 FEED_LABELS = {"iex": "IEX", "sip": "SIP", "delayed_sip": "SIP (15-min delayed)"}
+# A timestamp this far ahead of our clock is not a fresh quote: its age cannot be known (bad data or a
+# wrong system clock). It is never read as "0 seconds old".
+FUTURE_TOLERANCE_SECONDS = 5.0
 Progress = Callable[[float, str], None]
 
 
@@ -102,6 +105,12 @@ class LiveQuote:
     @property
     def venue(self) -> str:
         return FEED_LABELS.get(self.feed or "", self.provider)
+
+    def ahead_seconds(self, stamp: datetime | None) -> float:
+        """How far ``stamp`` is ahead of the time this quote was read (0 when not ahead or unknown)."""
+        if stamp is None or self.as_of is None:
+            return 0.0
+        return max((stamp - self.as_of).total_seconds(), 0.0)
 
     @property
     def quote_age_seconds(self) -> float | None:
@@ -162,7 +171,16 @@ def assess_quote(q: LiveQuote, max_age_seconds: float) -> QuoteQuality:
 
     venue: float | None = None
     label = q.venue
-    if not q.bid or not q.ask:
+    trade_ahead = q.ahead_seconds(q.timestamp)
+    if trade_ahead > FUTURE_TOLERANCE_SECONDS:
+        blocks.append(
+            f"last trade is stamped {trade_ahead:,.0f}s in the future: its age cannot be known "
+            "(bad timestamp or a wrong system clock)"
+        )
+    quote_ahead = q.ahead_seconds(q.quote_time)
+    if quote_ahead > FUTURE_TOLERANCE_SECONDS:
+        problems.append(f"primary: {label} bid/ask is stamped {quote_ahead:,.0f}s in the future")
+    elif not q.bid or not q.ask:
         missing = "bid" if not q.bid else "ask"
         problems.append(f"primary: {label} quote is one-sided (no {missing})")
     elif q.bid > q.ask:
@@ -186,7 +204,10 @@ def assess_quote(q: LiveQuote, max_age_seconds: float) -> QuoteQuality:
         limit = max_age_seconds + (DELAYED_SIP_SECONDS if delayed else 0)
         age = q.nbbo_age_seconds
         spread = q.nbbo_spread_bps
-        if spread is None:
+        nbbo_ahead = q.ahead_seconds(q.nbbo_time)
+        if nbbo_ahead > FUTURE_TOLERANCE_SECONDS:
+            problems.append(f"consolidated: {nlabel} quote is stamped {nbbo_ahead:,.0f}s in the future")
+        elif spread is None:
             problems.append(f"consolidated: {nlabel} quote is one-sided or crossed")
         elif age is not None and age > limit:
             problems.append(f"consolidated: {nlabel} quote is {age:,.0f}s old (limit {limit:,.0f}s)")

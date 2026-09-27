@@ -1142,6 +1142,43 @@ Trading*). What is not built is listed under [Known limitations](#known-limitati
    * working: this cycle's investigation;
    * long term: regime changes and proposed trades.
 
+### What the market data really is
+
+Before any agent runs, every quote gets one precise status (`brain/data_health.py`), shown on the page and
+kept with the cycle:
+
+| Status | Meaning | Executable |
+|---|---|---|
+| `fresh` · `live` | A real-time print within `QP_BRAIN_FRESH_QUOTE_SECONDS` / `QP_TRADING_MAX_QUOTE_AGE_SECONDS` | yes |
+| `stale` | The market is open but the feed's last print is older than the limit | no |
+| `no_trade_today` | The feed has not printed the symbol since the open: the price is the previous session's | no |
+| `delayed` | The price feed itself is 15 minutes delayed | no |
+| `missing` · `provider_error` · `subscription_unavailable` | No quote; the request failed; the vendor refused the feed for this subscription | no |
+| `invalid_timestamp` | Stamped in the future: its age cannot be known | no |
+| `market_closed` · `holiday` | Outside the regular session (weekend, holiday, pre-market, after hours, unscheduled closure) | no |
+| `synthetic` | Simulated prices | no |
+
+Each diagnosis also records what the price and the spread were measured on (IEX alone, real-time SIP, or
+the 15-minute delayed SIP quote) and every problem the quote validation found. The cycle's **data report**
+explains the causes in plain words, most important first. It covers refused feeds, the clock and the
+free plan's IEX quotes. It also measures this computer's clock against Alpaca's server clock, because a
+wrong system clock makes every quote age wrong. The data-quality agent vetoes everything while the clock
+is more than 30 s off.
+
+What was found while investigating stale quotes:
+
+* **IEX is one exchange.** On the free plan, prices come from IEX, which carries a few percent of US
+  volume. Its last trade in a mid-cap stock can be minutes old while the stock trades elsewhere. Those
+  prices are treated as stale by design. The fix is real-time SIP data (`QP_ALPACA_STOCK_FEED=sip` with a
+  subscription that includes it), not a longer `QP_TRADING_MAX_QUOTE_AGE_SECONDS`.
+* **Two data-layer bugs were fixed.** Alpaca and Polygon snapshots that carried a price but no timestamp
+  used to be stamped with the current time, so a price of unknown age looked brand new. They are now
+  dropped (Alpaca falls back to the daily bar's own time).
+* **Future timestamps are now caught.** A timestamp in the future used to read as "0 seconds old". It now
+  blocks new entries and its bid/ask is not believed (exits still go).
+* **Market-closed quotes are labelled correctly.** Quotes outside the session are reported as
+  `market_closed` or `holiday` with the reason, not as stale data.
+
 ### Agents
 
 All of them are deterministic except `briefing` (see [Language models](#language-models-optional-none-by-default)).

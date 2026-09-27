@@ -33,6 +33,7 @@ from .opportunities import Opportunity
 from .types import BrainMode, BrainSession, DataState, Opinion
 
 if TYPE_CHECKING:
+    from .data_health import QuoteDiagnosis
     from .llm import ModelRouter
 
 
@@ -166,6 +167,8 @@ class BrainContext:
     data_states: dict[str, DataState]
     limits: RiskLimits
     kill_switch: bool
+    data_health: dict[str, QuoteDiagnosis] = field(default_factory=dict)  # precise quote status per symbol
+    feed: dict[str, Any] = field(default_factory=dict)  # the cycle's data report (feeds, clock skew, causes)
     trading_blockers: list[str] = field(default_factory=list)  # trading controls read now (never acted on)
     model: ModelSnapshot | None = None  # the stock model's live scores and raw features (fundamentals…)
     options: dict[str, dict[str, Any]] = field(default_factory=dict)  # option-chain metrics per symbol

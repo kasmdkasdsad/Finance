@@ -32,9 +32,11 @@ class DataState(StrEnum):
     MARKET_CLOSED = "market_closed"  # outside the regular session: daily data only
     UNAVAILABLE = "unavailable"  # no data
     PROVIDER_ERROR = "provider_error"  # the source failed
+    INVALID = "invalid"  # timestamps that cannot be right (stamped in the future): age unknown
 
 
 STATE_RANK: dict[DataState, int] = {
+    DataState.INVALID: 0,
     DataState.PROVIDER_ERROR: 0,
     DataState.UNAVAILABLE: 1,
     DataState.STALE: 2,

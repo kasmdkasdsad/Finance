@@ -16,6 +16,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from pydantic import Field
 
@@ -146,6 +147,7 @@ class Alpaca:
         self._stock_feed = stock_feed
         self._options_feed = options_feed
         self._refused_feeds: dict[str, datetime] = {}  # consolidated feed -> when the subscription refused it
+        self._feed_errors: dict[str, tuple[int | None, datetime]] = {}  # feed -> (HTTP status, when)
 
     def configured(self) -> bool:
         return bool(self._key_id and self._secret)
@@ -157,12 +159,17 @@ class Alpaca:
 
     async def quotes(self, symbols: Sequence[str]) -> dict[str, Quote]:
         ours = {vendor_symbol(s): s for s in symbols}
-        payload = await self._http.get_json(
-            NAME,
-            f"{self._base}/v2/stocks/snapshots",
-            params={"symbols": ",".join(ours), "feed": self._stock_feed},
-            headers=self._headers(),
-        )
+        try:
+            payload = await self._http.get_json(
+                NAME,
+                f"{self._base}/v2/stocks/snapshots",
+                params={"symbols": ",".join(ours), "feed": self._stock_feed},
+                headers=self._headers(),
+            )
+        except ProviderHTTPError as exc:  # remembered so data health can say "the subscription refused it"
+            self._feed_errors[self._stock_feed] = (exc.status_code, datetime.now(UTC))
+            raise
+        self._feed_errors.pop(self._stock_feed, None)
         if not isinstance(payload, dict):
             payload = {}
         out: dict[str, Quote] = {}
@@ -180,6 +187,17 @@ class Alpaca:
     @property
     def stock_feed(self) -> str:
         return self._stock_feed
+
+    def feed_status(self) -> dict[str, Any]:
+        """Which feeds this installation reads and which the subscription refused (never credentials)."""
+        error = self._feed_errors.get(self._stock_feed)
+        return {
+            "provider": NAME,
+            "stock_feed": self._stock_feed,
+            "stock_feed_error": {"status": error[0], "at": error[1].isoformat()} if error else None,
+            "consolidated_feeds": list(CONSOLIDATED_FEEDS),
+            "refused_feeds": {f: t.isoformat() for f, t in self._refused_feeds.items()},
+        }
 
     async def consolidated_quotes(self, symbols: Sequence[str]) -> dict[str, ConsolidatedQuote]:
         """Latest consolidated (SIP) bid/ask for ``symbols``: the real-time SIP feed when the subscription
@@ -362,10 +380,14 @@ class Alpaca:
 def _snapshot_to_quote(symbol: str, snap: _StockSnapshot, feed: str | None = None) -> Quote | None:
     trade = snap.latestTrade or _Trade()
     daily = snap.dailyBar
-    price = positive_or_none(trade.p) or (positive_or_none(daily.c) if daily else None)
-    if price is None:
+    # the price and the time it was set come from the same record; a price without a time is not a quote
+    # (it is never stamped "now": its age would be invented)
+    if positive_or_none(trade.p) and trade.t is not None:
+        price, stamp = float(trade.p or 0), trade.t
+    elif daily is not None and positive_or_none(daily.c) and daily.t is not None:
+        price, stamp = float(daily.c or 0), daily.t
+    else:
         return None
-    stamp = trade.t or (daily.t if daily else None) or datetime.now(UTC)
     q = snap.latestQuote or _Quote()
     return Quote(
         symbol=symbol,

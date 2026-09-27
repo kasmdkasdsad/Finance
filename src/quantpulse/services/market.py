@@ -250,6 +250,15 @@ class MarketService:
             out.missing[s] = "not returned by the batch quote source"
         return out
 
+    def feed_status(self) -> list[dict[str, Any]]:
+        """Each configured quote vendor's feeds and what its subscription refused (no credentials)."""
+        out: list[dict[str, Any]] = []
+        for p in self._providers:
+            status = getattr(p, "feed_status", None)
+            if status is not None and p.configured():
+                out.append(dict(status()))
+        return out
+
     async def consolidated_quotes(self, symbols: Sequence[str]) -> dict[str, Any]:
         """All-exchange (SIP) bid/ask for ``symbols`` from a vendor that offers it (Alpaca), possibly
         15 minutes delayed; empty when no configured vendor can provide it. Never raises."""

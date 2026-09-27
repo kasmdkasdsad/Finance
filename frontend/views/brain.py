@@ -35,6 +35,7 @@ QUALITY_COLOR = {
     "stale": "orange",
     "unavailable": "red",
     "provider_error": "red",
+    "invalid": "red",
 }
 
 
@@ -159,8 +160,38 @@ def _overview(cycle: dict[str, Any]) -> None:
             counts = pd.Series(states).value_counts()
             for state, n in counts.items():
                 st.badge(f"{state}: {n}", color=QUALITY_COLOR.get(str(state), "gray"))
+        feed = dq.get("feed") or {}
+        if feed:
+            st.markdown(_md(f"**What the data is:** {feed.get('headline', '')}"))
+            for cause in (feed.get("causes") or [])[1:]:
+                st.caption(_md(f"• {cause}"))
+            skew = feed.get("clock_skew_s")
+            if skew is not None:
+                st.caption(f"This computer's clock vs Alpaca's: {skew:+.1f}s")
         for source, err in (dq.get("provider_errors") or {}).items():
             st.caption(_md(f"✗ {source}: {err}"))
+    diagnosis = (cycle.get("data_quality") or {}).get("diagnosis") or {}
+    if diagnosis:
+        with st.expander("Quote diagnosis for the symbols studied"):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "symbol": d["symbol"],
+                            "status": d["status"].replace("_", " "),
+                            "priced on": d["coverage"],
+                            "last print (s)": d.get("trade_age_s"),
+                            "bid/ask (s)": d.get("quote_age_s"),
+                            "spread (bp)": d.get("spread_bps"),
+                            "spread checked on": d.get("spread_source"),
+                            "why": "; ".join(d.get("reasons") or []),
+                        }
+                        for d in diagnosis.values()
+                    ]
+                ).astype(str),
+                hide_index=True,
+                use_container_width=True,
+            )
     if cycle.get("focus"):
         st.subheader("What it studied")
         st.dataframe(pd.DataFrame(cycle["focus"]), hide_index=True, use_container_width=True)

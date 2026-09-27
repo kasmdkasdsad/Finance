@@ -371,6 +371,8 @@ class Orchestrator:
             "data_quality": {
                 "market": dq[0].to_dict() if dq else None,
                 "states": {s: ctx.state(s).value for s in ctx.focus},
+                "diagnosis": {s: ctx.data_health[s].to_dict() for s in ctx.focus if s in ctx.data_health},
+                "feed": ctx.feed,
                 "provider_errors": ctx.provider_errors,
             },
             "focus": [{"symbol": s, "reason": ctx.focus_reasons.get(s, "")} for s in ctx.focus],

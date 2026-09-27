@@ -147,3 +147,16 @@ def test_quotes_without_a_bid_ask_timestamp_are_still_checked():
     q = quote(quote_time=None, feed=None, provider="yahoo")
     qq = assess_quote(q, MAX_AGE)
     assert qq.spread_bps is not None and qq.spread_source == "yahoo only"
+
+
+def test_a_timestamp_in_the_future_is_never_read_as_fresh():
+    ahead = quote(timestamp=NOW + timedelta(seconds=90), age_seconds=0.0)  # the clamped age says "0s old"
+    qq = assess_quote(ahead, MAX_AGE)
+    assert any("in the future" in b for b in qq.entry_blocks)  # no new position on it
+    decision = book(ahead).evaluate(OrderIntent("DELL", "buy", 10, 120.0, "entry", "t"))
+    assert not decision.approved
+
+    bid_ask_ahead = assess_quote(quote(quote_time=NOW + timedelta(seconds=60)), MAX_AGE)
+    assert not bid_ask_ahead.usable_bid_ask and any("in the future" in p for p in bid_ask_ahead.problems)
+    small = assess_quote(quote(timestamp=NOW + timedelta(seconds=2)), MAX_AGE)  # within clock tolerance
+    assert small.entry_blocks == () and small.usable_bid_ask
