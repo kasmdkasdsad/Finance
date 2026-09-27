@@ -25,9 +25,11 @@ from quantpulse.core.clock import Clock
 
 from .consensus import Consensus, ReliabilityBook, build_consensus
 from .context import BrainContext
+from .debate import Debate, review
 from .decisions import Proposal, plan, risk_preview
 from .learning import PredictionRecorder
 from .memory import LONG_TERM, SHORT_TERM, WORKING, MemoryStore
+from .opportunities import trace
 from .perception import Perception
 from .registry import AgentRegistry, AgentRun, Skip
 from .store import BrainStore
@@ -45,6 +47,7 @@ class CycleResult:
     skips: list[Skip] = field(default_factory=list)
     consensus: dict[str, Consensus] = field(default_factory=dict)
     proposals: list[Proposal] = field(default_factory=list)
+    debates: dict[str, Debate] = field(default_factory=dict)
     predictions: int = 0
     error: str | None = None
 
@@ -96,7 +99,10 @@ class Orchestrator:
         )
         result = CycleResult(cycle_id=cycle_id, status="running")
         try:
-            ctx = await self._perception.perceive(mode, symbols)
+            last_regime = await self._memory.latest(LONG_TERM, "regime_change", MARKET)
+            ctx = await self._perception.perceive(
+                mode, symbols, previous_regime=last_regime["data"].get("to") if last_regime else None
+            )
             result.ctx = ctx
             selections, skips = self.registry.select(ctx, only)
             runs = await self.registry.run(ctx, selections, self._s.brain_agent_timeout_seconds)
@@ -106,6 +112,7 @@ class Orchestrator:
                 await self._store.reliability_rows(), self._s.brain_min_reliability_observations
             )
             result.consensus = self._consensus(ctx, reliability)
+            result.debates = review(ctx, result.consensus)  # bull, bear, devil's advocate
             if mode is not BrainMode.RESEARCH_ONLY:
                 result.proposals = plan(
                     ctx,
@@ -117,13 +124,26 @@ class Orchestrator:
                     earnings_caution_days=max(
                         self._s.brain_earnings_caution_days, self._s.trading_earnings_blackout_days
                     ),
+                    debates=result.debates,
                 )
                 risk_preview(ctx, result.proposals, mode)
+            trace(
+                ctx.opportunities,
+                focus=ctx.focus,
+                states=ctx.data_states,
+                market_open=ctx.market_open,
+                opinions=ctx.working.opinions,
+                consensus=result.consensus,
+                debates=result.debates,
+                proposals={p.subject: p for p in result.proposals},
+            )
 
             now = self._clock.now()
             await self._store.save_runs(cycle_id, runs, skips, now)
             consensus_ids = await self._store.save_consensus(cycle_id, result.consensus, now)
             await self._store.save_decisions(cycle_id, result.proposals, consensus_ids, mode.value, now)
+            await self._store.save_debates(cycle_id, result.debates, now)
+            await self._store.save_opportunities(cycle_id, ctx.opportunities, now)
             forecasts = [
                 o for r in runs for o in r.opinions if self.registry.get(r.agent_id).role == "forecast"
             ]
@@ -279,6 +299,7 @@ class Orchestrator:
                 "stats": ctx.market_stats,
                 "vix": ctx.vix,
                 "price_status": ctx.price_status.value,
+                "situation": ctx.working.facts.get("situation") or {},
             },
             "portfolio": {
                 **ctx.portfolio.summary(),
@@ -316,6 +337,16 @@ class Orchestrator:
                 "risk_approved": sum(1 for p in result.proposals if p.risk_approved),
                 "predictions_recorded": result.predictions,
                 "orders_sent": 0,
+                "opportunities": _count(o.status for o in ctx.opportunities),
+                "debates": _count(d.verdict for d in result.debates.values()),
+                "posture": (ctx.working.facts.get("situation") or {}).get("posture"),
             },
             "notes": ctx.notes,
         }
+
+
+def _count(values: Any) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for v in values:
+        out[v] = out.get(v, 0) + 1
+    return out

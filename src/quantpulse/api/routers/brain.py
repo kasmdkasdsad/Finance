@@ -17,6 +17,7 @@ from quantpulse.schemas.brain import (
     BrainCycleOut,
     BrainCycleSummaryOut,
     BrainMemoryOut,
+    BrainOpportunityOut,
     BrainRunIn,
     BrainStatusOut,
 )
@@ -117,3 +118,16 @@ async def memory(
 ) -> list[BrainMemoryOut]:
     rows = await c.brain.memories(tier=tier, kind=kind, subject=subject, text=text, limit=limit)
     return [BrainMemoryOut.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/opportunities", response_model=list[BrainOpportunityOut], summary="Detected opportunities, newest first"
+)
+async def opportunities(
+    kind: str | None = Query(None, max_length=32),
+    status: str | None = Query(None, max_length=24),
+    limit: int = Query(100, ge=1, le=1000),
+    c: Container = ContainerDep,
+) -> list[BrainOpportunityOut]:
+    rows = await c.brain.store.opportunities(kind=kind, status=status, limit=limit)
+    return [BrainOpportunityOut.model_validate(r) for r in rows]

@@ -16,15 +16,19 @@ from quantpulse.db.models import (
     BrainAgentRunRow,
     BrainConsensusRow,
     BrainCycleRow,
+    BrainDebateRow,
     BrainDecisionRow,
     BrainOpinionRow,
+    BrainOpportunityRow,
     BrainPredictionRow,
 )
 from quantpulse.db.session import Database
 
 from .agents.base import Agent
 from .consensus import Consensus
+from .debate import Debate
 from .decisions import Proposal
+from .opportunities import Opportunity
 from .registry import AgentRun, Skip
 
 
@@ -56,6 +60,14 @@ OPINION_COLS = (
 CONSENSUS_COLS = (
     "id", "subject", "stance", "score", "confidence", "unknown", "supporting", "neutral", "opposing",
     "abstaining", "disagreement", "detail", "vetoes", "data_quality", "reasons", "created_at",
+)  # fmt: skip
+OPPORTUNITY_COLS = (
+    "id", "cycle_id", "kind", "subject", "symbols", "direction", "strength", "headline", "evidence", "status",
+    "stages", "created_at",
+)  # fmt: skip
+DEBATE_COLS = (
+    "id", "subject", "stance_before", "confidence_before", "confidence_after", "verdict", "bull", "bear",
+    "objections", "change_our_mind", "created_at",
 )  # fmt: skip
 DECISION_COLS = (
     "id", "consensus_id", "subject", "action", "mode", "status", "confidence", "quantity", "est_price",
@@ -294,7 +306,7 @@ class BrainStore:
                         notional=d["notional"],
                         current_weight=p.current_weight,
                         target_weight=p.target_weight,
-                        rationale={"reasons": p.reasons, "blocked_by": p.blocked_by},
+                        rationale={"reasons": p.reasons, "blocked_by": p.blocked_by, "fit": p.fit},
                         risk_approved=p.risk_approved,
                         risk=p.risk,
                         execution={"sent": False, "reason": "the brain never sends orders itself"},
@@ -302,6 +314,18 @@ class BrainStore:
                         created_at=now,
                     )
                 )
+
+    async def save_opportunities(self, cycle_id: int, items: Sequence[Opportunity], now: datetime) -> None:
+        async with self._db.session() as s:
+            for o in items:
+                d = o.to_dict()
+                s.add(BrainOpportunityRow(cycle_id=cycle_id, created_at=now, **d))
+
+    async def save_debates(self, cycle_id: int, items: dict[str, Debate], now: datetime) -> None:
+        async with self._db.session() as s:
+            for d in items.values():
+                row = d.to_dict()
+                s.add(BrainDebateRow(cycle_id=cycle_id, created_at=now, **row))
 
     # ------------------------------------------------------------------ reads
     async def cycles(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -349,6 +373,20 @@ class BrainStore:
                 .select_from(BrainPredictionRow)
                 .where(BrainPredictionRow.cycle_id == cycle_id)
             )
+            opportunities = (
+                await s.scalars(
+                    select(BrainOpportunityRow)
+                    .where(BrainOpportunityRow.cycle_id == cycle_id)
+                    .order_by(BrainOpportunityRow.strength.desc())
+                )
+            ).all()
+            debates = (
+                await s.scalars(
+                    select(BrainDebateRow)
+                    .where(BrainDebateRow.cycle_id == cycle_id)
+                    .order_by(BrainDebateRow.id)
+                )
+            ).all()
         return {
             **_cols(row, CYCLE_COLS),
             "runs": [_cols(r, RUN_COLS) for r in runs],
@@ -356,7 +394,20 @@ class BrainStore:
             "consensus": [_cols(c, CONSENSUS_COLS) for c in consensus],
             "decisions": [_cols(d, DECISION_COLS) for d in decisions],
             "predictions_recorded": int(predictions or 0),
+            "opportunities": [_cols(o, OPPORTUNITY_COLS) for o in opportunities],
+            "debates": [_cols(d, DEBATE_COLS) for d in debates],
         }
+
+    async def opportunities(
+        self, *, kind: str | None = None, status: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        stmt = select(BrainOpportunityRow).order_by(BrainOpportunityRow.id.desc()).limit(limit)
+        if kind:
+            stmt = stmt.where(BrainOpportunityRow.kind == kind)
+        if status:
+            stmt = stmt.where(BrainOpportunityRow.status == status)
+        async with self._db.session() as s:
+            return [_cols(r, OPPORTUNITY_COLS) for r in (await s.scalars(stmt)).all()]
 
     async def predictions(self, status: str | None = None, limit: int = 200) -> list[BrainPredictionRow]:
         stmt = select(BrainPredictionRow).order_by(BrainPredictionRow.id.desc()).limit(limit)

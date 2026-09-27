@@ -33,6 +33,8 @@ AGENTS = {
     "options",
     "catalyst",
     "portfolio",
+    "research",
+    "situational_awareness",
 }
 # without a stock model run, live option chains or an earnings calendar (the fakes have none) these skip
 NEEDS_RESEARCH = {"fundamental", "valuation", "factor", "options", "catalyst"}
@@ -57,6 +59,8 @@ def _no_network(mock_net):
 
 async def brain_client(tmp_path, clock, fake=None, feed=None, client_host="127.0.0.1", **overrides):
     overrides.setdefault("brain_use_stock_model", False)  # never start a model training run in these tests
+    overrides.setdefault("brain_options_analysis", False)  # the fakes have no option chains or SEC filings
+    overrides.setdefault("brain_catalyst_analysis", False)
     feed = feed or TrendFeed(clock, drifts=WIDE)
     async for api in trading_client(
         tmp_path,
@@ -97,7 +101,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         assert cycle["portfolio"]["available"] and cycle["portfolio"]["positions"]["UPA"]["qty"] == 40
         focus = [f["symbol"] for f in cycle["focus"]]
         assert focus[0] == "UPA" and cycle["focus"][0]["reason"] == "held position"
-        assert 1 < len(focus) <= 9 and "SPY" not in focus
+        assert 1 < len(focus) <= 1 + 6 + 8 and "SPY" not in focus  # holding + opportunities + pre-screen
 
         # every agent ran and its run is persisted
         assert {a["agent_id"] for a in cycle["agents"]} == AGENTS
@@ -113,7 +117,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
             assert -1 <= o["score"] <= 1 and 0 <= o["confidence"] <= 1 and o["thesis"]
         for s in focus:
             assert {"data_quality", "technical", "momentum"} <= seen[s]
-        assert seen["@market"] == {"data_quality", "market_regime", "volatility"}
+        assert seen["@market"] == {"data_quality", "market_regime", "volatility", "situational_awareness"}
         assert seen["@portfolio"] == {"portfolio"}
         tech = next(o for o in cycle["opinions"] if o["agent_id"] == "technical" and o["subject"] == "UPC")
         assert tech["stance"] == "bullish" and tech["evidence"] and tech["invalidation"]
@@ -169,7 +173,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
 
         status = (await api.get(f"{BRAIN}/status")).json()
         assert status["paper_only"] and status["last_cycle"]["id"] == cycle["id"]
-        assert status["agents"] == {"registered": 13, "enabled": 13} and not status["running"]
+        assert status["agents"] == {"registered": 15, "enabled": 15} and not status["running"]
         assert status["open_predictions"] == len(preds) and "not built yet" in status["learning"]
 
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
@@ -311,7 +315,7 @@ async def test_agent_controls_and_background_runs(tmp_path):
         assert (await api.get(f"{BRAIN}/agents/momentum")).json()["enabled"] is False
         assert (await api.get(f"{BRAIN}/agents/nobody")).status_code == 404
         assert (await api.post(f"{BRAIN}/agents/nobody", json={"enabled": True})).status_code == 404
-        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 13, "enabled": 12}
+        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 15, "enabled": 14}
 
         cycle = await run_cycle(api, symbols=["DNA"])
         runs = by(cycle["runs"], "agent_id")
@@ -387,7 +391,9 @@ async def test_every_agent_takes_part_when_its_data_exists(tmp_path, monkeypatch
     monkeypatch.setattr(ReferenceService, "events", events)
     monkeypatch.setattr(ReferenceService, "next_earnings", next_earnings)
     clock = FakeClock(NOW)
-    async for api in brain_client(tmp_path, clock, brain_use_stock_model=True):
+    async for api in brain_client(
+        tmp_path, clock, brain_use_stock_model=True, brain_options_analysis=True, brain_catalyst_analysis=True
+    ):
         cycle = await run_cycle(api)
         assert cycle["status"] == "completed"
         assert {r["agent_id"]: r["status"] for r in cycle["runs"]} == dict.fromkeys(AGENTS, "ok")
@@ -401,4 +407,68 @@ async def test_every_agent_takes_part_when_its_data_exists(tmp_path, monkeypatch
             assert "earnings in 2 day(s)" in upb["rationale"]["reasons"][0]
         factor = next(o for o in cycle["opinions"] if o["agent_id"] == "factor" and o["subject"] == "UPC")
         assert factor["stance"] == "bullish" and factor["evidence"][0]["name"] == "prob_outperform"
+        assert only_reads(api.fake)
+
+
+async def test_opportunities_debates_and_posture_are_recorded(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock):
+        cycle = await run_cycle(api)
+        assert cycle["market"]["situation"]["posture"] == "normal"
+        assert cycle["summary"]["posture"] == "normal"
+        ops = cycle["opportunities"]
+        assert ops and all(o["stages"][0]["stage"] == "detection" for o in ops)
+        assert sum(cycle["summary"]["opportunities"].values()) == len(ops)
+        focused = [o for o in ops if o["status"] not in ("not_analysed", "context", "rejected_data")]
+        for o in focused:  # every analysed idea went through the whole pipeline
+            stages = [s["stage"] for s in o["stages"]]
+            for stage in ("data_validation", "relevant_agents", "research", "bull_case", "bear_case",
+                          "devils_advocate", "consensus"):  # fmt: skip
+                assert stage in stages, (o["subject"], stages)
+        served = (await api.get(f"{BRAIN}/opportunities")).json()
+        assert {o["id"] for o in served} == {o["id"] for o in ops}
+        kind = ops[0]["kind"]
+        assert all(
+            o["kind"] == kind for o in (await api.get(f"{BRAIN}/opportunities", params={"kind": kind})).json()
+        )
+
+        debates = by(cycle["debates"])
+        assert set(debates) == {c["subject"] for c in cycle["consensus"] if c["subject"] != "@market"}
+        verdicts = {d["verdict"] for d in debates.values()}
+        assert verdicts <= {"stands", "weakened", "challenged", "no view to challenge"}
+        for d in debates.values():
+            assert d["confidence_after"] <= d["confidence_before"] + 1e-9
+            if d["verdict"] != "no view to challenge":
+                assert any(o["code"] == "unproven" for o in d["objections"])
+                assert any(
+                    c["reasons"][-1].startswith("devil's advocate")
+                    for c in cycle["consensus"]
+                    if c["subject"] == d["subject"]
+                )
+        research = [o for o in cycle["opinions"] if o["agent_id"] == "research"]
+        assert research and all(o["stance"] == "abstain" and o["meta"]["findings"] for o in research)
+        assert only_reads(api.fake)
+
+
+async def test_the_kill_switch_makes_the_brain_defensive(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock):
+        api.fake.hold("UPA", 40, 60.0)
+        r = await api.post(
+            "/api/v1/trading/kill-switch",
+            json={"active": True, "reason": "test", "cancel_open_orders": False},
+        )
+        assert r.status_code == 200
+        cycle = await run_cycle(api)
+        situation = cycle["market"]["situation"]
+        assert situation["posture"] == "defensive" and "the kill switch is on" in situation["reasons"]
+        actions = {d["action"] for d in cycle["decisions"]}
+        assert not actions & {"buy", "increase"}  # no new risk while defensive
+        for d in cycle["decisions"]:
+            if d["subject"] != "UPA" and d["action"] == "watch":
+                assert any("defensive posture" in r for r in d["rationale"]["reasons"])
+        upa = by(cycle["decisions"])["UPA"]
+        assert upa["action"] in {"hold", "de_risk", "rebalance"}
+        if upa["action"] == "de_risk":
+            assert upa["risk"]["checks"] and upa["quantity"] == 13  # a third of 40, whole shares
         assert only_reads(api.fake)

@@ -112,17 +112,19 @@ class AgentRegistry:
 
     @staticmethod
     def levels(selections: Sequence[Selection]) -> list[list[Selection]]:
-        """Group selections so every agent runs after the agents it depends on."""
+        """Group selections so every agent runs after its stage's predecessors and the agents it depends
+        on; agents in the same level run concurrently."""
         done: set[str] = set()
-        pending = list(selections)
         out: list[list[Selection]] = []
-        while pending:
-            level = [s for s in pending if all(d in done for d in s.agent.spec.dependencies)]
-            if not level:  # cannot happen: dependencies are checked at registration
-                raise RuntimeError("circular agent dependencies")
-            out.append(level)
-            done |= {s.agent.spec.id for s in level}
-            pending = [s for s in pending if s not in level]
+        for stage in sorted({s.agent.spec.stage for s in selections}):
+            pending = [s for s in selections if s.agent.spec.stage == stage]
+            while pending:
+                level = [s for s in pending if all(d in done for d in s.agent.spec.dependencies)]
+                if not level:  # cannot happen: dependencies are checked at registration
+                    raise RuntimeError("circular agent dependencies")
+                out.append(level)
+                done |= {s.agent.spec.id for s in level}
+                pending = [s for s in pending if s not in level]
         return out
 
     async def run(self, ctx: BrainContext, selections: Sequence[Selection], timeout: float) -> list[AgentRun]:

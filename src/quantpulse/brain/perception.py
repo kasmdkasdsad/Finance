@@ -41,6 +41,7 @@ from quantpulse.services.trading_risk import RiskLimits
 
 from .context import BrainContext, BrokerView, PortfolioState, brain_session
 from .indicators import compute_indicators, market_statistics
+from .opportunities import Opportunity, scan_focus, scan_universe
 from .research_data import earnings_events, option_metrics
 from .types import BrainMode, BrainSession, DataState
 
@@ -85,15 +86,28 @@ def choose_focus(
     market_open: bool,
     n: int,
     exclude: Sequence[str] = (),
+    opportunities: Sequence[Opportunity] = (),
+    max_opportunities: int = 0,
 ) -> tuple[list[str], dict[str, str]]:
-    """Which symbols to study closely this cycle: requested ones, every holding, and the ``n`` strongest
-    of a cheap cross-sectional pre-screen (momentum, relative strength, persistence, trend, acceleration).
-    The rest of the universe is not analysed symbol by symbol (cost control)."""
+    """Which symbols to study closely this cycle: requested ones, every holding, the lead symbols of the
+    strongest detected opportunities (up to ``max_opportunities``), and the ``n`` strongest of a cheap
+    cross-sectional pre-screen (momentum, relative strength, persistence, trend, acceleration). The rest of
+    the universe is not analysed symbol by symbol (cost control)."""
     reasons: dict[str, str] = {}
     for s in requested:
         reasons.setdefault(s, "requested")
     for s in held:
         reasons.setdefault(s, "held position")
+    added = 0
+    for o in opportunities:
+        if added >= max_opportunities:
+            break
+        lead = o.lead
+        if lead is None or lead in exclude or (market_open and lead not in quotes):
+            continue
+        if lead not in reasons:
+            reasons[lead] = f"opportunity: {o.headline}"
+            added += 1
     cols = [c for c in FOCUS_SCREEN if c in indicators.columns]
     pool = [s for s in indicators.index if s not in reasons and s not in exclude]
     if market_open:
@@ -222,7 +236,9 @@ class Perception:
         b50, b200 = regime_mod.breadth(inputs.close[stocks]) if stocks else (None, None)
         return regime_mod.classify(spy, qqq, breadth_50=b50, breadth_200=b200, vix=inputs.vix)
 
-    async def perceive(self, mode: BrainMode, requested: Sequence[str] = ()) -> BrainContext:
+    async def perceive(
+        self, mode: BrainMode, requested: Sequence[str] = (), previous_regime: str | None = None
+    ) -> BrainContext:
         self._notes: list[str] = []
         now = self._clock.now()
         errors: dict[str, str] = {}
@@ -252,6 +268,23 @@ class Perception:
             vwap={s: q.vwap for s, q in inputs.quotes.items() if q.vwap} if live_row else None,
             session_fraction=inputs.session_fraction,
         )
+        sectors = await self._sectors(errors)
+        model = await self._stock_model(inputs, errors)
+        regime = self._regime(inputs)
+        exclude = [self._s.benchmark_symbol, "QQQ", *self._s.trading_etfs]
+        opportunities = scan_universe(
+            indicators,
+            close,
+            market_open=market_open,
+            sectors=sectors,
+            held=held,
+            features=model.features if model is not None else None,
+            regime=regime.label,
+            previous_regime=previous_regime,
+            trend_score=regime.trend_score,
+            exclude=exclude,
+            session_fraction=inputs.session_fraction,
+        )
         focus, reasons = choose_focus(
             indicators,
             held,
@@ -259,7 +292,9 @@ class Perception:
             inputs.quotes,
             market_open,
             self._s.brain_focus_candidates,
-            exclude=[self._s.benchmark_symbol, "QQQ"],
+            exclude=exclude,
+            opportunities=opportunities,
+            max_opportunities=self._s.brain_max_opportunities,
         )
         await self._data.enrich(inputs, focus)  # implied vol and earnings dates for the focus set only
         if inputs.implied_vol:
@@ -268,10 +303,19 @@ class Perception:
             rv = pd.to_numeric(indicators.get("rv63"), errors="coerce")
             indicators["iv_premium"] = indicators["implied_vol"] / rv.where(rv > 0) - 1
 
-        model = await self._stock_model(inputs, errors)
         options, events = await self._research(focus, inputs, inputs.close, errors)
         for sym, (nxt, source) in inputs.earnings.items():  # the trading loader's calendar, when it has one
-            events.setdefault(sym, {"next": nxt.isoformat(), "next_source": source, "reactions": []})
+            events.setdefault(
+                sym,
+                {
+                    "next": nxt.isoformat(),
+                    "next_source": source,
+                    "days_to_next": (nxt - now.astimezone(NEW_YORK).date()).days,
+                },
+            )
+        opportunities = sorted(
+            [*opportunities, *scan_focus(focus, options, events)], key=lambda o: -o.strength
+        )[: self._s.brain_max_opportunities_recorded]
 
         kill = await self._trading.kill_switch()
         states = {
@@ -313,7 +357,7 @@ class Perception:
             market_stats=market_statistics(
                 inputs.close[stocks] if stocks else inputs.close, inputs.benchmark
             ),
-            regime=self._regime(inputs),
+            regime=regime,
             vix=inputs.vix,
             implied_vol=dict(inputs.implied_vol),
             earnings=dict(inputs.earnings),
@@ -323,7 +367,7 @@ class Perception:
                 if model is not None and not model.features.empty
                 else None
             ),
-            sectors=await self._sectors(errors),
+            sectors=sectors,
             portfolio=portfolio,
             data_states=states,
             limits=RiskLimits.from_settings(self._s),
@@ -331,6 +375,7 @@ class Perception:
             model=model,
             options=options,
             events=events,
+            opportunities=opportunities,
             focus=focus,
             focus_reasons=reasons,
             notes=list(inputs.notes) + ([inputs.model_note] if inputs.model_note else []) + self._notes,

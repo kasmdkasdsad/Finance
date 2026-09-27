@@ -12,6 +12,7 @@ from .momentum import MomentumAgent
 from .options import OptionsAgent
 from .portfolio import PortfolioAgent
 from .regime import MarketRegimeAgent
+from .research import ResearchAgent, SituationalAwarenessAgent
 from .statistical import StatisticalAgent
 from .technical import TechnicalAgent
 from .volatility import VolatilityAgent
@@ -32,6 +33,8 @@ def default_agents() -> list[Agent]:
         OptionsAgent(),
         CatalystAgent(),
         PortfolioAgent(),
+        ResearchAgent(),
+        SituationalAwarenessAgent(),
     ]
 
 
@@ -46,6 +49,8 @@ __all__ = [
     "MomentumAgent",
     "OptionsAgent",
     "PortfolioAgent",
+    "ResearchAgent",
+    "SituationalAwarenessAgent",
     "StatisticalAgent",
     "TechnicalAgent",
     "ValuationAgent",

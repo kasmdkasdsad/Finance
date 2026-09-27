@@ -203,7 +203,10 @@ def test_default_agents_are_deterministic_specialists():
         "options": "forecast",
         "catalyst": "forecast",
         "portfolio": "constraint",
+        "research": "context",
+        "situational_awareness": "context",
     }
+    assert {a.spec.id for a in reg.all() if a.spec.stage == 1} == {"research", "situational_awareness"}
     assert all(a.spec.model_tier.value == "deterministic" for a in reg.all())
 
 

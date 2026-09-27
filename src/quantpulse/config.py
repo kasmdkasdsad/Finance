@@ -478,7 +478,11 @@ class Settings(BaseSettings):
     )
     brain_agent_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
     brain_min_confidence: float = Field(
-        default=0.55, ge=0, le=1, description="Consensus confidence needed before a buy/sell is proposed."
+        default=0.45,
+        ge=0,
+        le=1,
+        description="Consensus confidence (after the devil's advocate) needed before a buy, increase, reduce or "
+        "close is proposed. A starting value: the learning system's calibration shows whether it is borne out.",
     )
     brain_fresh_quote_seconds: float = Field(
         default=60.0, gt=0, description="A live quote younger than this is FRESH (older but allowed: LIVE)."
@@ -489,6 +493,15 @@ class Settings(BaseSettings):
         description="Evaluated predictions an agent needs before its measured reliability affects its weight.",
     )
     brain_max_new_positions_per_cycle: int = Field(default=2, ge=0, le=20)
+    brain_max_opportunities: int = Field(
+        default=6,
+        ge=0,
+        le=30,
+        description="Detected opportunities added to a cycle's focus (strongest first).",
+    )
+    brain_max_opportunities_recorded: int = Field(
+        default=40, ge=1, le=500, description="Detections recorded per cycle (the rest are dropped)."
+    )
     brain_earnings_caution_days: int = Field(
         default=3,
         ge=0,

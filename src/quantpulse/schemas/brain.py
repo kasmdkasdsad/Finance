@@ -63,6 +63,13 @@ class BrainCycleOut(BrainCycleSummaryOut):
     consensus: list[dict[str, Any]]
     decisions: list[dict[str, Any]]
     predictions_recorded: int
+    opportunities: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Ideas detected this cycle and how far each got through the pipeline",
+    )
+    debates: list[dict[str, Any]] = Field(
+        default_factory=list, description="Bull case, bear case and devil's advocate per subject"
+    )
 
 
 class BrainStatusOut(StrictModel):
@@ -90,3 +97,18 @@ class BrainMemoryOut(StrictModel):
     created_at: AwareDatetime
     updated_at: AwareDatetime
     expires_at: AwareDatetime | None
+
+
+class BrainOpportunityOut(StrictModel):
+    id: int
+    cycle_id: int
+    kind: str
+    subject: str
+    symbols: list[str]
+    direction: int
+    strength: float
+    headline: str
+    evidence: dict[str, Any]
+    status: str
+    stages: list[dict[str, Any]]
+    created_at: AwareDatetime

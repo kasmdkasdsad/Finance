@@ -29,6 +29,7 @@ from quantpulse.services.model import ModelSnapshot
 from quantpulse.services.trading_data import LiveQuote, QuoteQuality
 from quantpulse.services.trading_risk import RiskLimits
 
+from .opportunities import Opportunity
 from .types import BrainMode, BrainSession, DataState, Opinion
 
 
@@ -165,6 +166,7 @@ class BrainContext:
     model: ModelSnapshot | None = None  # the stock model's live scores and raw features (fundamentals…)
     options: dict[str, dict[str, Any]] = field(default_factory=dict)  # option-chain metrics per symbol
     events: dict[str, dict[str, Any]] = field(default_factory=dict)  # earnings calendar and reactions
+    opportunities: list[Opportunity] = field(default_factory=list)  # detected this cycle, strongest first
     focus: list[str] = field(default_factory=list)  # symbols this cycle studies closely
     focus_reasons: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)

@@ -25,12 +25,16 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 from quantpulse.schemas.common import DataStatus
 from quantpulse.services.trading_data import assess_quote
 from quantpulse.services.trading_risk import OrderIntent, QuoteCheck, RiskBook
 
+from .agents.portfolio import BETA_LIMIT, SECTOR_LIMIT
 from .consensus import Consensus
 from .context import BrainContext
+from .debate import Debate
 from .types import BUYING, EXECUTABLE_STATES, MARKET, SELLING, Action, BrainMode, Stance
 
 TRADES = BUYING | SELLING
@@ -51,6 +55,7 @@ class Proposal:
     risk: dict[str, Any] = field(default_factory=dict)
     risk_approved: bool | None = None
     status: str = "proposed"
+    fit: dict[str, Any] = field(default_factory=dict)  # portfolio fit of a new position
 
     @property
     def is_trade(self) -> bool:
@@ -77,6 +82,7 @@ class Proposal:
             "risk": self.risk,
             "risk_approved": self.risk_approved,
             "status": self.status,
+            "fit": self.fit,
         }
 
 
@@ -95,6 +101,47 @@ def target_weight(
     return round(min(base, ctx.limits.max_position_pct) * min(max(confidence, 0.0), 1.0), 4)
 
 
+def portfolio_fit(ctx: BrainContext, symbol: str, add_weight: float) -> dict[str, Any]:
+    """Would a new position fit the book? Nearly the same bet as a holding (return correlation ≥ 0.85
+    over six months) or a sector above the portfolio agent's limit does not fit; high portfolio beta is noted."""
+    notes: list[str] = []
+    ok = True
+    cons = ctx.working.facts.get("portfolio_constraints") or {}
+    held = [h for h in ctx.held if h in ctx.close.columns and h != symbol]
+    max_corr: float | None = None
+    with_: str | None = None
+    if held and symbol in ctx.close.columns:
+        rets = np.log(ctx.close[[symbol, *held]].iloc[-121:].astype(float)).diff().dropna()
+        if len(rets) >= 60:
+            corr = rets.corr()[symbol].drop(symbol).dropna()
+            if len(corr):
+                with_, max_corr = str(corr.idxmax()), float(corr.max())
+                if max_corr >= 0.85:
+                    ok = False
+                    notes.append(f"nearly the same bet as {with_} (return correlation {max_corr:.2f})")
+                elif max_corr >= 0.7:
+                    notes.append(f"correlated with {with_} ({max_corr:.2f})")
+    sector = ctx.sectors.get(symbol)
+    after = float((cons.get("sector_weights") or {}).get(sector, 0.0)) + add_weight if sector else None
+    if sector and sector not in ("unknown", "ETF") and after is not None and after > SECTOR_LIMIT:
+        ok = False
+        notes.append(f"{sector} would be {after:.0%} of equity (limit {SECTOR_LIMIT:.0%})")
+    beta = ctx.ind(symbol, "beta")
+    port_beta = cons.get("beta")
+    beta_after = (port_beta or 0.0) + add_weight * beta if beta is not None else None
+    if beta_after is not None and beta_after > BETA_LIMIT:
+        notes.append(f"portfolio beta would reach {beta_after:.2f}")
+    return {
+        "ok": ok,
+        "notes": notes,
+        "max_corr": round(max_corr, 3) if max_corr is not None else None,
+        "max_corr_with": with_,
+        "sector": sector,
+        "sector_weight_after": round(after, 4) if after is not None else None,
+        "beta_after": round(beta_after, 3) if beta_after is not None else None,
+    }
+
+
 def plan(
     ctx: BrainContext,
     consensus: dict[str, Consensus],
@@ -104,10 +151,26 @@ def plan(
     vol_budget: float,
     vol_floor: float,
     earnings_caution_days: int = 0,
+    debates: dict[str, Debate] | None = None,
 ) -> list[Proposal]:
     out: list[Proposal] = []
     constraints = ctx.working.facts.get("portfolio_constraints") or {}
     event_risk = ctx.working.facts.get("event_risk") or {}
+    situation = ctx.working.facts.get("situation") or {"posture": "normal", "risk_scale": 1.0, "reasons": []}
+    posture, risk_scale = situation["posture"], float(situation["risk_scale"])
+    posture_why = f"{posture} posture: " + "; ".join(situation.get("reasons") or [])
+    if posture == "cautious" and max_new > 0:
+        max_new = max(1, max_new // 2)
+    debates = debates or {}
+
+    def challenged(symbol: str) -> str | None:
+        d = debates.get(symbol)
+        if d is None or not d.challenged:
+            return None
+        return "devil's advocate: " + "; ".join(o.text for o in d.objections if o.severity == "high")
+
+    def sized(symbol: str, confidence: float) -> float:
+        return round(target_weight(ctx, symbol, confidence, vol_budget, vol_floor) * risk_scale, 4)
 
     def before_earnings(symbol: str) -> str | None:
         days = (event_risk.get(symbol) or {}).get("days_to_earnings")
@@ -193,6 +256,46 @@ def plan(
                         **base,
                     )
                 )
+        elif posture == "defensive" and not (
+            c is not None and c.actionable_view and c.stance is Stance.BULLISH
+        ):
+            qty = _shares(pos.qty / 3, whole) or pos.qty
+            out.append(
+                Proposal(
+                    action=Action.DE_RISK,
+                    confidence=1.0,
+                    quantity=qty,
+                    target_weight=round(w * 2 / 3, 4),
+                    reasons=[f"trim a third: {posture_why}", *(c.reasons if c else ["no consensus"])],
+                    **base,
+                )
+            )
+        elif (
+            c is not None
+            and c.actionable_view
+            and c.stance is Stance.BULLISH
+            and c.confidence >= min_confidence
+            and eq > 0
+            and price
+            and w > 1.5 * sized(s, c.confidence) > 0
+            and (w - sized(s, c.confidence)) * eq >= ctx.limits.min_order_notional
+        ):
+            tw = sized(s, c.confidence)
+            trim = (w - tw) * eq / price
+            qty = min(float(math.floor(trim)) if whole else round(trim, 6), pos.qty)
+            out.append(
+                Proposal(
+                    action=Action.REBALANCE,
+                    confidence=c.confidence,
+                    quantity=qty,
+                    target_weight=tw,
+                    reasons=[
+                        f"bullish, but {w:.1%} is well above its {tw:.1%} target: trim back",
+                        *c.reasons,
+                    ],
+                    **base,
+                )
+            )
         elif (
             c is not None
             and c.actionable_view
@@ -200,11 +303,13 @@ def plan(
             and c.confidence >= min_confidence
             and not constraints.get("margin")
             and regime != "risk_off"
+            and posture != "defensive"
             and eq > 0
             and price
             and not before_earnings(s)
+            and not challenged(s)
         ):
-            tw = target_weight(ctx, s, c.confidence, vol_budget, vol_floor)
+            tw = sized(s, c.confidence)
             add = min((tw - w) * eq, cash, per_order)
             qty = _shares(add / price, True)
             if qty >= 1 and add >= ctx.limits.min_order_notional:
@@ -231,8 +336,9 @@ def plan(
                 )
         else:
             why = c.reasons if c is not None else ["no consensus"]
-            if before_earnings(s):
-                why = [before_earnings(s) or "", *why]
+            for blocker in (before_earnings(s), challenged(s)):
+                if blocker:
+                    why = [blocker, *why]
             out.append(
                 Proposal(
                     action=Action.HOLD,
@@ -280,6 +386,10 @@ def plan(
             blockers.extend(v["reason"] for v in c.vetoes)
         if before_earnings(s):
             blockers.append(before_earnings(s) or "")
+        if posture == "defensive":
+            blockers.append(posture_why)
+        if challenged(s):
+            blockers.append(challenged(s) or "")
         if blockers:
             out.append(
                 Proposal(
@@ -292,19 +402,33 @@ def plan(
             continue
         candidates.append((c.score * c.confidence, s, c, base))
     slots = min(int(constraints.get("free_slots", 0)), max_new)
-    for rank, (_, s, c, base) in enumerate(sorted(candidates, key=lambda x: -x[0])):
+    rank = 0
+    for _, s, c, base in sorted(candidates, key=lambda x: -x[0]):
         price = base["est_price"]
-        tw = target_weight(ctx, s, c.confidence, vol_budget, vol_floor)
-        notional = min(tw * eq, cash, per_order) if eq > 0 else 0.0
-        qty = _shares(notional / price, True) if price else 0.0
-        if rank >= slots:
+        tw = sized(s, c.confidence)
+        fit = portfolio_fit(ctx, s, tw)
+        if not fit["ok"]:
             out.append(
                 Proposal(
                     action=Action.WATCH,
                     confidence=c.confidence,
-                    reasons=[
-                        f"bullish, ranked {rank + 1}: beyond the {slots} new position(s) allowed this cycle"
-                    ],
+                    reasons=["bullish, but a poor portfolio fit: " + "; ".join(fit["notes"])],
+                    fit=fit,
+                    **base,
+                )
+            )
+            continue
+        notional = min(tw * eq, cash, per_order) if eq > 0 else 0.0
+        qty = _shares(notional / price, True) if price else 0.0
+        rank += 1
+        if rank > slots:
+            out.append(
+                Proposal(
+                    action=Action.WATCH,
+                    confidence=c.confidence,
+                    reasons=[f"bullish, ranked {rank}: beyond the {slots} new position(s) allowed this cycle"]
+                    + ([posture_why] if posture == "cautious" else []),
+                    fit=fit,
                     **base,
                 )
             )
@@ -314,6 +438,7 @@ def plan(
                     action=Action.WATCH,
                     confidence=c.confidence,
                     reasons=[f"bullish; not enough spendable cash (${cash:,.0f})"],
+                    fit=fit,
                     **base,
                 )
             )
@@ -328,7 +453,10 @@ def plan(
                     reasons=[
                         f"bullish consensus ({c.score:+.2f}, confidence {c.confidence:.2f})",
                         *c.reasons,
+                        *fit["notes"],
+                        *([f"size scaled by {risk_scale:.0%}: {posture_why}"] if risk_scale < 1 else []),
                     ],
+                    fit=fit,
                     **base,
                 )
             )

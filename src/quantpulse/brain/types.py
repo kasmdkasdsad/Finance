@@ -87,7 +87,7 @@ class Action(StrEnum):
 
 
 BUYING = frozenset({Action.BUY, Action.INCREASE})
-SELLING = frozenset({Action.SELL, Action.REDUCE, Action.CLOSE, Action.DE_RISK})
+SELLING = frozenset({Action.SELL, Action.REDUCE, Action.CLOSE, Action.DE_RISK, Action.REBALANCE})  # trims
 
 
 class BrainMode(StrEnum):
@@ -130,6 +130,7 @@ class AgentSpec:
     model_tier: ModelTier = ModelTier.DETERMINISTIC
     version: str = "1.0.0"
     horizon_days: int = 5  # the horizon its directional opinions are graded on
+    stage: int = 0  # 0 specialists; 1 agents that read the specialists' findings (research, situation)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
