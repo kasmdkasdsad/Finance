@@ -202,6 +202,7 @@ def test_default_agents_are_deterministic_specialists():
         "factor": "forecast",
         "options": "forecast",
         "catalyst": "forecast",
+        "strategy_lab": "forecast",
         "portfolio": "constraint",
         "research": "context",
         "situational_awareness": "context",

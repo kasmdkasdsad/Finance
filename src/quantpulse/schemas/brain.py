@@ -27,6 +27,34 @@ class SupervisorIn(StrictModel):
     paused: bool
 
 
+class StrategyIn(StrictModel):
+    template: str = Field(max_length=48)
+    top_n: int | None = Field(default=None, ge=1, le=100)
+    rebalance_days: int | None = Field(default=None, ge=1, le=252)
+    weighting: Literal["equal", "inverse_vol"] | None = None
+    cost_bps: float | None = Field(default=None, ge=0, le=200)
+    search_grid: bool = Field(default=True, description="Let walk-forward choose top_n and rebalance_days")
+
+    def overrides(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            k: v
+            for k, v in {
+                "top_n": self.top_n,
+                "rebalance_days": self.rebalance_days,
+                "weighting": self.weighting,
+                "cost_bps": self.cost_bps,
+            }.items()
+            if v is not None
+        }
+        if not self.search_grid:
+            out["grid"] = {}
+        return out
+
+
+class StrategyStatusIn(StrictModel):
+    status: Literal["paper", "promoted", "retired"]
+
+
 class BrainAgentOut(StrictModel):
     id: str
     name: str

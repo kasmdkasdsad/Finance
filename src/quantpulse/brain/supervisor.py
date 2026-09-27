@@ -12,8 +12,10 @@ market open        a *full* cycle every ``QP_BRAIN_CYCLE_MINUTES``; a quote *mon
                    become events); the trading service's audit trail is read for orders and risk limits;
                    event wake-ups run focused cycles, at most ``QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR``
 after hours        once a day (from 16:40): a learning pass (grade the day's matured predictions, reflect,
-                   update track records) and a *portfolio* review of the holdings
-weekend, holiday   once a day: a learning pass; once a day: a *deep* research cycle
+                   update track records), a *portfolio* review of the holdings, and the strategy lab's
+                   paper (shadow) portfolios
+weekend, holiday   once a day: a learning pass; a *deep* research cycle; the strategy lab proposes
+                   untried templates and validates up to two (it never promotes: that is a person's call)
 =================  =========================================================================================
 
 Events turn into wake-ups: a price move, a volume spike, a news item or earnings approaching for a
@@ -190,12 +192,15 @@ class Supervisor:
             if due("after_hours", daily_from=AFTER_HOURS_FROM):
                 await run("learn", self._brain.learn(wait=None))
                 await run("review", self._cycle("portfolio", (), "after-hours review"))
+                await run("lab_paper", self._brain.lab.paper_update())
                 last["after_hours"] = now.isoformat()
         else:  # weekend or holiday
             if due("offday_learn", daily_from=time(9, 0)):
                 await run("offday_learn", self._brain.learn(wait=None))
             if due("deep", daily_from=time(10, 0)):
                 await run("deep", self._cycle("deep", (), "weekend research"))
+            if due("lab", daily_from=time(12, 0)):
+                await run("lab", self._lab())
         state["last"] = last
         await self._save(state)
         return ", ".join(done) if done else f"idle ({session.value})"
@@ -211,6 +216,13 @@ class Supervisor:
             self._event_cycles.append(now)
             label = f"{wake.kind}:{','.join(wake.symbols) or '-'}"
             await run(label, self._cycle(wake.kind, wake.symbols, wake.reason))
+
+    async def _lab(self) -> dict[str, Any]:
+        """Weekend lab work: propose untried templates, validate up to two proposals (never promotes)."""
+        proposed = await self._brain.lab.propose()
+        validated = await self._brain.lab.validate_pending(limit=2)
+        return {"proposed": len(proposed), "validated": len(validated),
+                "verdicts": ", ".join(f"{v['key']} {v['verdict']}" for v in validated)}  # fmt: skip
 
     async def _cycle(self, kind: str, symbols: tuple[str, ...], reason: str) -> dict[str, Any]:
         detail = await self._brain.run(trigger=f"supervisor: {reason}", kind=kind, symbols=symbols, wait=None)

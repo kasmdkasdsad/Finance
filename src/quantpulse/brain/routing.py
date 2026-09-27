@@ -32,7 +32,18 @@ ROUTES: dict[str, Route] = {
     "full": Route(None, 1.0, 1.0),
     "deep": Route(None, 2.0, 2.0),
     "portfolio": Route(
-        (*CORE, "technical", "momentum", "mean_reversion", "volatility", "statistical", "catalyst"), 0.0, 0.0
+        (
+            *CORE,
+            "technical",
+            "momentum",
+            "mean_reversion",
+            "volatility",
+            "statistical",
+            "catalyst",
+            "strategy_lab",
+        ),
+        0.0,
+        0.0,
     ),
     "event": Route(
         (

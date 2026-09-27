@@ -114,6 +114,7 @@ class Orchestrator:
                 pre_screen=plan_route.pre_screen,
                 opportunity_budget=plan_route.opportunities,
             )
+            ctx.strategy_signals = await self._store.get_state("promoted_signals") or {}
             result.ctx = ctx
             wanted = only if only is not None else plan_route.agents
             selections, skips = self.registry.select(ctx, wanted)

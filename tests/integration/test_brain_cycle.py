@@ -35,9 +35,10 @@ AGENTS = {
     "portfolio",
     "research",
     "situational_awareness",
+    "strategy_lab",
 }
 # without a stock model run, live option chains or an earnings calendar (the fakes have none) these skip
-NEEDS_RESEARCH = {"fundamental", "valuation", "factor", "options", "catalyst"}
+NEEDS_RESEARCH = {"fundamental", "valuation", "factor", "options", "catalyst", "strategy_lab"}
 RAN = AGENTS - NEEDS_RESEARCH
 TRADES = {"buy", "increase", "reduce", "close", "sell"}
 
@@ -173,7 +174,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
 
         status = (await api.get(f"{BRAIN}/status")).json()
         assert status["paper_only"] and status["last_cycle"]["id"] == cycle["id"]
-        assert status["agents"] == {"registered": 15, "enabled": 15} and not status["running"]
+        assert status["agents"] == {"registered": 16, "enabled": 16} and not status["running"]
         assert status["open_predictions"] == len(preds) and "predictions graded" in status["learning"]
 
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
@@ -315,7 +316,7 @@ async def test_agent_controls_and_background_runs(tmp_path):
         assert (await api.get(f"{BRAIN}/agents/momentum")).json()["enabled"] is False
         assert (await api.get(f"{BRAIN}/agents/nobody")).status_code == 404
         assert (await api.post(f"{BRAIN}/agents/nobody", json={"enabled": True})).status_code == 404
-        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 15, "enabled": 14}
+        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 16, "enabled": 15}
 
         cycle = await run_cycle(api, symbols=["DNA"])
         runs = by(cycle["runs"], "agent_id")
@@ -396,7 +397,8 @@ async def test_every_agent_takes_part_when_its_data_exists(tmp_path, monkeypatch
     ):
         cycle = await run_cycle(api)
         assert cycle["status"] == "completed"
-        assert {r["agent_id"]: r["status"] for r in cycle["runs"]} == dict.fromkeys(AGENTS, "ok")
+        statuses = {r["agent_id"]: r["status"] for r in cycle["runs"]}
+        assert statuses == {a: "skipped" if a == "strategy_lab" else "ok" for a in AGENTS}  # nothing promoted
         voters = {v["agent_id"] for c in cycle["consensus"] for v in c["detail"]["votes"]}
         assert {"fundamental", "valuation", "factor", "options", "technical", "momentum"} <= voters
         catalyst = [o for o in cycle["opinions"] if o["agent_id"] == "catalyst"]

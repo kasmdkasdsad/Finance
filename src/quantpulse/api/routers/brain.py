@@ -22,6 +22,8 @@ from quantpulse.schemas.brain import (
     BrainOpportunityOut,
     BrainRunIn,
     BrainStatusOut,
+    StrategyIn,
+    StrategyStatusIn,
     SupervisorIn,
 )
 from quantpulse.schemas.jobs import JobOut
@@ -187,3 +189,84 @@ async def events(
     c: Container = ContainerDep,
 ) -> list[dict[str, Any]]:
     return await c.brain.bus.history(type=type, subject=subject, limit=limit)
+
+
+# ---------------------------------------------------------------------------------------------- strategy lab
+@router.get("/lab/templates", summary="Strategy templates the lab can propose")
+async def lab_templates() -> dict[str, Any]:
+    from quantpulse.brain.lab.spec import GRID, TEMPLATES
+
+    return {"templates": TEMPLATES, "default_grid": GRID}
+
+
+@router.get(
+    "/lab/strategies", summary="Strategy versions in the lab, with their validation and paper results"
+)
+async def lab_strategies(
+    status: str | None = Query(None, pattern="^(proposed|validated|rejected|paper|promoted|retired)$"),
+    c: Container = ContainerDep,
+) -> list[dict[str, Any]]:
+    return await c.brain.lab.strategies(status)
+
+
+@router.post(
+    "/lab/propose", dependencies=ControlAuth, summary="Propose every template not tried yet (version 1)"
+)
+async def lab_propose(c: Container = ContainerDep) -> list[dict[str, Any]]:
+    return await c.brain.lab.propose()
+
+
+@router.post("/lab/strategies", dependencies=ControlAuth, summary="Create a new version of a template")
+async def lab_create(body: StrategyIn, c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.lab.new_version(body.template, "user", **body.overrides())
+
+
+@router.get("/lab/strategies/{strategy_id}/{version}", summary="One version with its runs")
+async def lab_strategy(
+    strategy_id: str = Path(..., max_length=48), version: int = Path(..., ge=1), c: Container = ContainerDep
+) -> dict[str, Any]:
+    return await c.brain.lab.get(strategy_id, version)
+
+
+@router.post(
+    "/lab/strategies/{strategy_id}/{version}/validate",
+    responses=RUNNING,  # type: ignore[arg-type]
+    dependencies=ControlAuth,
+    summary="Backtest, walk-forward, overfitting checks and stress tests (202 while it runs)",
+)
+async def lab_validate(
+    strategy_id: str = Path(..., max_length=48),
+    version: int = Path(..., ge=1),
+    wait: float = Query(120.0, ge=0, le=600),
+    c: Container = ContainerDep,
+) -> dict[str, Any]:
+    return await c.brain.validate_strategy(strategy_id, version, wait=wait)
+
+
+@router.post(
+    "/lab/strategies/{strategy_id}/{version}/status",
+    dependencies=ControlAuth,
+    summary="Start paper tracking, promote (only if validated and paper-tracked long enough) or retire",
+)
+async def lab_status(
+    body: StrategyStatusIn,
+    strategy_id: str = Path(..., max_length=48),
+    version: int = Path(..., ge=1),
+    c: Container = ContainerDep,
+) -> dict[str, Any]:
+    return await c.brain.lab.set_status(strategy_id, version, body.status, "user")
+
+
+@router.post("/lab/paper", dependencies=ControlAuth, summary="Update the paper (shadow) portfolios now")
+async def lab_paper(c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.lab.paper_update()
+
+
+@router.get("/lab/compare", summary="Versions side by side")
+async def lab_compare(
+    keys: str = Query(
+        ..., max_length=500, description="Comma-separated, e.g. momentum_12_1@v1,momentum_12_1@v2"
+    ),
+    c: Container = ContainerDep,
+) -> list[dict[str, Any]]:
+    return await c.brain.lab.compare([k.strip() for k in keys.split(",") if k.strip()])

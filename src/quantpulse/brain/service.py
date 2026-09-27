@@ -24,6 +24,7 @@ from .agents import default_agents
 from .context import BrokerView
 from .evaluation import MarketPrices
 from .events import Event, EventBus, EventType
+from .lab.service import StrategyLab
 from .learning import Learner, PredictionRecorder
 from .memory import MemoryStore
 from .orchestrator import Orchestrator
@@ -97,6 +98,7 @@ class BrainService:
             if market is not None
             else None
         )
+        self.lab = StrategyLab(settings, clock, db, market, data, self.store)
         self.supervisor = Supervisor(settings, clock, self, self.bus)
 
     async def _sync(self) -> None:
@@ -149,6 +151,23 @@ class BrainService:
             return summary
 
         job = self._jobs.start("brain", LEARN_KEY, "Brain learning pass", work)
+        try:
+            return await self._jobs.wait(job, wait)
+        except JobPending:
+            raise BrainCycleRunning(job) from None
+
+    async def validate_strategy(
+        self, strategy_id: str, version: int, *, wait: float | None = None
+    ) -> dict[str, Any]:
+        """Run the lab's full validation for one version (a background job; 202 while it runs)."""
+
+        async def work(job: Job) -> dict[str, Any]:
+            job.reporter(0.0, 1.0)(0.1, f"validating {strategy_id}@v{version}")
+            return await self.lab.validate(strategy_id, version)
+
+        job = self._jobs.start(
+            "brain", f"brain-lab:{strategy_id}@v{version}", f"Lab validation {strategy_id}@v{version}", work
+        )
         try:
             return await self._jobs.wait(job, wait)
         except JobPending:

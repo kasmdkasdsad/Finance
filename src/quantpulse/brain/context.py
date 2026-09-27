@@ -167,6 +167,7 @@ class BrainContext:
     options: dict[str, dict[str, Any]] = field(default_factory=dict)  # option-chain metrics per symbol
     events: dict[str, dict[str, Any]] = field(default_factory=dict)  # earnings calendar and reactions
     opportunities: list[Opportunity] = field(default_factory=list)  # detected this cycle, strongest first
+    strategy_signals: dict[str, Any] = field(default_factory=dict)  # promoted lab strategies' rankings
     focus: list[str] = field(default_factory=list)  # symbols this cycle studies closely
     focus_reasons: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)

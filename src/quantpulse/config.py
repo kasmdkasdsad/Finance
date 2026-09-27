@@ -521,6 +521,21 @@ class Settings(BaseSettings):
     brain_max_event_cycles_per_hour: int = Field(
         default=4, ge=0, le=60, description="Focused cycles that events may trigger per hour."
     )
+    brain_lab_history_days: int = Field(
+        default=1500, ge=400, le=7300, description="Calendar days of daily history the strategy lab tests on."
+    )
+    brain_lab_universe_size: int = Field(
+        default=150, ge=10, le=600, description="Most liquid names the strategy lab backtests."
+    )
+    brain_lab_min_oos_sessions: int = Field(
+        default=500, ge=50, le=5000, description="Out-of-sample sessions a strategy needs before a verdict."
+    )
+    brain_lab_paper_days: int = Field(
+        default=20,
+        ge=1,
+        le=500,
+        description="Paper-tracked sessions required before a version can be promoted.",
+    )
     brain_use_stock_model: bool = Field(
         default=True,
         description="Give the fundamental, valuation and factor agents the stock model's latest completed run "
