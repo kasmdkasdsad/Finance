@@ -362,6 +362,11 @@ class Orchestrator:
             "portfolio": {
                 **ctx.portfolio.summary(),
                 "constraints": ctx.working.facts.get("portfolio_constraints"),
+                "trading_controls": {
+                    "orders_would_reach_alpaca": not ctx.trading_blockers,
+                    "blockers": ctx.trading_blockers,
+                    "note": "read only: the Brain never submits orders",
+                },
             },
             "data_quality": {
                 "market": dq[0].to_dict() if dq else None,

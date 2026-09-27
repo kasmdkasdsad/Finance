@@ -1129,9 +1129,12 @@ Trading*). What is not built is listed under [Known limitations](#known-limitati
    veto, outside a risk-off market, with a free slot and unborrowed cash, sized by a volatility budget
    and within the per-order limit, at most `QP_BRAIN_MAX_NEW_POSITIONS_PER_CYCLE` per cycle. Everything
    else is WATCH or NO_ACTION, with the reason.
-5. **Risk preview.** Every proposed trade goes through `RiskBook` (sells first). The status is
-   `recommended` (paper_recommendation mode), `dry_run_approved` (dry_run), `risk_rejected` (with the
-   failed check), `blocked` (a data veto) or `not_checked` (the account could not be read).
+5. **Risk preview.** Every proposed trade goes through `RiskBook` (sells first), which applies the same
+   live-data, quote-age, spread and liquidity limits as real orders. The status is `recommended`
+   (paper_recommendation mode), `dry_run_approved` (dry_run), `risk_rejected` (with the failed check),
+   `blocked` (a data veto) or `not_checked` (the account could not be read). The cycle also records the
+   trading controls as they stand (keys, `QP_ALPACA_TRADING_ENABLED`, dry run, kill switch): whether an
+   order placed through the trading service would reach Alpaca now, and if not, why. This is read only.
 6. **Remember.** Stores the cycle, every agent run (including skips and failures), every opinion with its
    evidence and invalidation level, the consensus, the decisions, **open predictions** for later grading
    (per agent and per consensus, with entry prices and due dates) and structured memory:
@@ -1415,8 +1418,8 @@ scripted fake provider and never reach a model.
 * **Consensus & debate:** each subject's combined view (supporting/neutral/opposing, disagreement, data
   quality, vetoes), the bull case, the bear case and the devil's advocate's objections, every vote with
   its weight, and each agent's own thesis, evidence and invalidation.
-* **Proposed actions:** each action, the risk engine's preview and the checks behind it, and the execution
-  column — always "not sent".
+* **Proposed actions:** each action, the risk engine's preview and the checks behind it, the trading
+  controls at the time, and the execution column — always "not sent".
 * **Learning:** open and graded predictions, consensus calibration, track records ("unproven" until
   enough calls are graded), decision-vs-outcome reflections by quadrant, and failure analyses.
 * **Strategy lab:** versions with their status, gates, walk-forward and paper results; propose,

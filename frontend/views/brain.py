@@ -385,6 +385,19 @@ def _decisions(cycle: dict[str, Any]) -> None:
         for d in decisions
     ]
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    controls = (cycle.get("portfolio") or {}).get("trading_controls") or {}
+    if controls:
+        st.caption(
+            _md(
+                "Trading controls at the time of this cycle (read only): "
+                + (
+                    "orders placed through the trading service would reach the Alpaca paper account."
+                    if controls.get("orders_would_reach_alpaca")
+                    else "orders would NOT reach Alpaca — " + "; ".join(controls.get("blockers") or [])
+                )
+                + " The Brain itself never submits."
+            )
+        )
     trades = [d for d in decisions if d.get("risk")]
     for d in trades:
         risk = d["risk"]

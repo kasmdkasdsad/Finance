@@ -166,6 +166,7 @@ class BrainContext:
     data_states: dict[str, DataState]
     limits: RiskLimits
     kill_switch: bool
+    trading_blockers: list[str] = field(default_factory=list)  # trading controls read now (never acted on)
     model: ModelSnapshot | None = None  # the stock model's live scores and raw features (fundamentals…)
     options: dict[str, dict[str, Any]] = field(default_factory=dict)  # option-chain metrics per symbol
     events: dict[str, dict[str, Any]] = field(default_factory=dict)  # earnings calendar and reactions

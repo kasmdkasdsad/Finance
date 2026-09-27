@@ -104,6 +104,9 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         assert cycle["mode"] == "paper_recommendation" and cycle["session"] == "market_open"
         assert cycle["regime"]["label"] == "bullish" and cycle["market"]["clock"] == "alpaca"
         assert cycle["portfolio"]["available"] and cycle["portfolio"]["positions"]["UPA"]["qty"] == 40
+        controls = cycle["portfolio"]["trading_controls"]  # read, never acted on
+        assert not controls["orders_would_reach_alpaca"]
+        assert any("QP_ALPACA_TRADING_ENABLED=false" in b for b in controls["blockers"])
         focus = [f["symbol"] for f in cycle["focus"]]
         assert focus[0] == "UPA" and cycle["focus"][0]["reason"] == "held position"
         assert 1 < len(focus) <= 1 + 6 + 8 and "SPY" not in focus  # holding + opportunities + pre-screen
@@ -456,6 +459,17 @@ async def test_opportunities_debates_and_posture_are_recorded(tmp_path):
         research = [o for o in cycle["opinions"] if o["agent_id"] == "research"]
         assert research and all(o["stance"] == "abstain" and o["meta"]["findings"] for o in research)
         assert only_reads(api.fake)
+
+
+async def test_the_brain_sends_nothing_even_when_paper_orders_are_enabled(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, alpaca_trading_enabled=True, trading_dry_run=False):
+        cycle = await run_cycle(api)
+        controls = cycle["portfolio"]["trading_controls"]
+        assert controls["orders_would_reach_alpaca"] and controls["blockers"] == []
+        assert any(d["status"] == "recommended" for d in cycle["decisions"])  # it has trades it would make
+        assert cycle["summary"]["orders_sent"] == 0
+        assert only_reads(api.fake)  # the brain proposed them; nothing was sent
 
 
 class ScriptedModel:

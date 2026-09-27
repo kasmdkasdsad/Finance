@@ -324,6 +324,8 @@ class Perception:
         )[: self._s.brain_max_opportunities_recorded]
 
         kill = await self._trading.kill_switch()
+        # the trading controls, read only: why an order would not reach Alpaca right now (the brain never submits)
+        blockers = await self._trading.submit_blockers(kill)
         states = {
             s: data_state(
                 s,
@@ -378,6 +380,7 @@ class Perception:
             data_states=states,
             limits=RiskLimits.from_settings(self._s),
             kill_switch=kill.active,
+            trading_blockers=blockers,
             model=model,
             options=options,
             events=events,
