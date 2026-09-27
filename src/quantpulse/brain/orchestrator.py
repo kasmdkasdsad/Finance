@@ -33,6 +33,7 @@ from .learning import PredictionRecorder
 from .llm import ModelRouter
 from .memory import LONG_TERM, SHORT_TERM, WORKING, MemoryStore
 from .opportunities import trace
+from .patterns import recall
 from .perception import Perception
 from .registry import AgentRegistry, AgentRun, Skip
 from .routing import route
@@ -156,6 +157,7 @@ class Orchestrator:
                     debates=result.debates,
                 )
                 risk_preview(ctx, result.proposals, mode)
+                await self._recall(ctx, result)
             trace(
                 ctx.opportunities,
                 focus=ctx.focus,
@@ -324,6 +326,29 @@ class Orchestrator:
         return out
 
     # ------------------------------------------------------------------ memory
+    async def _recall(self, ctx: BrainContext, result: CycleResult) -> None:
+        """Attach what memory says to each decision: lessons on the subject and the recurring patterns for
+        the objections raised, the kinds of opportunity involved and the regime (context, not a vote)."""
+        patterns = await self._memory.recall(tier=LONG_TERM, kind="pattern", limit=300)
+        lessons = await self._memory.recall(tier=LONG_TERM, kind="lesson", limit=300)
+        if not patterns and not lessons:
+            return
+        kinds: dict[str, set[str]] = {}
+        for o in ctx.opportunities:
+            for sym in o.symbols[:1]:
+                kinds.setdefault(sym, set()).add(o.kind)
+        regime = ctx.working.facts.get("regime")
+        for p in result.proposals:
+            debate = result.debates.get(p.subject)
+            p.memory = recall(
+                p.subject,
+                patterns=patterns,
+                lessons=lessons,
+                objections=[o.code for o in debate.objections] if debate else [],
+                kinds=sorted(kinds.get(p.subject, set())),
+                regime=regime,
+            )
+
     async def _remember(self, ctx: BrainContext, cycle_id: int, result: CycleResult) -> None:
         now = self._clock.now()
         regime = ctx.regime
@@ -402,20 +427,28 @@ class Orchestrator:
                     importance=0.8,
                     cycle_id=cycle_id,
                 )
-        for p in result.proposals:
-            if p.is_trade:
-                await self._memory.remember(
-                    LONG_TERM,
-                    "decision",
-                    p.subject,
-                    f"{p.action.value} {p.quantity:g} {p.subject}: {p.status}"
-                    + (f" — {p.risk.get('summary')}" if p.risk else ""),
-                    now,
-                    data=p.to_dict() | {"consensus": p.consensus.to_dict() if p.consensus else None},
-                    tags=["decision", p.action.value, p.status],
-                    importance=0.7,
-                    cycle_id=cycle_id,
-                )
+        # what the Brain did (its book's fills), compactly — proposals that were not acted on stay in the
+        # cycle record only, so memory is not filled with the same idea every half hour
+        for f in result.fills:
+            p = next((x for x in result.proposals if x.subject == f.symbol), None)
+            await self._memory.remember(
+                LONG_TERM,
+                "trade",
+                f.symbol,
+                f"paper book {f.side} {f.qty:g} {f.symbol} at ${f.fill_price:,.2f} ({f.action})"
+                + (f", realised ${f.realized_pnl:,.0f}" if f.realized_pnl is not None else ""),
+                now,
+                data={
+                    **f.to_dict(),
+                    "reasons": (p.reasons if p else [])[:4],
+                    "confidence": round(p.confidence, 3) if p else None,
+                    "regime": label,
+                    "posture": (ctx.working.facts.get("situation") or {}).get("posture"),
+                },
+                tags=["trade", f.action, f.side],
+                importance=0.7,
+                cycle_id=cycle_id,
+            )
 
     # ------------------------------------------------------------------ summary
     def _summary(self, ctx: BrainContext, result: CycleResult) -> dict[str, Any]:

@@ -1345,6 +1345,34 @@ A **learning pass** (`POST /brain/learn`, or the button on the page's *Learning*
 5. runs **failure analysis** for agents with enough independent calls. A weakness is named only when
    the evidence supports it (the interval lies below a coin flip): weak regimes, confidently wrong calls,
    miscalibration, directional bias. Lessons and agent performance go to memory.
+6. **slices** every track record by volatility environment and by horizon:
+   * volatility environment: `vol:low`, `vol:normal` or `vol:high`, from the benchmark's 21-day
+     volatility when the call was made;
+   * horizon: every call is also graded at the standard horizons up to its own (`at:1d`, `at:5d`,
+     `at:10d`, `at:21d`), which shows where a signal actually works.
+
+   These slices share the same false-discovery adjustment, so more slices mean stricter verdicts.
+7. **consolidates patterns** into memory (one entry per pattern, updated in place):
+   * how often each devil's-advocate objection was borne out;
+   * how trades on each kind of opportunity turned out (successful and failed hypotheses);
+   * the mix of earned, unlucky, lucky and process-failure outcomes;
+   * where the consensus has evidence of skill, by regime and volatility environment.
+
+   Each pattern states its sample and interval and stays *tentative* until the evidence is established.
+   Then it purges expired short-term and working memory.
+
+**Memory holds lessons, not raw output.** Cycles keep their full record in their own tables. Memory
+keeps:
+
+* the latest market and book state (short term);
+* each investigation for three days (working);
+* regime changes, the book's actual trades, lessons and patterns (long term);
+* agent performance (agent tier).
+
+Every proposal of every cycle is no longer copied into memory. Before each decision is recorded, the
+Brain **recalls** what memory says about it: past lessons on the symbol, and the patterns for the
+objections raised, the kinds of opportunity involved and the current regime. This is stored with the
+decision and shown on the page, as context; it never changes a vote or a rule.
 
 The consensus **calibration** (hit rate by post-debate confidence) is the evidence for or against
 `QP_BRAIN_MIN_CONFIDENCE`. Nothing is scored before it has matured, and nothing is graded twice.
@@ -1452,15 +1480,23 @@ After each learning pass (and on demand, `POST /brain/improvements/review`) the 
 record and writes **improvement proposals**. Each one has a problem, the evidence, a proposed change,
 an expected improvement, and a validation plan. It looks for:
 
-* weak agents (measured reliability below 1 or a hit rate below 47% on enough graded calls);
-* agents that fail in one regime (a routing proposal);
+* weak agents (a significant *evidence of harm* verdict on enough independent calls);
+* agents that fail in one regime or volatility environment (a routing proposal);
+* agents that are right at another horizon than the one they are graded on;
 * redundant agents (scores correlated ≥ 0.9 on the same subjects);
 * missing capabilities (agents that keep skipping for lack of data);
 * agents that fail or are slow;
 * symbols whose quotes keep going stale;
 * rejected lab strategies, and paper or promoted ones falling short;
 * recurring process failures, blocks that mostly cost opportunities, and a consensus confidence that does
-  not order outcomes (calibration).
+  not order outcomes (calibration);
+* kinds of opportunity that keep failing the portfolio-fit check;
+* data problems that recur across cycles:
+  * IEX-only prices that are too often stale (the fix, a SIP subscription, costs money and is a
+    person's decision);
+  * a system clock that keeps drifting;
+* established patterns: objections that are usually right (weigh them more) or usually wrong (soften
+  them), and hypotheses that keep losing.
 
 **Nothing is applied automatically.** A person records a decision (`POST /brain/improvements/{id}`:
 testing, validated, rejected or applied). A change is built as a new version and follows

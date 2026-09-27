@@ -1,7 +1,9 @@
 """Measured track records — computed only from evaluated predictions, never assigned.
 
 For every source (each agent version, the consensus) and slice (all regimes and each regime; all time and
-the last 90 days) the metrics are:
+the last 90 days; each volatility environment — ``vol:low|normal|high`` by the benchmark's volatility at
+the call; and each standard horizon — ``at:1d``, ``at:5d``, ``at:10d``, ``at:21d``, the same calls graded
+at that horizon, to show where a signal actually works) the metrics are:
 
 * **independent observations** — an agent that repeats a view every cycle makes many predictions that
   share one outcome. Calls on the same subject whose horizons overlap (made within one horizon of each
@@ -35,7 +37,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -69,6 +71,8 @@ class Graded:
     relative_z: float | None = None  # the relative return in units of the call's risk over its horizon
     timing: float | None = None  # favourable relative return before the next close (not capturable)
     data_ok: bool = True  # made on usable data
+    market_vol: float | None = None  # the benchmark's realised volatility when the call was made
+    by_horizon: dict[str, float] | None = None  # relative return at each standard horizon up to its own
 
     @property
     def favourable(self) -> float:
@@ -83,6 +87,21 @@ def _spearman(x: Sequence[float], y: Sequence[float]) -> float | None:
     if rx.std() == 0 or ry.std() == 0:
         return None
     return float(np.corrcoef(rx, ry)[0, 1])
+
+
+def vol_environment(market_vol: float | None) -> str | None:
+    """Calm, normal or stressed market (the benchmark's annualised 21-day volatility at the call)."""
+    if market_vol is None:
+        return None
+    return "low" if market_vol < 0.12 else "normal" if market_vol < 0.20 else "high"
+
+
+def at_horizon(r: Graded, h: str) -> Graded | None:
+    """The same call graded at another horizon (``None`` when that horizon was not measured)."""
+    rel = (r.by_horizon or {}).get(h)
+    if rel is None:
+        return None
+    return replace(r, horizon=int(h), relative=rel, hit=r.direction * rel > 0, relative_z=None, timing=None)
 
 
 def wilson(k: float, n: int, z: float = Z95) -> tuple[float, float] | None:
@@ -273,6 +292,8 @@ async def graded(db: Database) -> list[Graded]:
                 relative_z=outcome.get("relative_z"),
                 timing=outcome.get("timing"),
                 data_ok=state is None or state in USABLE_DATA,
+                market_vol=(r.context or {}).get("market_vol"),
+                by_horizon=outcome.get("by_horizon"),
             )
         )
     return out
@@ -284,10 +305,15 @@ async def recompute(db: Database, now: datetime, min_observations: int) -> int:
     rows = await graded(db)
     groups: dict[tuple[str, str, str, str], list[Graded]] = defaultdict(list)
     for r in rows:
-        for regime in ("all", r.regime):
+        env = vol_environment(r.market_vol)
+        for regime in ("all", r.regime, *([f"vol:{env}"] if env else [])):
             groups[(r.source, r.version, regime, "all")].append(r)
             if now - r.made_at <= RECENT:
                 groups[(r.source, r.version, regime, "90d")].append(r)
+        for h in r.by_horizon or {}:  # the same calls graded at each horizon: where does the signal work?
+            g = at_horizon(r, h)
+            if g is not None:
+                groups[(r.source, r.version, f"at:{h}d", "all")].append(g)
     keys = list(groups)
     computed = [metrics(groups[k], min_observations) for k in keys]
     qs = benjamini_hochberg([m["p_value"] for m in computed])

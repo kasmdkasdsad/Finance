@@ -56,6 +56,7 @@ class Proposal:
     risk_approved: bool | None = None
     status: str = "proposed"
     fit: dict[str, Any] = field(default_factory=dict)  # portfolio fit of a new position
+    memory: list[str] = field(default_factory=list)  # what memory says about this decision (context only)
 
     @property
     def is_trade(self) -> bool:
@@ -83,6 +84,7 @@ class Proposal:
             "risk_approved": self.risk_approved,
             "status": self.status,
             "fit": self.fit,
+            "memory": self.memory,
         }
 
 

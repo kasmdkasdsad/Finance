@@ -45,6 +45,7 @@ from .types import MARKET
 
 VOID_AFTER_DAYS = 10
 NOISE_Z = 0.5
+HORIZONS = (1, 5, 10, 21)  # sessions at which every call is also graded
 USABLE_DATA = frozenset({"fresh", "live", "market_closed"})
 CONCURRENCY = 4
 
@@ -143,6 +144,31 @@ def breakdown(
             out["after_next_close"] = round(row.direction * relative - row.direction * leg, 6)
     state = ctx.get("data_state")
     out["data_ok"] = state is None or state in USABLE_DATA
+    out["by_horizon"] = by_horizon(row, series, bench)
+    return out
+
+
+def by_horizon(
+    row: BrainPredictionRow, series: dict[date, float], bench: dict[date, float]
+) -> dict[str, float]:
+    """The relative return at each standard horizon up to the call's own (in sessions after it was made),
+    so the learning system can see at which horizon a signal actually works."""
+    if not row.entry_price:
+        return {}
+    start = row.made_at.astimezone(NEW_YORK).date()
+    days = sorted(d for d in series if d > start and d <= row.due_date)
+    out: dict[str, float] = {}
+    for h in HORIZONS:
+        if h > max(row.horizon_days, 1) or len(days) < h:
+            continue
+        d = days[h - 1]
+        rel = series[d] / row.entry_price - 1
+        if row.benchmark != "absolute":
+            b = bench.get(d)
+            if not b or not row.entry_benchmark:
+                continue
+            rel -= b / row.entry_benchmark - 1
+        out[str(h)] = round(rel, 6)
     return out
 
 

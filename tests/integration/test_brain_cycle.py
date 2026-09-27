@@ -265,7 +265,10 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         assert short["market_state"]["data"]["regime"] == "bullish"
         long = (await api.get(f"{BRAIN}/memory", params={"tier": "long_term"})).json()
         assert [m["kind"] for m in long].count("regime_change") == 1
-        assert {m["subject"] for m in long if m["kind"] == "decision"} == {d["subject"] for d in trades}
+        # memory keeps what the Brain did (its book's fills), not every proposal of every cycle
+        filled = {f["symbol"] for f in cycle["portfolio"]["book"]["fills"]}
+        assert filled and {m["subject"] for m in long if m["kind"] == "trade"} == filled
+        assert not [m for m in long if m["kind"] == "decision"]
 
 
 async def test_modes_dry_run_and_research_only(tmp_path, monkeypatch):

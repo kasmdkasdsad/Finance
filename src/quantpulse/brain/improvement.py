@@ -38,14 +38,17 @@ from sqlalchemy import select
 from quantpulse.db.models import (
     BrainAgentPerformanceRow,
     BrainAgentRunRow,
+    BrainCycleRow,
     BrainEventRow,
     BrainImprovementRow,
     BrainOpinionRow,
+    BrainOpportunityRow,
     BrainReflectionRow,
     BrainStrategyRow,
 )
 from quantpulse.db.session import Database
 
+from .patterns import find
 from .reflection import consensus_calibration
 
 PIPELINE = [
@@ -86,6 +89,10 @@ def _p(
     }
 
 
+def _where(slice_: str) -> str:
+    return f"{slice_[4:]}-volatility markets" if slice_.startswith("vol:") else f"{slice_} markets"
+
+
 class ImprovementEngine:
     def __init__(self, db: Database, min_observations: int, min_confidence: float) -> None:
         self._db = db
@@ -103,6 +110,10 @@ class ImprovementEngine:
             *await self._strategies(),
             *await self._decisions(),
             *await self._calibration(),
+            *await self._horizons(),
+            *await self._fit(now),
+            *await self._data_sources(now),
+            *await self._assumptions(),
         ]
         out: list[dict[str, Any]] = []
         async with self._db.session() as s:
@@ -205,16 +216,16 @@ class ImprovementEngine:
                         AGENT_PLAN,
                     )
                 )
-            elif r.regime not in ("all", "unknown") and harm:
+            elif r.regime not in ("all", "unknown") and not r.regime.startswith("at:") and harm:
                 out.append(
                     _p(
                         "routing",
                         f"{r.agent_id}@{r.agent_version}",
-                        f"{r.agent_id} performs poorly in {r.regime} markets",
+                        f"{r.agent_id} performs poorly in {_where(r.regime)}",
                         {"regime": r.regime, **evidence},
-                        f"Route {r.agent_id} out of cycles in {r.regime} regimes (or give it a regime-specific "
-                        "version), keeping it everywhere else.",
-                        f"Remove a systematically wrong voice in {r.regime} markets.",
+                        f"Route {r.agent_id} out of cycles in {_where(r.regime)} (or give it a version for them), "
+                        "keeping it everywhere else.",
+                        f"Remove a systematically wrong voice in {_where(r.regime)}.",
                         [
                             "Replay graded calls: consensus with and without the agent in that regime.",
                             *AGENT_PLAN[2:],
@@ -357,6 +368,166 @@ class ImprovementEngine:
             for sym, n in counts.items()
             if n >= 5
         ]
+
+    async def _horizons(self) -> list[dict[str, Any]]:
+        """An agent whose calls work at another horizon than the one it is graded on."""
+        async with self._db.session() as s:
+            rows = (
+                await s.scalars(
+                    select(BrainAgentPerformanceRow).where(BrainAgentPerformanceRow.window == "all")
+                )
+            ).all()
+        own = {(r.agent_id, r.agent_version): r for r in rows if r.regime == "all"}
+        out = []
+        for r in rows:
+            if (
+                not r.regime.startswith("at:")
+                or r.verdict != "evidence of skill"
+                or r.agent_id == "consensus"
+            ):
+                continue
+            base = own.get((r.agent_id, r.agent_version))
+            if base is None or base.verdict == "evidence of skill" or r.horizon_days == base.horizon_days:
+                continue
+            out.append(
+                _p(
+                    "horizon",
+                    f"{r.agent_id}@{r.agent_version}",
+                    f"{r.agent_id} is right at {r.horizon_days} sessions, not at its own {base.horizon_days}",
+                    {
+                        "own_horizon": base.horizon_days,
+                        "own_verdict": base.verdict,
+                        "better_horizon": r.horizon_days,
+                        "hit_rate_there": r.hit_rate,
+                        "interval_95": [r.ci_low, r.ci_high],
+                        "q_value": r.q_value,
+                        "independent_calls": r.n_effective,
+                    },
+                    f"Grade (and weigh) {r.agent_id}'s calls at {r.horizon_days} sessions in a new version.",
+                    "Its votes count at the horizon where they carry information.",
+                    AGENT_PLAN,
+                )
+            )
+        return out
+
+    async def _fit(self, now: datetime) -> list[dict[str, Any]]:
+        """Kinds of opportunity that keep failing the portfolio-fit check (the book cannot use them)."""
+        async with self._db.session() as s:
+            rows = (
+                await s.scalars(
+                    select(BrainOpportunityRow).where(BrainOpportunityRow.created_at >= now - LOOKBACK)
+                )
+            ).all()
+        tried: Counter[str] = Counter()
+        failed: Counter[str] = Counter()
+        for r in rows:
+            fit = next((st for st in r.stages or [] if st.get("stage") == "portfolio_fit"), None)
+            if fit is None:
+                continue
+            tried[r.kind] += 1
+            failed[r.kind] += fit.get("result") == "poor fit"
+        return [
+            _p(
+                "opportunity",
+                kind,
+                f"{kind.replace('_', ' ')} ideas keep failing the portfolio-fit check",
+                {"checked_30d": tried[kind], "failed_fit": failed[kind]},
+                f"Spend less of the focus budget on {kind.replace('_', ' ')} ideas while the book cannot absorb them "
+                "(too correlated with holdings or too much in one sector), or diversify the book first.",
+                "Focus spent on ideas the book can actually take.",
+                [
+                    "Replay recent cycles with the change: how many fit-passing ideas replace them?",
+                    "Paper-track the change and compare the book's diversification and the hit rate of its trades.",
+                ],
+            )
+            for kind in tried
+            if tried[kind] >= 10 and failed[kind] / tried[kind] >= 0.6
+        ]
+
+    async def _data_sources(self, now: datetime) -> list[dict[str, Any]]:
+        """Data problems that recur across cycles (from each cycle's data report)."""
+        async with self._db.session() as s:
+            rows = (
+                await s.scalars(select(BrainCycleRow).where(BrainCycleRow.started_at >= now - LOOKBACK))
+            ).all()
+        reports = [((r.data_quality or {}).get("feed") or {}) for r in rows]
+        open_ = [f for f in reports if f.get("market_open")]
+        out = []
+        iex = sum(1 for f in open_ if any("IEX-priced symbols" in c for c in f.get("causes") or []))
+        if len(open_) >= 10 and iex / len(open_) >= 0.5:
+            out.append(
+                _p(
+                    "data",
+                    "stock_feed",
+                    "IEX-only prices are too often stale for the Brain to act",
+                    {"open_market_cycles_30d": len(open_), "cycles_with_stale_iex_prices": iex},
+                    "Consider a market-data subscription with real-time SIP (QP_ALPACA_STOCK_FEED=sip). This costs "
+                    "money and is a person's decision; the quote-age limit is not the fix.",
+                    "More symbols with executable data; fewer vetoes for stale prices.",
+                    ["Compare the share of fresh/live quotes and the vetoes before and after the change."],
+                )
+            )
+        skewed = [
+            f["clock_skew_s"]
+            for f in reports
+            if f.get("clock_skew_s") is not None and abs(f["clock_skew_s"]) > 2
+        ]
+        if len(skewed) >= 3:
+            out.append(
+                _p(
+                    "data",
+                    "system_clock",
+                    "This computer's clock keeps drifting from Alpaca's",
+                    {"cycles_with_skew_over_2s": len(skewed), "largest_skew_s": max(skewed, key=abs)},
+                    "Synchronise the system clock (Windows: Settings → Time → Sync now; or enable automatic time).",
+                    "Quote ages that are right, so fresh data is not called stale (or stale data fresh).",
+                    ["Confirm the data report shows a skew under 2 s for the next sessions."],
+                )
+            )
+        return out
+
+    async def _assumptions(self) -> list[dict[str, Any]]:
+        """Objections and hypotheses whose record is established (see quantpulse.brain.patterns)."""
+        out = []
+        for p in await find(self._db, self._min):
+            if p["status"] != "established":
+                continue
+            if p["kind"] == "objection":
+                strong = p["rate"] > 0.5
+                change = (
+                    f"Make the '{p['name']}' objection weigh more (higher severity or a larger confidence cut)."
+                    if strong
+                    else f"The '{p['name']}' objection rarely predicts a bad outcome: soften it."
+                )
+                out.append(
+                    _p(
+                        "assumption",
+                        f"objection:{p['name']}",
+                        f"the '{p['name']}' objection is {'usually right' if strong else 'usually wrong'}",
+                        {k: p[k] for k in ("n", "k", "rate", "ci")},
+                        change,
+                        "A devil's advocate whose objections carry the weight their record supports.",
+                        [
+                            "Replay graded debates with the changed weight; compare decision quality and outcomes."
+                        ],
+                    )
+                )
+            elif p["kind"] == "hypothesis" and p["rate"] < 0.5:
+                out.append(
+                    _p(
+                        "assumption",
+                        f"hypothesis:{p['name']}",
+                        f"trades on {p['name'].replace('_', ' ')} ideas keep losing",
+                        {k: p[k] for k in ("n", "k", "rate", "ci")},
+                        f"Require more independent evidence before acting on {p['name'].replace('_', ' ')} ideas, "
+                        "or stop acting on them.",
+                        "Fewer trades on a hypothesis the record does not support.",
+                        [
+                            "Paper-track the change in the book; compare the hit rate of the trades it would skip."
+                        ],
+                    )
+                )
+        return out
 
     async def _strategies(self) -> list[dict[str, Any]]:
         async with self._db.session() as s:

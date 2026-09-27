@@ -42,6 +42,7 @@ from .context import BrainContext
 from .debate import Debate
 from .evaluation import PriceSource, evaluate_due
 from .memory import AGENT, LONG_TERM, MemoryStore
+from .patterns import consolidate
 from .reflection import reflect_on_decisions
 from .types import MARKET, Opinion
 
@@ -108,6 +109,7 @@ class PredictionRecorder:
                 "data_status": diag.status.value if diag is not None else None,
                 "quote_age_s": round(diag.trade_age_s, 1) if diag and diag.trade_age_s is not None else None,
                 "vol": round(float(vol), 5) if vol else None,
+                "market_vol": ctx.market_stats.get("benchmark_rv21"),  # the volatility environment
                 "portfolio": {
                     "held": subject in ctx.held,
                     "weight": round(ctx.portfolio.weight(subject), 4) if subject != MARKET else None,
@@ -282,8 +284,12 @@ class Learner:
                 tags=["performance", f["agent_id"]],
                 importance=0.7 if f["notes"] else 0.4,
             )
+        patterns = await consolidate(self._db, self._memory, now, self._min)
+        purged = await self._memory.purge_expired(now)
         summary = {
             "at": now.isoformat(),
+            "patterns": patterns,
+            "memory_purged": purged,
             "evaluated": evaluated.evaluated,
             "voided": evaluated.voided,
             "pending": evaluated.pending,

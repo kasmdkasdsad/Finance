@@ -319,7 +319,12 @@ class BrainStore:
                     notional=d["notional"],
                     current_weight=p.current_weight,
                     target_weight=p.target_weight,
-                    rationale={"reasons": p.reasons, "blocked_by": p.blocked_by, "fit": p.fit},
+                    rationale={
+                        "reasons": p.reasons,
+                        "blocked_by": p.blocked_by,
+                        "fit": p.fit,
+                        "memory": p.memory,
+                    },
                     risk_approved=p.risk_approved,
                     risk=p.risk,
                     execution={"sent": False, "reason": "the brain never sends orders itself"},

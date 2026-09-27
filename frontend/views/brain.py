@@ -551,6 +551,8 @@ def _decisions(cycle: dict[str, Any]) -> None:
             checks = risk.get("checks") or []
             if checks:
                 st.dataframe(pd.DataFrame(checks), hide_index=True, use_container_width=True)
+            for line in (d.get("rationale") or {}).get("memory") or []:
+                st.caption(_md(f"Memory — {line}"))
 
 
 OPP_STATUS = {
@@ -686,6 +688,17 @@ def _learning() -> None:
             hide_index=True,
             use_container_width=True,
         )
+    patterns = guarded(
+        lambda: api().get(f"{BASE}/memory", tier="long_term", kind="pattern", limit=100), "patterns"
+    )
+    if patterns:
+        st.markdown(
+            "**Recurring patterns** (counted across graded decisions; *tentative* until the sample is large "
+            "and the interval excludes a coin flip). They are context for decisions and evidence for improvement "
+            "proposals — they never change a rule by themselves."
+        )
+        for p in patterns:
+            st.caption(_md(f"• {p['summary']}"))
     reflections = guarded(lambda: api().get(f"{BASE}/reflections", limit=200), "reflections") or []
     decisions = [r for r in reflections if r["subject_type"] == "decision"]
     if decisions:

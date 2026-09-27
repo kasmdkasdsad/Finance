@@ -43,6 +43,7 @@ from quantpulse.db.models import (
     BrainDebateRow,
     BrainDecisionRow,
     BrainOpinionRow,
+    BrainOpportunityRow,
     BrainPredictionRow,
     BrainReflectionRow,
 )
@@ -161,6 +162,18 @@ async def reflect_on_decisions(db: Database, now: datetime) -> list[dict[str, An
                     )
                 )
             ).all()
+            kinds = sorted(
+                set(
+                    (
+                        await s.scalars(
+                            select(BrainOpportunityRow.kind).where(
+                                BrainOpportunityRow.cycle_id == d.cycle_id,
+                                BrainOpportunityRow.subject == d.subject,
+                            )
+                        )
+                    ).all()
+                )
+            )
             side = LONG_SIDE.get(d.action) or SHORT_SIDE.get(d.action, 0)
             rel = float(d.outcome["relative"])
             blocked = d.action == "watch"
@@ -218,6 +231,14 @@ async def reflect_on_decisions(db: Database, now: datetime) -> list[dict[str, An
                     "outcome": d.outcome,
                     "cycle_id": d.cycle_id,
                     "subject": d.subject,
+                    "action": d.action,
+                    # structured, so recurring patterns can be counted (quantpulse.brain.patterns)
+                    "objections": [
+                        {"code": o["code"], "severity": o["severity"], "borne_out": oq == "bad"}
+                        for o in (debate.objections if debate is not None else [])
+                        if o["severity"] != "low"
+                    ],
+                    "kinds": kinds,
                 },
                 created_at=now,
             )
