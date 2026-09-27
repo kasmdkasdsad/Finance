@@ -895,3 +895,44 @@ class BrainStateRow(Base):
     key: Mapped[str] = mapped_column(String(40), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainOpportunityRow(Base):
+    """An idea the brain found itself, and how far it got: detection → data validation → agents → research →
+    bull/bear/devil's advocate → consensus → portfolio fit → risk preview."""
+
+    __tablename__ = "brain_opportunities"
+    __table_args__ = (Index("ix_brain_opportunities_kind_created", "kind", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    subject: Mapped[str] = mapped_column(String(48))
+    symbols: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    direction: Mapped[int] = mapped_column(Integer, default=0)
+    strength: Mapped[float] = mapped_column(Float)
+    headline: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(24))
+    stages: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainDebateRow(Base):
+    """The adversarial review of one subject's consensus: bull case, bear case, devil's advocate."""
+
+    __tablename__ = "brain_debates"
+    __table_args__ = (Index("ix_brain_debates_subject", "subject", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    subject: Mapped[str] = mapped_column(String(24))
+    stance_before: Mapped[str] = mapped_column(String(10))
+    confidence_before: Mapped[float] = mapped_column(Float)
+    confidence_after: Mapped[float] = mapped_column(Float)
+    verdict: Mapped[str] = mapped_column(String(24))
+    bull: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    bear: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    objections: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    change_our_mind: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
