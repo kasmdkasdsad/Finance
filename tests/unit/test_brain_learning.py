@@ -188,7 +188,9 @@ def graded_rows(n, hit_rate, *, source="technical", regime="bullish", confidence
 def test_reliability_needs_enough_graded_calls_and_is_shrunk():
     assert perf.metrics(graded_rows(29, 0.9), 30)["reliability"] is None
     m = perf.metrics(graded_rows(100, 0.6), 30)
-    assert m["hit_rate"] == 0.6 and m["reliability"] == pytest.approx(1 + 4 * ((60 + 10) / 120 - 0.5), abs=1e-4)
+    assert m["hit_rate"] == 0.6 and m["reliability"] == pytest.approx(
+        1 + 4 * ((60 + 10) / 120 - 0.5), abs=1e-4
+    )
     low = perf.metrics(graded_rows(100, 0.3), 30)["reliability"]
     assert low == pytest.approx(1 + 4 * ((30 + 10) / 120 - 0.5), abs=1e-4)
     assert perf.metrics(graded_rows(200, 0.0), 30)["reliability"] == 0.25  # bounded
