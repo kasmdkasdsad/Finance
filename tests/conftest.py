@@ -7,7 +7,7 @@ from quantpulse.db import migrate
 from quantpulse.db.session import Database
 
 # Variables that could point the test run at a real (paper) account or change trading behaviour.
-ACCOUNT_ENV_PREFIXES = ("QP_ALPACA", "APCA_", "ALPACA_", "QP_TRADING")
+ACCOUNT_ENV_PREFIXES = ("QP_ALPACA", "APCA_", "ALPACA_", "QP_TRADING", "QP_BRAIN")
 
 
 @pytest.fixture(autouse=True, scope="session")
