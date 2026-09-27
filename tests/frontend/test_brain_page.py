@@ -113,6 +113,7 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert any("Bull case" in m.value for m in at.markdown) and any(
         "Bear case" in m.value for m in at.markdown
     )
+    assert any("matured predictions graded against real closing prices" in m.value for m in at.markdown)
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}
 
 

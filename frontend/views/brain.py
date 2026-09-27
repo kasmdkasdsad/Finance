@@ -449,6 +449,107 @@ def _opportunities(cycle: dict[str, Any]) -> None:
             st.caption(_md("; ".join(f"{k}: {v}" for k, v in extra.items())))
 
 
+QUADRANT = {
+    "earned": "good decision · good outcome",
+    "unlucky": "good decision · bad outcome (variance)",
+    "lucky": "weak decision · good outcome (luck)",
+    "process_failure": "weak decision · bad outcome (fix the process)",
+    "block_saved_money": "blocked idea · would have lost",
+    "block_cost_opportunity": "blocked idea · would have gained",
+    "inconclusive": "move too small to judge",
+}
+
+
+def _learning() -> None:
+    st.markdown(
+        "The Brain learns **only from matured predictions graded against real closing prices**. An agent has no "
+        "track record — and weighs 1.0 in the consensus — until enough of its own calls have been graded. "
+        "Decisions are judged on process and outcome separately: a good decision can lose and a bad one can win."
+    )
+    state = guarded(lambda: api().get(f"{BASE}/learning"), "learning status")
+    if state is None:
+        return
+    preds = state["predictions"]
+    c = st.columns(5)
+    c[0].metric("Open predictions", preds["open"])
+    c[1].metric("Graded", preds["evaluated"])
+    c[2].metric("Hit rate", pct(preds["hit_rate"], 0) if preds["hit_rate"] is not None else "—")
+    c[3].metric("Next due", preds["next_due"] or "—")
+    c[4].metric(
+        "Measured agents", len(state["measured_agents"]), help=f"≥ {state['min_observations']} graded calls"
+    )
+    last = state.get("last_run")
+    st.caption(
+        f"Last learning pass: {last['at'][:16].replace('T', ' ')} UTC · graded {last['evaluated']}, reflections "
+        f"{last['reflections']}"
+        if last
+        else "No learning pass yet."
+    )
+    if st.button("Grade matured predictions now", icon=":material/school:", key="brain-learn"):
+        out = guarded(lambda: api().post(f"{BASE}/learn", wait=120), "learning pass")
+        if out:
+            st.success(f"Graded {out['evaluated']} predictions, wrote {out['reflections']} reflections.")
+    if state["calibration"]:
+        st.markdown("**Consensus calibration** — does a more confident consensus hit more often?")
+        st.dataframe(pd.DataFrame(state["calibration"]), hide_index=True, use_container_width=True)
+    rows = guarded(lambda: api().get(f"{BASE}/performance", window="all"), "track records") or []
+    overall = [r for r in rows if r["regime"] == "all"]
+    if overall:
+        st.markdown("**Track records** (all regimes, all time)")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "agent": r["agent_id"],
+                        "version": r["agent_version"],
+                        "graded calls": r["n"],
+                        "hit rate": r["hit_rate"],
+                        "Brier (0.25 = coin flip)": r["brier"],
+                        "rank IC": r["ic"],
+                        "consensus weight": r["reliability"]
+                        if r["reliability"] is not None
+                        else "unproven (1.0)",
+                    }
+                    for r in overall
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    reflections = guarded(lambda: api().get(f"{BASE}/reflections", limit=200), "reflections") or []
+    decisions = [r for r in reflections if r["subject_type"] == "decision"]
+    if decisions:
+        st.markdown("**Decision vs outcome**")
+        counts = pd.Series([QUADRANT.get(r["category"], r["category"]) for r in decisions]).value_counts()
+        st.dataframe(counts.rename("decisions").to_frame(), use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "when": r["created_at"][:10],
+                        "subject": (r.get("evidence") or {}).get("subject"),
+                        "quadrant": QUADRANT.get(r["category"], r["category"]),
+                        "decision": r["decision_quality"],
+                        "outcome": r["outcome_quality"],
+                        "lesson": "; ".join(r["lessons"][:2]),
+                    }
+                    for r in decisions
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    for r in (x for x in reflections if x["category"] == "failure_analysis"):
+        with st.expander(f"Failure analysis · {r['created_at'][:10]}", icon=":material/troubleshoot:"):
+            for lesson in r["lessons"]:
+                st.markdown(_md(f"- {lesson}"))
+    if not decisions and not overall:
+        st.info(
+            "Nothing has matured yet: predictions are graded once their horizon has passed.",
+            icon=":material/hourglass_top:",
+        )
+
+
 def _memory() -> None:
     tier = st.segmented_control(
         "Memory tier", ["short_term", "working", "long_term", "strategy", "agent"], default="long_term"
@@ -537,7 +638,16 @@ def render() -> None:
         st.error(_md(f"This cycle failed: {cycle.get('error')}"), icon=":material/error:")
     agents = guarded(lambda: api().get(f"{BASE}/agents"), "agents") or []
     tabs = st.tabs(
-        ["Overview", "Opportunities", "Agents", "Consensus & debate", "Proposed actions", "Memory", "History"]
+        [
+            "Overview",
+            "Opportunities",
+            "Agents",
+            "Consensus & debate",
+            "Proposed actions",
+            "Learning",
+            "Memory",
+            "History",
+        ]
     )
     with tabs[0]:
         _overview(cycle)
@@ -550,6 +660,8 @@ def render() -> None:
     with tabs[4]:
         _decisions(cycle)
     with tabs[5]:
-        _memory()
+        _learning()
     with tabs[6]:
+        _memory()
+    with tabs[7]:
         _history(cycles)

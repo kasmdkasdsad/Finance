@@ -1097,12 +1097,11 @@ Every trade it proposes is previewed by the same deterministic risk engine that 
 (`services/trading_risk.RiskBook`), and the verdict is recorded. The brain has no broker access beyond a
 read-only view (account, positions, open orders, clock): every Alpaca request it makes is a `GET`.
 
-**Status (built and tested):** the agent interface, registry and orchestrator; thirteen deterministic
-agents; working memory; consensus with visible disagreement; proposed actions with a risk preview;
-persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Paper Trading*). **Not built
-yet:** language-model agents, grading of predictions against outcomes (they are recorded, not
-evaluated), reflection, measured agent reliability, the strategy lab, continuous scheduling, and any
-hand-off of proposals to the trading service for execution.
+**Status (built and tested):** the agent interface, registry and orchestrator; fifteen deterministic
+agents; working memory; opportunity detection; consensus with visible disagreement and an adversarial
+debate; proposed actions with a risk preview; grading of predictions against real prices, reflection and
+measured track records; persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Paper
+Trading*). What is not built yet is listed at the end of this section.
 
 ### One cycle
 
@@ -1207,6 +1206,42 @@ The decision step now also:
 when more agents and the debate were added, and the calibration report (learning) is what should confirm
 or change it.
 
+### Learning from outcomes
+
+Every directional call a forecasting agent makes, and every directional consensus, is recorded as a
+**prediction** with its horizon, benchmark, regime, entry prices and due date. A **learning pass**
+(`POST /brain/learn`, or the button on the page's *Learning* tab) then:
+
+1. **grades** each prediction whose due date is a completed session against real closing prices only
+   (the market service's daily history; synthetic prices are refused, like the prediction ledger).
+   Symbols are graded on their return relative to the benchmark, `@market` calls on the benchmark's own
+   return. A call whose close never arrives is voided after 10 days.
+2. gives each **decision** the outcome of the consensus it was made on (same cycle, same subject);
+3. writes a **reflection** per decision that judges **decision quality** from what was known at the time
+   and **outcome quality** separately. Decision quality is *poor* if the data was not executable, the risk
+   engine did not allow it, or the devil's advocate challenged it; otherwise *good* when most soft checks
+   passed (confidence, agreement, no unresolved objection, evidence beyond one idea, agents with a measured
+   record) and *fair* otherwise. Outcome quality is *good* or *bad* beyond ±0.5% relative. The quadrants
+   are kept apart:
+   * *earned*: good decision, good outcome;
+   * *unlucky*: good decision, bad outcome; do not change the rules because of it;
+   * *lucky*: weak decision, good outcome; do not repeat it because it worked;
+   * *process failure*: weak decision, bad outcome; the checks that failed are named.
+
+   Blocked ideas (WATCH) are graded as counterfactuals: whether the block saved money or cost an
+   opportunity. Lessons record which of the devil's advocate's objections were borne out and which agents
+   were right.
+4. **recomputes track records** from graded calls only, per agent version, per regime, all time and last
+   90 days: hit rate (with its z-score), Brier score, rank IC, and calibration by confidence bucket.
+   The consensus weight stays 1.0 (*unproven*) until an agent has `QP_BRAIN_MIN_RELIABILITY_OBSERVATIONS`
+   graded calls in the slice. After that it becomes `1 + 4 × (shrunk hit rate − 0.5)`, bounded to
+   0.25–1.75, with the hit rate shrunk toward 50% by 20 pseudo-calls.
+5. runs **failure analysis** for agents with enough calls: weak regimes, confidently wrong calls,
+   miscalibration, directional bias, below a coin flip. Lessons and agent performance go to memory.
+
+The consensus **calibration** (hit rate by post-debate confidence) is the evidence for or against
+`QP_BRAIN_MIN_CONFIDENCE`. Nothing is scored before it has matured, and nothing is graded twice.
+
 ### The Brain page
 
 *Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
@@ -1221,6 +1256,8 @@ or change it.
   its weight, and each agent's own thesis, evidence and invalidation.
 * **Proposed actions:** each action, the risk engine's preview and the checks behind it, and the execution
   column — always "not sent".
+* **Learning:** open and graded predictions, consensus calibration, track records ("unproven" until
+  enough calls are graded), decision-vs-outcome reflections by quadrant, and failure analyses.
 * **Memory** and **History.**
 
 The page keeps four layers visibly apart: ① agent analysis, ② consensus, ③ risk preview, and ④ broker
@@ -1251,6 +1288,8 @@ There is no execution mode: the brain cannot place orders in Phase 1.
 | `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |
 | `GET /brain/memory?tier=&kind=&subject=&text=` | Structured memory, newest first |
 | `GET /brain/opportunities?kind=&status=` | Detected opportunities and their pipeline trace, newest first |
+| `POST /brain/learn?wait=` | Grade matured predictions, reflect on decisions, recompute track records (202 while it runs) |
+| `GET /brain/learning` · `/performance?window=` · `/reflections?category=` | Prediction counts, last pass and calibration · measured track records · reflections and failure analyses |
 
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
 `QP_API_TOKEN`.
