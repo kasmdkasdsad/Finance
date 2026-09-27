@@ -593,3 +593,305 @@ class TradingStateRow(Base):
     key: Mapped[str] = mapped_column(String(40), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+# ----------------------------------------------------------------------------- brain (multi-agent)
+class BrainAgentRow(Base):
+    """A registered agent (code-defined) and whether it is enabled; its spec is stored per version."""
+
+    __tablename__ = "brain_agents"
+
+    id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    family: Mapped[str] = mapped_column(String(16))
+    version: Mapped[str] = mapped_column(String(16))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    registered_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class BrainCycleRow(Base):
+    """One brain cycle: what it perceived, which agents it chose and why, and what it concluded."""
+
+    __tablename__ = "brain_cycles"
+    __table_args__ = (Index("ix_brain_cycles_started_at", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    trigger: Mapped[str] = mapped_column(String(16))
+    session: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(12))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    market: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    portfolio: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data_quality: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    focus: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    agents: Mapped[list[Any]] = mapped_column(JSON, default=list)  # selected / skipped, with reasons
+    summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    notes: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BrainAgentRunRow(Base):
+    """One agent's run within a cycle: status, timing and cost (failures are recorded, never hidden)."""
+
+    __tablename__ = "brain_agent_runs"
+    __table_args__ = (Index("ix_brain_agent_runs_agent", "agent_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[str] = mapped_column(String(48))
+    agent_version: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(12))  # ok | failed | timeout | skipped
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    subjects: Mapped[int] = mapped_column(Integer, default=0)
+    opinions: Mapped[int] = mapped_column(Integer, default=0)
+    model_tier: Mapped[str] = mapped_column(String(16))
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class BrainOpinionRow(Base):
+    """An agent's structured finding on one subject (a symbol, @market or @portfolio)."""
+
+    __tablename__ = "brain_opinions"
+    __table_args__ = (
+        Index("ix_brain_opinions_subject", "subject", "created_at"),
+        Index("ix_brain_opinions_agent", "agent_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    agent_id: Mapped[str] = mapped_column(String(48))
+    agent_version: Mapped[str] = mapped_column(String(16))
+    subject: Mapped[str] = mapped_column(String(24))
+    stance: Mapped[str] = mapped_column(String(10))
+    score: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    thesis: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    data_missing: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    data_quality: Mapped[str] = mapped_column(String(16))
+    invalidation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    veto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainConsensusRow(Base):
+    """The team's combined view on one subject, with the disagreement kept visible."""
+
+    __tablename__ = "brain_consensus"
+    __table_args__ = (Index("ix_brain_consensus_subject", "subject", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    subject: Mapped[str] = mapped_column(String(24))
+    stance: Mapped[str] = mapped_column(String(10))
+    score: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    unknown: Mapped[bool] = mapped_column(Boolean, default=False)
+    supporting: Mapped[int] = mapped_column(Integer, default=0)
+    neutral: Mapped[int] = mapped_column(Integer, default=0)
+    opposing: Mapped[int] = mapped_column(Integer, default=0)
+    abstaining: Mapped[int] = mapped_column(Integer, default=0)
+    disagreement: Mapped[float] = mapped_column(Float, default=0.0)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # sides, weights, primary conflict
+    vetoes: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    data_quality: Mapped[str] = mapped_column(String(16))
+    reasons: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainDecisionRow(Base):
+    """A proposed portfolio action, the deterministic risk engine's verdict on it, and (later) what happened.
+    The brain never sends an order itself."""
+
+    __tablename__ = "brain_decisions"
+    __table_args__ = (Index("ix_brain_decisions_subject", "subject", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    consensus_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_consensus.id", ondelete="SET NULL"), nullable=True
+    )
+    subject: Mapped[str] = mapped_column(String(24))
+    action: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(24))
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    est_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rationale: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    risk_approved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    risk: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    execution: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    outcome: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrainPredictionRow(Base):
+    """A gradeable claim: direction of ``subject`` relative to the benchmark over ``horizon_days`` sessions.
+    Written when made; the outcome columns stay empty until the horizon has passed and it is evaluated."""
+
+    __tablename__ = "brain_predictions"
+    __table_args__ = (
+        Index("ix_brain_predictions_due", "status", "due_date"),
+        Index("ix_brain_predictions_source", "source_type", "source_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_cycles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_type: Mapped[str] = mapped_column(String(16))  # agent | consensus | decision | strategy
+    source_id: Mapped[str] = mapped_column(String(48))
+    source_version: Mapped[str] = mapped_column(String(16))
+    subject: Mapped[str] = mapped_column(String(24))
+    direction: Mapped[int] = mapped_column(Integer)  # +1 outperform, −1 underperform the benchmark
+    score: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    benchmark: Mapped[str] = mapped_column(String(16))
+    regime: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    made_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    due_date: Mapped[date] = mapped_column(Date)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_benchmark: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(12))  # open | evaluated | void
+    realized_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_relative: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class BrainReflectionRow(Base):
+    """An append-only lesson about a decision, prediction or cycle (the original reasoning is never edited)."""
+
+    __tablename__ = "brain_reflections"
+    __table_args__ = (Index("ix_brain_reflections_subject", "subject_type", "subject_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject_type: Mapped[str] = mapped_column(String(16))  # decision | prediction | cycle | system
+    subject_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    category: Mapped[str] = mapped_column(String(32))
+    decision_quality: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    outcome_quality: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    questions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    lessons: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainAgentPerformanceRow(Base):
+    """Measured track record of one agent version (optionally per regime) — computed only from evaluated
+    predictions; nothing is written until there are observations."""
+
+    __tablename__ = "brain_agent_performance"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "agent_version", "regime", "horizon_days", "window", name="uq_brain_agent_performance"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(48))
+    agent_version: Mapped[str] = mapped_column(String(16))
+    regime: Mapped[str] = mapped_column(String(24))  # "all" or a regime label
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    window: Mapped[str] = mapped_column(String(16))  # e.g. "all", "90d"
+    n: Mapped[int] = mapped_column(Integer)
+    hits: Mapped[int] = mapped_column(Integer)
+    hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    brier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ic: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibration: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    reliability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainImprovementRow(Base):
+    """A proposed improvement (agent, data, routing, strategy) and its test result; never self-applied to
+    risk controls."""
+
+    __tablename__ = "brain_improvements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    target: Mapped[str] = mapped_column(String(48))
+    title: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    proposal: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16))  # proposed | testing | validated | rejected | applied
+    test_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    decided_by: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainMemoryRow(Base):
+    """Structured, searchable memory (short-term, working, long-term, strategy and agent tiers). Short
+    summaries plus data — never raw model transcripts."""
+
+    __tablename__ = "brain_memory"
+    __table_args__ = (
+        Index("ix_brain_memory_tier_subject", "tier", "subject"),
+        Index("ix_brain_memory_key", "tier", "key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tier: Mapped[str] = mapped_column(String(16))
+    kind: Mapped[str] = mapped_column(String(24))
+    subject: Mapped[str] = mapped_column(String(24))
+    key: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    summary: Mapped[str] = mapped_column(Text)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    tags: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    importance: Mapped[float] = mapped_column(Float, default=0.5)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_cycles.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrainEventRow(Base):
+    """Something that happened (a quote went stale, a regime changed, an order filled, a prediction matured)."""
+
+    __tablename__ = "brain_events"
+    __table_args__ = (Index("ix_brain_events_type_created", "type", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    type: Mapped[str] = mapped_column(String(40))
+    subject: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_cycles.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainStateRow(Base):
+    """Brain controls and scheduler state (started / paused, last job runs)."""
+
+    __tablename__ = "brain_state"
+
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
