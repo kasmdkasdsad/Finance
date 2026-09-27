@@ -16,11 +16,15 @@ class BrainRunIn(StrictModel):
         max_length=25,
         description="Symbols to study in addition to holdings and the pre-screen",
     )
-    kind: Literal["full", "portfolio", "deep"] = "full"
+    kind: Literal["full", "portfolio", "deep", "event"] = "full"
 
 
 class AgentToggleIn(StrictModel):
     enabled: bool
+
+
+class SupervisorIn(StrictModel):
+    paused: bool
 
 
 class BrainAgentOut(StrictModel):

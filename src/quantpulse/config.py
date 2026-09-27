@@ -509,6 +509,18 @@ class Settings(BaseSettings):
         description="No new position or increase this many days before an earnings release (at least the "
         "trading blackout).",
     )
+    brain_supervisor_enabled: bool = Field(
+        default=True,
+        description="Run the brain by market session and by event while the server runs (analysis only: the "
+        "brain never sends orders). Can be paused at runtime.",
+    )
+    brain_cycle_minutes: int = Field(default=30, ge=5, le=390, description="Full cycles in the session.")
+    brain_monitor_minutes: int = Field(
+        default=5, ge=1, le=120, description="Quote monitor for holdings and the last focus in the session."
+    )
+    brain_max_event_cycles_per_hour: int = Field(
+        default=4, ge=0, le=60, description="Focused cycles that events may trigger per hour."
+    )
     brain_use_stock_model: bool = Field(
         default=True,
         description="Give the fundamental, valuation and factor agents the stock model's latest completed run "

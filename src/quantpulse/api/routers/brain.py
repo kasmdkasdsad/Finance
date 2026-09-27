@@ -22,6 +22,7 @@ from quantpulse.schemas.brain import (
     BrainOpportunityOut,
     BrainRunIn,
     BrainStatusOut,
+    SupervisorIn,
 )
 from quantpulse.schemas.jobs import JobOut
 from quantpulse.services.container import Container
@@ -165,3 +166,24 @@ async def reflections(
     c: Container = ContainerDep,
 ) -> list[dict[str, Any]]:
     return await c.brain.store.reflections(category=category, limit=limit)
+
+
+# ---------------------------------------------------------------------------------------------- operation
+@router.get("/supervisor", summary="The supervisor: session, schedule, event wake-ups, recent work")
+async def supervisor(c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.supervisor.status()
+
+
+@router.post("/supervisor", dependencies=ControlAuth, summary="Pause or resume the supervisor")
+async def pause_supervisor(body: SupervisorIn, c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.supervisor.set_paused(body.paused)
+
+
+@router.get("/events", summary="What happened (market, portfolio, orders, agents, learning), newest first")
+async def events(
+    type: str | None = Query(None, max_length=40),
+    subject: str | None = Query(None, max_length=24),
+    limit: int = Query(100, ge=1, le=1000),
+    c: Container = ContainerDep,
+) -> list[dict[str, Any]]:
+    return await c.brain.bus.history(type=type, subject=subject, limit=limit)

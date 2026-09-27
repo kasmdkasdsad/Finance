@@ -27,11 +27,13 @@ from .consensus import Consensus, ReliabilityBook, build_consensus
 from .context import BrainContext
 from .debate import Debate, review
 from .decisions import Proposal, plan, risk_preview
+from .events import EventBus, from_cycle
 from .learning import PredictionRecorder
 from .memory import LONG_TERM, SHORT_TERM, WORKING, MemoryStore
 from .opportunities import trace
 from .perception import Perception
 from .registry import AgentRegistry, AgentRun, Skip
+from .routing import route
 from .store import BrainStore
 from .types import MARKET, PORTFOLIO, BrainMode
 
@@ -62,6 +64,7 @@ class Orchestrator:
         store: BrainStore,
         memory: MemoryStore,
         recorder: PredictionRecorder,
+        bus: EventBus | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -70,7 +73,9 @@ class Orchestrator:
         self._store = store
         self._memory = memory
         self._recorder = recorder
+        self._bus = bus
         self._lock = asyncio.Lock()
+        self.last_ctx: BrainContext | None = None  # the latest completed cycle's picture (for the monitor)
 
     @property
     def mode(self) -> BrainMode:
@@ -100,11 +105,24 @@ class Orchestrator:
         result = CycleResult(cycle_id=cycle_id, status="running")
         try:
             last_regime = await self._memory.latest(LONG_TERM, "regime_change", MARKET)
+            previous_regime = last_regime["data"].get("to") if last_regime else None
+            plan_route = route(kind)
             ctx = await self._perception.perceive(
-                mode, symbols, previous_regime=last_regime["data"].get("to") if last_regime else None
+                mode,
+                symbols,
+                previous_regime=previous_regime,
+                pre_screen=plan_route.pre_screen,
+                opportunity_budget=plan_route.opportunities,
             )
             result.ctx = ctx
-            selections, skips = self.registry.select(ctx, only)
+            wanted = only if only is not None else plan_route.agents
+            selections, skips = self.registry.select(ctx, wanted)
+            if wanted is not None:
+                skips.extend(
+                    Skip(a.spec.id, a.spec.version, f"not needed for a {kind} cycle")
+                    for a in self.registry.all()
+                    if a.spec.id not in wanted
+                )
             runs = await self.registry.run(ctx, selections, self._s.brain_agent_timeout_seconds)
             result.runs, result.skips = runs, skips
 
@@ -153,11 +171,46 @@ class Orchestrator:
             await self._store.finish_cycle(
                 cycle_id, self._clock.now(), status="completed", **self._summary(ctx, result)
             )
+            self.last_ctx = ctx
+            await self._publish(ctx, cycle_id, result, previous_regime)
         except Exception as exc:
             logger.exception("brain cycle %s failed", cycle_id)
             result.status, result.error = "failed", f"{type(exc).__name__}: {exc}"
             await self._store.finish_cycle(cycle_id, self._clock.now(), status="failed", error=result.error)
         return result
+
+    # ------------------------------------------------------------------ events
+    async def _publish(
+        self, ctx: BrainContext, cycle_id: int, result: CycleResult, previous_regime: str | None
+    ) -> None:
+        """What this cycle noticed, as events (never fatal: the cycle is already recorded)."""
+        if self._bus is None:
+            return
+        try:
+            before = await self._store.get_state("last_portfolio")
+            portfolio = ctx.portfolio.summary()
+            moves = {}
+            if "move_z" in ctx.indicators.columns and ctx.market_open:
+                moves = {str(s): float(v) for s, v in ctx.indicators["move_z"].items() if v == v}
+            events = from_cycle(
+                cycle_id,
+                regime=ctx.regime.label if ctx.regime else None,
+                previous_regime=previous_regime,
+                states={s: st.value for s, st in ctx.data_states.items()},
+                held=ctx.held,
+                focus=ctx.focus,
+                moves=moves,
+                opportunities=ctx.opportunities,
+                event_risk=ctx.working.facts.get("event_risk") or {},
+                portfolio=portfolio,
+                previous_portfolio=before,
+                runs=result.runs,
+            )
+            if portfolio.get("available"):
+                await self._store.set_state("last_portfolio", portfolio, self._clock.now())
+            await self._bus.publish(events)
+        except Exception:
+            logger.exception("publishing events for brain cycle %s failed", cycle_id)
 
     # ------------------------------------------------------------------ consensus
     def _consensus(self, ctx: BrainContext, reliability: ReliabilityBook) -> dict[str, Consensus]:

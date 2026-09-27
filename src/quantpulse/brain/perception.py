@@ -237,7 +237,13 @@ class Perception:
         return regime_mod.classify(spy, qqq, breadth_50=b50, breadth_200=b200, vix=inputs.vix)
 
     async def perceive(
-        self, mode: BrainMode, requested: Sequence[str] = (), previous_regime: str | None = None
+        self,
+        mode: BrainMode,
+        requested: Sequence[str] = (),
+        previous_regime: str | None = None,
+        *,
+        pre_screen: float = 1.0,
+        opportunity_budget: float = 1.0,
     ) -> BrainContext:
         self._notes: list[str] = []
         now = self._clock.now()
@@ -291,10 +297,10 @@ class Perception:
             requested,
             inputs.quotes,
             market_open,
-            self._s.brain_focus_candidates,
+            round(self._s.brain_focus_candidates * pre_screen),
             exclude=exclude,
             opportunities=opportunities,
-            max_opportunities=self._s.brain_max_opportunities,
+            max_opportunities=round(self._s.brain_max_opportunities * opportunity_budget),
         )
         await self._data.enrich(inputs, focus)  # implied vol and earnings dates for the focus set only
         if inputs.implied_vol:

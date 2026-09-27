@@ -16,6 +16,8 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
 * Alpaca paper trading — reconciliation at startup and every few minutes in the session, and one strategy
   cycle per ``trading_rebalance_interval_minutes`` slot from ``trading_time`` (dry runs included; orders are
   only sent when paper execution is enabled).
+* the brain's supervisor — once a minute it decides, by market session and by event, whether to run an
+  analysis cycle, a quote monitor or a learning pass (analysis only: the brain never sends orders).
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ SANDBOX_CHECK_SECONDS = 60.0
 PREDICTIONS_CHECK_SECONDS = 60.0
 MODEL_WARM_SECONDS = 300.0
 TRADING_CHECK_SECONDS = 60.0
+BRAIN_CHECK_SECONDS = 60.0
 
 
 @dataclass
@@ -95,6 +98,7 @@ class Poller:
             ),
             asyncio.create_task(self._loop("model", lambda: MODEL_WARM_SECONDS, self.warm_model)),
             asyncio.create_task(self._loop("trading", lambda: TRADING_CHECK_SECONDS, self.run_trading)),
+            asyncio.create_task(self._loop("brain", lambda: BRAIN_CHECK_SECONDS, self.run_brain)),
         ]
         logger.info("poller started (%d jobs)", len(self._tasks))
 
@@ -190,6 +194,10 @@ class Poller:
 
     async def run_trading(self) -> str:
         return await self._c.trading.run_scheduled()
+
+    async def run_brain(self) -> str:
+        """The brain's supervisor: session- and event-driven analysis (it never sends orders)."""
+        return await self._c.brain.supervisor.tick()
 
     async def warm_model(self) -> str:
         """Keep the latest close's model run computed, so pages and the ledger never wait for it."""

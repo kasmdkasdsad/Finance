@@ -205,6 +205,10 @@ class Learner:
             "by_category": _tally(r["category"] for r in reflections),
             "performance_rows": rows,
             "agents_with_findings": notable,
+            "outcomes": [
+                {"decision_id": r["decision_id"], "subject": r["subject"], "category": r["category"]}
+                for r in reflections
+            ],
         }
         return summary
 

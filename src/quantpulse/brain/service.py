@@ -23,6 +23,7 @@ from quantpulse.services.trading_data import TradingDataLoader
 from .agents import default_agents
 from .context import BrokerView
 from .evaluation import MarketPrices
+from .events import Event, EventBus, EventType
 from .learning import Learner, PredictionRecorder
 from .memory import MemoryStore
 from .orchestrator import Orchestrator
@@ -30,6 +31,7 @@ from .perception import Perception
 from .reflection import consensus_calibration
 from .registry import AgentRegistry
 from .store import BrainStore
+from .supervisor import Supervisor
 from .types import BrainMode
 
 JOB_KEY = "brain-cycle"
@@ -63,6 +65,9 @@ class BrainService:
         self._clock = clock
         self._jobs = jobs
         self._db = db
+        self.db = db
+        self.data = data
+        self.bus = EventBus(db, clock)
         self.registry = AgentRegistry(default_agents())
         self.store = BrainStore(db)
         self.memory = MemoryStore(db)
@@ -70,7 +75,14 @@ class BrainService:
             settings, clock, data, BrokerView(broker), trading, reference, model, options
         )
         self.orchestrator = Orchestrator(
-            settings, clock, self.perception, self.registry, self.store, self.memory, PredictionRecorder(db)
+            settings,
+            clock,
+            self.perception,
+            self.registry,
+            self.store,
+            self.memory,
+            PredictionRecorder(db),
+            self.bus,
         )
         self._synced = False
         self.learner = (
@@ -85,6 +97,7 @@ class BrainService:
             if market is not None
             else None
         )
+        self.supervisor = Supervisor(settings, clock, self, self.bus)
 
     async def _sync(self) -> None:
         if self._synced:
@@ -129,6 +142,10 @@ class BrainService:
             job.reporter(0.0, 1.0)(0.1, "grading matured predictions")
             summary = await learner.learn()
             await self.store.set_state("learning", summary, self._clock.now())
+            events = [Event(EventType.TRADE_OUTCOME_AVAILABLE, o["subject"], o) for o in summary["outcomes"]]
+            if summary["evaluated"]:
+                events.insert(0, Event(EventType.PREDICTION_MATURED, None, {"graded": summary["evaluated"]}))
+            await self.bus.publish(events)
             return summary
 
         job = self._jobs.start("brain", LEARN_KEY, "Brain learning pass", work)
