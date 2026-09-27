@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:  # allow `streamlit run frontend/app.py` from the 
 
 from frontend.api_client import ApiClient, ApiError  # noqa: E402
 from frontend.views import (  # noqa: E402
+    brain,
     model_lab,
     options,
     overview,
@@ -90,6 +91,7 @@ pages = {
         st.Page(sandbox.render, title="Trading Sandbox", icon=":material/smart_toy:", url_path="sandbox"),
     ],
     "Alpaca Paper Trading": [
+        st.Page(brain.render, title="Brain", icon=":material/psychology:", url_path="brain"),
         st.Page(
             trading.render,
             title="Paper Trading (Alpaca)",
