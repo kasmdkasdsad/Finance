@@ -202,7 +202,15 @@ class StrategyLab:
             spec = StrategySpec.from_dict(row.spec)
         panel, meta = await self.panel()
         features = compute_features(panel)
-        report = validate(spec, features, panel.close, panel.benchmark, self.thresholds)
+        report = validate(
+            spec,
+            features,
+            panel.close,
+            panel.benchmark,
+            self.thresholds,
+            volume=panel.volume,
+            capital=self._s.brain_book_capital,
+        )
         report["data"] = meta
         summary = {
             "verdict": report["verdict"],

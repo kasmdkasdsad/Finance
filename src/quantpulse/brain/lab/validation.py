@@ -13,7 +13,11 @@
 * **Stress tests** — the benchmark's worst drawdown episodes and worst 20-session windows in the sample
   (strategy vs benchmark), doubled costs, and trading two sessions late.
 
-:func:`gates` turns these into pass/fail checks; a strategy is *validated* only if every gate passes.
+:mod:`.scrutiny` then looks on purpose for reasons it may still not work — the cost it can bear, its capacity,
+the markets its edge comes from, its drawdowns, a few lucky names, and whether nearby parameters work too.
+
+:func:`gates` turns these into pass/fail checks; a strategy is *validated* only if every gate passes, and
+every report lists the reasons it may not work (``refutation``), validated or not.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import pandas as pd
 from quantpulse.quant.risk import max_drawdown, sharpe_ratio
 
 from .backtest import BacktestResult, backtest, equal_weight, metrics, random_sharpes, scores
+from .scrutiny import refute, scrutinise
 from .spec import StrategySpec
 
 EULER = 0.5772156649
@@ -44,6 +49,8 @@ class Thresholds:
     min_dsr: float = 0.9
     min_random_percentile: float = 0.9
     stress_drawdown_multiple: float = 1.5
+    min_neighbours_positive: float = 0.6  # nearby parameter sets that still beat equal weight
+    min_cost_headroom: float = 2.0  # break-even cost must be this multiple of the assumed cost
 
 
 def deflated_sharpe(returns: np.ndarray, trials: int, trial_variance: float) -> float | None:
@@ -275,6 +282,21 @@ def gates(report: dict[str, Any], th: Thresholds) -> list[dict[str, Any]]:
     ]  # fmt: skip
     checks.append(("no disproportionate losses in stress windows", not bad,
                    f"{len(bad)} of {len(st.get('windows', []))} windows worse than {th.stress_drawdown_multiple}× the benchmark"))  # fmt: skip
+    sc = report.get("scrutiny")
+    if sc is not None:
+        sens = sc.get("sensitivity") or {}
+        share = sens.get("positive_share")
+        checks.append(("robust to nearby parameters", share is not None and share >= th.min_neighbours_positive,
+                       f"{share} of nearby parameter sets beat equal weight (needs ≥ {th.min_neighbours_positive})"))  # fmt: skip
+        c = sc.get("costs") or {}
+        need = th.min_cost_headroom * max(float(c.get("assumed_cost_bps") or 0), 1.0)
+        checks.append(("edge survives realistic costs", float(c.get("break_even_bps") or 0) >= need,
+                       f"break-even {c.get('break_even_bps')}bp per unit traded (needs ≥ {need:g}bp)"))  # fmt: skip
+        cap = (sc.get("capacity") or {}).get("capacity_usd")
+        capital = float(report.get("capital") or 0)
+        checks.append(("capacity covers the paper book", cap is not None and cap >= capital,
+                       f"${cap:,.0f} at {100 * (sc.get('capacity') or {}).get('participation', 0):.0f}% of daily volume vs ${capital:,.0f}"
+                       if cap is not None else "unknown (no volume data)"))  # fmt: skip
     return [{"gate": g, "passed": bool(p), "detail": d} for g, p, d in checks]
 
 
@@ -284,8 +306,12 @@ def validate(
     close: pd.DataFrame,
     benchmark: pd.Series,
     th: Thresholds | None = None,
+    *,
+    volume: pd.DataFrame | None = None,
+    capital: float = 100_000.0,
 ) -> dict[str, Any]:
-    """The full report: backtest, baselines, walk-forward, overfitting checks, stress tests, gates."""
+    """The full report: backtest, baselines, walk-forward, overfitting checks, stress tests, scrutiny (the
+    reasons it may not work), gates."""
     th = th or Thresholds()
     start = warmup(spec, features)
     full = backtest(spec, features, close, benchmark, start)
@@ -306,7 +332,11 @@ def validate(
         "random_percentile": percentile,
         "stress": stress(spec, features, close, benchmark, full.returns, full.benchmark, start) if full.days > 40 else {"windows": []},
         "last_holdings": full.holdings[-1][1] if full.holdings else [],
+        "capital": capital,
     }  # fmt: skip
+    if full.days > 40:
+        report["scrutiny"] = scrutinise(spec, features, close, benchmark, start, full, base, volume)
     report["gates"] = gates(report, th)
     report["verdict"] = "validated" if all(g["passed"] for g in report["gates"]) else "rejected"
+    report["refutation"] = refute(report, capital)
     return report

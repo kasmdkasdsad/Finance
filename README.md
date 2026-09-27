@@ -1438,7 +1438,7 @@ uptrend), and people can add versions with other parameters.
 **Validation** (`POST /brain/lab/strategies/{id}/{version}/validate`) runs on real daily history only
 (`QP_BRAIN_LAB_HISTORY_DAYS`, the `QP_BRAIN_LAB_UNIVERSE_SIZE` most liquid names). Synthetic prices are
 refused. The universe is today's candidates, so results carry survivorship bias, and the report says
-so. Validation has five parts:
+so. Validation has six parts:
 
 * **Backtest.** Signals at the close of *t* are traded at the close of *t+1* and earn from *t+2*.
   Positions drift between rebalances and costs are paid on turnover.
@@ -1458,6 +1458,23 @@ so. Validation has five parts:
   * the benchmark's worst drawdowns and worst 20-session windows;
   * doubled costs;
   * trading two sessions late.
+
+* **Scrutiny: looking on purpose for reasons it does not work.**
+  * *Costs:* the break-even cost, i.e. the cost per unit traded at which it stops beating equal
+    weight (gross active return ÷ turnover), and its Sharpe at 1×, 2× and 4× the assumed costs.
+  * *Capacity:* the portfolio size at which a rebalance would trade more than 5% of a holding's
+    average daily dollar volume (conservative 10th percentile across rebalances).
+  * *Regimes:* its active return in rising or falling and calm or volatile markets.
+  * *Drawdowns:* depth, fall, recovery and time under water, against the benchmark's.
+  * *Concentration:* the share of its gains from the five best names.
+  * *Sensitivity:* the same rule with half or 1.5× the names, half or double the rebalance
+    interval, or one more session of lag.
+
+  Three of these are gates: robust to nearby parameters (≥ 60% still beat equal weight), the edge
+  survives realistic costs (break-even ≥ 2× the assumed cost), and capacity covers the paper book.
+  Every report, validated or not, lists the **reasons it may not work**: failed gates first, then
+  scrutiny findings such as a thin edge, small capacity, a single-regime edge, an unrecovered drawdown,
+  a few lucky names or fragile parameters.
 
 A version is **validated** only if every gate passes. On generated data this promotes a planted
 momentum effect and rejects a pure-noise universe whose single backtest looked attractive; both are

@@ -811,6 +811,27 @@ def _lab() -> None:
             f"in-sample active Sharpe {wf.get('is_active_sharpe')} → out-of-sample {wf.get('oos_active_sharpe')} · "
             f"{(v.get('data') or {}).get('symbols')} symbols; {(v.get('data') or {}).get('survivorship_bias')}"
         )
+        reasons = v.get("refutation") or []
+        st.markdown("**Reasons it may not work**" + ("" if reasons else ": none found"))
+        for r in reasons:
+            st.caption(_md(f"• {r}"))
+        sc = v.get("scrutiny") or {}
+        if sc:
+            c, cap, s = sc.get("costs") or {}, sc.get("capacity") or {}, sc.get("sensitivity") or {}
+            st.caption(
+                _md(
+                    f"Break-even cost {c.get('break_even_bps')}bp per unit traded (assumed {c.get('assumed_cost_bps')}bp, "
+                    f"turnover {c.get('annual_turnover')}×/yr) · capacity {money(cap.get('capacity_usd'))} at "
+                    f"{pct(cap.get('participation'), 0)} of daily volume · {pct(s.get('positive_share'), 0)} of nearby "
+                    "parameter sets still beat equal weight"
+                )
+            )
+            if sc.get("regimes"):
+                st.dataframe(
+                    pd.DataFrame(sc["regimes"]).T.rename_axis("market").reset_index(),
+                    hide_index=True,
+                    use_container_width=True,
+                )
 
 
 def _improvements() -> None:

@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from quantpulse.brain.lab.backtest import backtest, equal_weight, metrics
+from quantpulse.brain.lab.scrutiny import refute
 from quantpulse.brain.lab.service import _paper_performance
 from quantpulse.brain.lab.spec import TEMPLATES, StrategySpec, from_template
 from quantpulse.brain.lab.validation import deflated_sharpe, validate
@@ -98,19 +99,75 @@ def test_deflated_sharpe_penalises_many_trials():
 
 def test_a_real_effect_is_validated_and_luck_is_refused():
     real = universe(momentum=True)
-    report = validate(from_template("momentum_12_1"), compute_features(real), real.close, real.benchmark)
+    report = validate(
+        from_template("momentum_12_1"), compute_features(real), real.close, real.benchmark, volume=real.volume
+    )
     assert report["verdict"] == "validated", [g for g in report["gates"] if not g["passed"]]
     wf = report["walk_forward"]
     assert wf["oos_active_sharpe"] > 0 and wf["dsr"] > 0.9 and wf["fold_win_rate"] >= 0.6
     assert report["random_percentile"] >= 0.9 and len(wf["folds"]) >= 4
+    gates = {g["gate"] for g in report["gates"]}
+    assert {
+        "robust to nearby parameters",
+        "edge survives realistic costs",
+        "capacity covers the paper book",
+    } <= gates
+    sc = report["scrutiny"]
+    assert sc["sensitivity"]["positive_share"] == 1.0 and len(sc["sensitivity"]["neighbours"]) == 5
+    assert sc["costs"]["break_even_bps"] > 2 * sc["costs"]["assumed_cost_bps"]
+    assert sc["capacity"]["capacity_usd"] > 100_000 and len(sc["regimes"]) == 4
+    assert sc["drawdowns"]["max_drawdown"] < 0 and "recovered" in sc["drawdowns"]
+    # even a validated strategy is questioned: here, a few names carried most of the gains
+    assert any("came from five names" in r for r in report["refutation"])
 
     noise = universe(momentum=False)
-    report = validate(from_template("momentum_12_1"), compute_features(noise), noise.close, noise.benchmark)
+    report = validate(
+        from_template("momentum_12_1"),
+        compute_features(noise),
+        noise.close,
+        noise.benchmark,
+        volume=noise.volume,
+    )
     assert report["verdict"] == "rejected"
     failed = {g["gate"] for g in report["gates"] if not g["passed"]}
     assert "not explained by trying many variants (deflated Sharpe)" in failed
     # the single backtest alone looked fine: this is exactly what one attractive backtest hides
     assert report["backtest"]["sharpe"] > 0
+    reasons = report["refutation"]
+    assert any(r.startswith("failed: not explained by trying many variants") for r in reasons)
+    assert any("loses to equal weight in" in r for r in reasons)  # and where it fails
+
+
+def test_scrutiny_names_thin_edges_small_capacity_and_fragile_parameters():
+    report = {
+        "gates": [],
+        "scrutiny": {
+            "costs": {"assumed_cost_bps": 10.0, "break_even_bps": 12.0, "annual_turnover": 12.0},
+            "capacity": {"capacity_usd": 40_000.0},
+            "regimes": {"rising, calm": {"active_annual": 0.2, "share_of_active_return": 0.9},
+                        "falling, volatile": {"active_annual": -0.05, "share_of_active_return": -0.2}},
+            "drawdowns": {"max_drawdown": -0.4, "benchmark_max_drawdown": -0.2, "recovered": False},
+            "concentration": {"top5_share_of_gains": 0.3, "best": []},
+            "sensitivity": {"positive_share": 0.4, "neighbours": {"half the names": -0.2, "one more session of lag": 0.5}},
+        },
+    }  # fmt: skip
+    reasons = " | ".join(refute(report, 100_000))
+    assert "thin edge" in reasons and "capacity $40,000 is below" in reasons
+    assert "loses to equal weight in falling, volatile" in reasons and "rising, calm markets only" in reasons
+    assert "has not recovered" in reasons and "falls much further than the benchmark" in reasons
+    assert "fragile: nearby parameters do not work (half the names)" in reasons
+    assert "five names" not in reasons  # 30%: not concentrated
+
+
+def test_thin_volume_fails_the_capacity_gate():
+    real = universe(momentum=True)
+    thin = real.volume * 0.0005  # ~$25k a day: a real book would move these prices
+    report = validate(
+        from_template("momentum_12_1"), compute_features(real), real.close, real.benchmark, volume=thin
+    )
+    gate = next(g for g in report["gates"] if g["gate"] == "capacity covers the paper book")
+    assert not gate["passed"] and report["verdict"] == "rejected"
+    assert any("capacity $" in r for r in report["refutation"])
 
 
 def test_short_history_gets_no_verdict():
