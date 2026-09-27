@@ -84,6 +84,7 @@ def make_ctx(
         fundamentals=None,
         sectors={},
         portfolio=PortfolioState(available=True),
+        account=PortfolioState(available=True),
         data_states=dict.fromkeys(close.columns, DataState.FRESH),
         limits=RiskLimits(),
         kill_switch=False,

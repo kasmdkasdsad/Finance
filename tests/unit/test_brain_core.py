@@ -76,6 +76,7 @@ def make_ctx(focus=("AAA", "BBB")) -> BrainContext:
         fundamentals=None,
         sectors={},
         portfolio=PortfolioState(available=True),
+        account=PortfolioState(available=True),
         data_states=dict.fromkeys(focus, DataState.FRESH),
         limits=RiskLimits(),
         kill_switch=False,

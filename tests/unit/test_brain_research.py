@@ -10,6 +10,7 @@ import pytest
 from quantpulse.brain import opportunities as opp
 from quantpulse.brain.agents.research import ResearchAgent, SituationalAwarenessAgent
 from quantpulse.brain.consensus import build_consensus
+from quantpulse.brain.context import PortfolioState
 from quantpulse.brain.debate import review
 from quantpulse.brain.decisions import plan, portfolio_fit
 from quantpulse.brain.types import MARKET, Action, DataState, Evidence, Opinion, Stance, stance_of
@@ -237,6 +238,10 @@ async def test_situational_awareness_postures():
     o = (await agent.analyze(ctx, [MARKET]))[0]
     assert o.meta["posture"] == "defensive" and o.meta["risk_scale"] == 0.0 and o.stance is Stance.ABSTAIN
     assert ctx.working.facts["situation"]["posture"] == "defensive"
+    ctx.kill_switch, ctx.vix = False, None
+    ctx.account = PortfolioState(available=False, error="timeout")  # the broker's clock cannot be confirmed
+    o = (await agent.analyze(ctx, [MARKET]))[0]
+    assert o.meta["posture"] == "cautious" and any("could not be read" in r for r in o.meta["reasons"])
 
 
 async def test_research_agent_answers_general_and_opportunity_specific_questions():
