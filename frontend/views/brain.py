@@ -44,6 +44,7 @@ STATUS_LABEL = {
     "rejected": "Rejected by Alpaca",
     "unknown": "Sent: outcome unknown (reconciliation settles it)",
     "risk_approved": "Risk engine: approved (dry run: not sent)",
+    "blocked_at_submit": "Stopped at submission (a switch changed): not sent",
 }
 QUALITY_COLOR = {
     "fresh": "green",
@@ -190,10 +191,27 @@ def _run_controls() -> None:
             )
 
 
+def _why(cycle: dict[str, Any]) -> None:
+    """Why the Brain traded in this cycle, or why it did not — in plain words."""
+    decision = (cycle.get("summary") or {}).get("decision") or {}
+    if not decision:
+        return
+    headline = _md(decision.get("headline") or "")
+    if decision.get("outcome") == "traded":
+        st.success(headline, icon=":material/swap_horiz:")
+    else:
+        st.info(headline, icon=":material/do_not_disturb_on:")
+    for o in decision.get("orders") or []:
+        st.caption(_md(f"• {o['action']} {o['qty']:g} {o['subject']} — {'; '.join(o.get('why') or [])}"))
+    for r in decision.get("reasons") or []:
+        st.caption(_md(f"• {r}"))
+
+
 def _overview(cycle: dict[str, Any]) -> None:
     summary = cycle.get("summary") or {}
     regime = cycle.get("regime") or {}
     market = cycle.get("market") or {}
+    _why(cycle)
     c = st.columns(4)
     c[0].metric("Regime", (regime.get("label") or "unknown").replace("_", " "))
     c[1].metric("Market", "open" if market.get("open") else "closed", help=f"clock: {market.get('clock')}")
@@ -555,6 +573,132 @@ def _execution(d: dict[str, Any]) -> str:
         return f"trading service: risk engine rejected ({ex.get('risk')})"
     reason = str(ex.get("reason") or "not sent")
     return reason if reason.startswith("not sent") else f"not sent: {reason}"
+
+
+def _execution_tab() -> None:
+    """The final execution audit, what the Brain's orders did at Alpaca paper, and how well they executed."""
+    audits = guarded(lambda: api().get(f"{BASE}/execution-audit"), "execution audit") or {}
+    latest = audits.get("latest")
+    st.markdown(
+        "**Final execution audit** — run before the first Brain order of each day and of each start, and at "
+        "startup. Scheduled Brain execution is armed only when every check passes; each order is checked "
+        "again immediately before it is sent (kill switches, paper endpoint and key, dry run, .env)."
+    )
+    if not latest:
+        st.caption("No execution audit yet (the first one runs when the Brain first wants to send an order).")
+    else:
+        ok = latest["ok"]
+        (st.success if ok else st.error)(
+            _md(
+                f"{latest['purpose'].replace('_', ' ')} audit at {latest['at'][:19].replace('T', ' ')} UTC: "
+                + ("every check passed" if ok else "FAILED — " + "; ".join(latest["failed"]))
+            ),
+            icon=":material/verified_user:" if ok else ":material/gpp_bad:",
+        )
+        c = st.columns(4)
+        c[0].metric("Brain mode", str(latest.get("mode") or "—").replace("_", " "))
+        c[1].metric("Endpoint", "paper" if "paper-api" in str(latest.get("endpoint")) else "NOT PAPER")
+        c[2].metric(
+            "Live trading possible", "no" if latest.get("live_trading_possible") is False else "CHECK"
+        )
+        c[3].metric("Agents", str((latest.get("agents") or {}).get("enabled", "—")))
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "check": x["name"],
+                        "result": "pass" if x["ok"] else "FAIL" if x["ok"] is False else "—",
+                        "detail": x["detail"],
+                    }
+                    for x in latest.get("checks") or []
+                ]
+            ).astype(str),
+            hide_index=True,
+            use_container_width=True,
+        )
+        if latest.get("orders"):
+            st.caption("What was about to go when it ran:")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "symbol": o["subject"],
+                            "action": o["action"],
+                            "qty": o["quantity"],
+                            "price": o["est_price"],
+                            "risk preview": o.get("risk_preview"),
+                            "why": "; ".join(o.get("reasons") or []),
+                        }
+                        for o in latest["orders"]
+                    ]
+                ).astype(str),
+                hide_index=True,
+                use_container_width=True,
+            )
+        if latest.get("outcome"):
+            st.caption(_md(f"Outcome: {latest['outcome']}"))
+    quality = guarded(lambda: api().get(f"{BASE}/execution-quality"), "execution quality") or {}
+    st.markdown(
+        "**Execution quality** — judged on its own, never merged with whether a trade made money: slippage "
+        "against the decision's price, cost against the quote as the order left (graded against half the "
+        "spread), time to fill, latency."
+    )
+    if quality.get("sent"):
+        c = st.columns(5)
+        c[0].metric("Orders sent", quality.get("sent", 0))
+        c[1].metric("Fill rate", pct(quality.get("fill_rate"), 0))
+        c[2].metric("Mean slippage", f"{num(quality.get('slippage_bps_mean'))}bp")
+        c[3].metric("Cost vs quote", f"{num(quality.get('cost_vs_quote_bps_mean'))}bp")
+        c[4].metric("Median latency", f"{num(quality.get('submit_latency_ms_median'))}ms")
+        st.caption(_md(f"Grades: {quality.get('grades') or {}} · median spread paid "
+                       f"{num(quality.get('spread_bps_median'))}bp · median quote age "
+                       f"{num(quality.get('quote_age_s_median'))}s"))  # fmt: skip
+    else:
+        st.caption("No Brain order has been sent yet: execution quality is unproven.")
+    ledger = guarded(lambda: api().get(f"{BASE}/executions", limit=200), "execution ledger") or {}
+    rows = ledger.get("executions") or []
+    st.markdown("**Execution ledger** — every Brain order from the decision to its final state.")
+    if rows:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "decided": (r.get("decided_at") or "")[:19].replace("T", " "),
+                        "symbol": r["symbol"],
+                        "action": r["action"],
+                        "qty": r["qty"],
+                        "status": r["status"],
+                        "filled": r["filled_qty"],
+                        "expected": r["expected_price"],
+                        "fill": r["filled_avg_price"],
+                        "slippage (bp)": r["slippage_bps"],
+                        "vs quote (bp)": r["cost_vs_quote_bps"],
+                        "spread (bp)": r["spread_bps"],
+                        "quote age (s)": r["quote_age_s"],
+                        "latency (ms)": r["submit_latency_ms"],
+                        "to fill (s)": r["seconds_to_fill"],
+                        "grade": r["grade"],
+                        "brain cycle": r["brain_cycle_id"],
+                        "order": r["client_order_id"],
+                        "why": r["reason"],
+                    }
+                    for r in rows
+                ]
+            ).astype(str),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.caption("No Brain order has been sent yet.")
+    sessions = (guarded(lambda: api().get(f"{BASE}/sessions", limit=1), "sessions") or {}).get(
+        "sessions"
+    ) or []
+    near = (sessions[0].get("near_close") or {}) if sessions else {}
+    if near:
+        st.markdown(_md(f"**Near-close review** ({sessions[0]['day']}): held overnight "
+                        f"{', '.join(near.get('held_overnight') or []) or 'nothing'}; reduced "
+                        f"{', '.join(near.get('reduced') or []) or 'nothing'}; earnings before the next "
+                        f"session: {', '.join(near.get('earnings_overnight') or []) or 'none'}."))  # fmt: skip
 
 
 def _positions() -> None:
@@ -1522,6 +1666,7 @@ def render() -> None:
             "Agents",
             "Consensus & debate",
             "Proposed actions",
+            "Execution",
             "Learning",
             "Strategy lab",
             "Improvements",
@@ -1546,24 +1691,26 @@ def render() -> None:
     with tabs[4]:
         _decisions(cycle)
     with tabs[5]:
-        _learning()
+        _execution_tab()
     with tabs[6]:
-        _lab()
+        _learning()
     with tabs[7]:
-        _improvements()
+        _lab()
     with tabs[8]:
-        _operations()
+        _improvements()
     with tabs[9]:
-        _positions()
+        _operations()
     with tabs[10]:
-        _audit()
+        _positions()
     with tabs[11]:
-        _data_report()
+        _audit()
     with tabs[12]:
-        _evaluation()
+        _data_report()
     with tabs[13]:
-        _book()
+        _evaluation()
     with tabs[14]:
-        _memory()
+        _book()
     with tabs[15]:
+        _memory()
+    with tabs[16]:
         _history(cycles)

@@ -394,7 +394,9 @@ class TradingService:
             out.append("the Alpaca key does not look like a paper key (paper keys start with PK)")
         drift = env_file_drift(s)
         if drift:
-            out.append("the .env file changed since the API started: restart it")
+            out.append(
+                "the .env file changed since the API started (" + "; ".join(drift)[:200] + "): restart it"
+            )
         if not flatten:
             kill = await self.kill_switch()
             if kill.active:

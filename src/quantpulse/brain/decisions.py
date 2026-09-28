@@ -3,7 +3,7 @@
 Position management (holdings first):
 
 * at its stop (portfolio agent) or a broken thesis → CLOSE (a protective exit);
-* in the last half hour, earnings before the next session → DE_RISK half (the overnight gap risk);
+* in the last half hour, earnings before the next session opens → DE_RISK half (the overnight gap risk);
 * overweight → REDUCE to the position limit;
 * at the target of a calibrated thesis → REDUCE half, once (take profits; no target is ever invented);
 * a confident bearish consensus → REDUCE (half) or CLOSE (strongly bearish);
@@ -36,6 +36,7 @@ from typing import Any
 
 import numpy as np
 
+from quantpulse.core.market_calendar import earnings_overnight
 from quantpulse.schemas.common import DataStatus
 from quantpulse.services.trading_data import assess_quote
 from quantpulse.services.trading_risk import OrderIntent, QuoteCheck, RiskBook
@@ -278,7 +279,7 @@ def plan(
         if not near_close or symbol in (near_close.get("derisked") or []):
             return None
         days = (event_risk.get(symbol) or {}).get("days_to_earnings")
-        if days is not None and 0 <= days <= 1:
+        if earnings_overnight(ctx.as_of, days):
             return (
                 f"overnight: earnings before the next session ({days} day(s)) — halve the position before "
                 f"the close ({near_close.get('minutes_to_close')} min left)"

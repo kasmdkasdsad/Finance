@@ -135,6 +135,11 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert any("60-session evaluation" in m.value for m in at.markdown)
     assert any("Positions and their theses" in m.value for m in at.markdown)
     assert any(b.label == "STOP BRAIN ORDERS" for b in at.button)  # always one click away
+    # why it traded or not (trading is disabled here: nothing can be sent), and the execution tab
+    assert any(i.value.startswith("no ") for i in at.info), [i.value for i in at.info]
+    assert any("**Final execution audit**" in m.value for m in at.markdown)
+    assert any("**Execution ledger**" in m.value for m in at.markdown)
+    assert any("execution quality is unproven" in c.value for c in at.caption)
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
     assert "AgentCompleted" in set(events["event"])
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}

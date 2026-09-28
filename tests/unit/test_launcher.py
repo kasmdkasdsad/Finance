@@ -174,6 +174,15 @@ def test_trading_status_is_read_with_the_token_and_warns_about_the_scheduler(ser
     s2 = server({ql.TRADING_STATUS_PATH: (200, json.dumps({**status, "scheduler_enabled": True}).encode())})
     _, warnings = ql.trading_status(s2.port, {})
     assert len(warnings) == 1 and "QP_TRADING_SCHEDULER_ENABLED=false" in warnings[0]
+    brain = {**status, "owner": "brain", "scheduled_mode": "paper", "brain_kill_switch": {"active": False}}
+    s4 = server({ql.TRADING_STATUS_PATH: (200, json.dumps(brain).encode())})
+    summary, warnings = ql.trading_status(s4.port, {})
+    assert "account owned by the Brain · Brain orders on its own · Brain kill switch off" in summary
+    assert len(warnings) == 1 and "trades it by itself" in warnings[0] and "STOP BRAIN ORDERS" in warnings[0]
+    stopped = {**brain, "brain_kill_switch": {"active": True}}
+    s5 = server({ql.TRADING_STATUS_PATH: (200, json.dumps(stopped).encode())})
+    summary, warnings = ql.trading_status(s5.port, {})
+    assert "Brain kill switch on" in summary and warnings == []
     s3 = server({ql.TRADING_STATUS_PATH: (401, b'{"detail":"bad key"}')})
     assert ql.trading_status(s3.port, {}) == ("trading status unavailable (HTTP 401)", [])
 

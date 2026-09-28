@@ -202,3 +202,23 @@ def sessions_after(day: date, n: int) -> date:
     for _ in range(n):
         cursor = next_trading_day(cursor)
     return cursor
+
+
+def earnings_overnight(moment: datetime, days_to_earnings: int | None) -> bool:
+    """Whether an earnings release ``days_to_earnings`` calendar days from ``moment`` falls before the next
+    session opens — after today's close or before the next open (a Friday's includes Monday's)."""
+    if days_to_earnings is None or days_to_earnings < 0:
+        return False
+    today = moment.astimezone(NEW_YORK).date()
+    return days_to_earnings <= (next_trading_day(today) - today).days
+
+
+def sessions_between(start: datetime, end: datetime) -> int:
+    """Trading sessions after ``start``'s day up to and including ``end``'s day (New York dates)."""
+    a, b = start.astimezone(NEW_YORK).date(), end.astimezone(NEW_YORK).date()
+    n, d = 0, a
+    while d < b:
+        d += timedelta(days=1)
+        if is_trading_day(d):
+            n += 1
+    return n

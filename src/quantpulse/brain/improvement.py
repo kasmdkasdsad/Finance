@@ -40,6 +40,7 @@ from typing import Any
 import numpy as np
 from sqlalchemy import select
 
+from quantpulse.core.market_calendar import sessions_between
 from quantpulse.db.models import (
     BrainAgentPerformanceRow,
     BrainAgentRunRow,
@@ -450,8 +451,6 @@ class ImprovementEngine:
 
     async def _turnover(self, now: datetime) -> list[dict[str, Any]]:
         """Positions closed within ``QUICK_SESSIONS`` of opening, not at a stop: the Brain changing its mind."""
-        from .theses import sessions_between
-
         async with self._db.session() as s:
             rows = (
                 await s.scalars(

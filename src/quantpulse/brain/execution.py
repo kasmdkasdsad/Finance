@@ -226,6 +226,8 @@ def _outcome(row: ProposedTradeOut, cycle: CycleOut) -> dict[str, Any]:
         "risk": row.risk,
         "checks": [c.model_dump() for c in row.checks],
         "error": row.error,
+        # not sent: why, in the same words as every other decision that did not go
+        **({"reason": f"stopped at submission: {row.error}"} if row.status == "blocked_at_submit" else {}),
         "quote_price": row.quote_price,
         "quote_bid": row.quote_bid,
         "quote_ask": row.quote_ask,
@@ -368,8 +370,10 @@ class BrainExecutor:
             "checks": checks,
             "mode": s.brain_mode,
             "endpoint": t.broker.base_url,
-            "paper": True,
-            "live_trading_possible": False,
+            # read from the client and the setting, not asserted: the settings refuse anything but paper and
+            # there is no trading-URL setting, so a live endpoint would be a defect (and fail the audit)
+            "paper": t.broker.base_url == PAPER_URL and s.alpaca_paper,
+            "live_trading_possible": not (t.broker.base_url == PAPER_URL and s.alpaca_paper),
             "supervisor": {"enabled": s.brain_supervisor_enabled, "armed": await t.armed()},
             "data_source": {"stock_feed": s.alpaca_stock_feed, "vendors_asked_first": ["alpaca"]},
             "buying_power": account.buying_power if account is not None else None,
@@ -551,7 +555,11 @@ class BrainExecutor:
             else:
                 p.execution = _outcome(row, cycle)
                 p.status = (
-                    "duplicate_prevented" if p.execution["duplicate_prevented"] else row.stage or row.status
+                    "duplicate_prevented"
+                    if p.execution["duplicate_prevented"]
+                    else "blocked_at_submit"
+                    if row.status == "blocked_at_submit"
+                    else row.stage or row.status
                 )
         report["orders_sent"] = sum(1 for p in chosen if (p.execution or {}).get("sent"))
         if "audit" in report:

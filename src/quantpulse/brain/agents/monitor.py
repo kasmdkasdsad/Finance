@@ -18,8 +18,9 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import ClassVar
 
+from quantpulse.core.market_calendar import sessions_between
+
 from ..context import BrainContext
-from ..theses import sessions_between
 from ..types import MARKET, PORTFOLIO, AgentFamily, AgentSpec, DataState, Evidence, Opinion
 from .base import Agent, Role, symbols_only
 from .common import opinion

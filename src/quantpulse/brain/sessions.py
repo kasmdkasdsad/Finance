@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -24,7 +25,7 @@ from sqlalchemy import select
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
-from quantpulse.core.market_calendar import NEW_YORK, is_trading_day, regular_close
+from quantpulse.core.market_calendar import NEW_YORK, earnings_overnight, is_trading_day, regular_close
 from quantpulse.db.models import BrainCycleRow, BrainSessionRow, BrokerOrderRow
 from quantpulse.db.session import Database
 from quantpulse.services.order_manager import BRAIN, STRATEGY
@@ -33,6 +34,7 @@ from quantpulse.services.trading_data import TradingDataLoader
 
 from .evaluation import MarketPrices
 
+REDUCING = ("reduce", "close", "de_risk", "sell", "rebalance")
 logger = logging.getLogger(__name__)
 
 
@@ -192,16 +194,24 @@ class SessionKeeper:
 
     # ------------------------------------------------------------------ before the bell
     async def near_close(
-        self, cycle: dict[str, Any], theses: list[dict[str, Any]], event_risk: dict[str, Any]
+        self,
+        cycle: dict[str, Any],
+        theses: list[dict[str, Any]],
+        event_risk: dict[str, Any],
+        derisked: Sequence[str] = (),
     ) -> dict[str, Any]:
         """The day's decision state before the close: each holding, whether it is held overnight or reduced
-        and why (its thesis check, an earnings release before the next session), and the review's orders."""
+        and why (its thesis check, an earnings release before the next session), and the review's orders.
+        ``derisked``: holdings already halved for the overnight earlier in the last half hour (the ledger)."""
         now = self._clock.now()
         day = now.astimezone(NEW_YORK).date()
         decisions = {d["subject"]: d for d in cycle.get("decisions") or []}
         holdings = []
         for t in theses:
             d = decisions.get(t["symbol"]) or {}
+            if t["symbol"] in derisked and d.get("action") not in REDUCING:
+                d = {"action": "de_risk", "reasons": ["overnight: halved earlier in the last half hour"],
+                     "execution": {"sent": True}}  # fmt: skip
             days = (event_risk.get(t["symbol"]) or {}).get("days_to_earnings")
             holdings.append(
                 {
@@ -212,9 +222,7 @@ class SessionKeeper:
                     "relative_return": t.get("relative_return"),
                     "thesis_check": (t.get("check") or {}).get("status"),
                     "earnings_in_days": days,
-                    "overnight": "reduce or exit"
-                    if d.get("action") in ("reduce", "close", "de_risk", "sell")
-                    else "hold",
+                    "overnight": "reduce or exit" if d.get("action") in REDUCING else "hold",
                     "decision": d.get("action"),
                     "why": (d.get("reasons") or [])[:3],
                     "sent": bool((d.get("execution") or {}).get("sent")),
@@ -226,7 +234,9 @@ class SessionKeeper:
             "holdings": holdings,
             "held_overnight": [h["symbol"] for h in holdings if h["overnight"] == "hold"],
             "reduced": [h["symbol"] for h in holdings if h["overnight"] != "hold"],
-            "earnings_overnight": [h["symbol"] for h in holdings if h["earnings_in_days"] in (0, 1)],
+            "earnings_overnight": [
+                h["symbol"] for h in holdings if earnings_overnight(now, h["earnings_in_days"])
+            ],
             "orders_sent": (cycle.get("summary") or {}).get("orders_sent", 0),
         }
         await self._save(day, near_close=record)

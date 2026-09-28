@@ -16,8 +16,10 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
 * Alpaca paper trading — reconciliation at startup and every few minutes in the session, and one strategy
   cycle per ``trading_rebalance_interval_minutes`` slot from ``trading_time`` (dry runs included; orders are
   only sent when paper execution is enabled).
-* the brain's supervisor — once a minute it decides, by market session and by event, whether to run an
-  analysis cycle, a quote monitor or a learning pass (analysis only: the brain never sends orders).
+* the brain's supervisor — once a minute it decides, by market session and by event, whether to run a
+  cycle, a quote monitor, a reconciliation or a learning pass. When the Brain owns the Alpaca paper account
+  (``QP_BRAIN_MODE=paper_execution``) its cycles' decisions are executed by the trading service — the Brain
+  itself never talks to the broker's order endpoint.
 """
 
 from __future__ import annotations
@@ -196,7 +198,7 @@ class Poller:
         return await self._c.trading.run_scheduled()
 
     async def run_brain(self) -> str:
-        """The brain's supervisor: session- and event-driven analysis (it never sends orders)."""
+        """The brain's supervisor: session- and event-driven cycles (orders only via the trading service)."""
         return await self._c.brain.supervisor.tick()
 
     async def warm_model(self) -> str:

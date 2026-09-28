@@ -648,6 +648,11 @@ def trading_status(api_port: int, settings: dict[str, str]) -> tuple[str, list[s
         f"kill switch {yes((st.get('kill_switch') or {}).get('active'))} · "
         f"scheduler {yes(st.get('scheduler_enabled'))} · keys {'set' if st.get('broker_configured') else 'missing'}"
     )
+    if st.get("owner") == "brain":
+        summary += (
+            f" · account owned by the Brain · Brain orders {'on its own' if st.get('scheduled_mode') == 'paper' else 'off'}"
+            f" · Brain kill switch {yes((st.get('brain_kill_switch') or {}).get('active'))}"
+        )
     warnings: list[str] = []
     if st.get("paper") is not True:
         warnings.append("The API did not report a PAPER account. Do not trade until this is explained.")
@@ -662,6 +667,19 @@ def trading_status(api_port: int, settings: dict[str, str]) -> tuple[str, list[s
             )
             + "\n\nThe launcher did not change this. To turn it off, set QP_TRADING_SCHEDULER_ENABLED=false in "
             ".env and start QuantPulse again."
+        )
+    if (
+        st.get("owner") == "brain"
+        and st.get("scheduled_mode") == "paper"
+        and not (st.get("brain_kill_switch") or {}).get("active")
+    ):
+        warnings.append(
+            "The Brain owns your Alpaca PAPER account and trades it by itself during market hours: its "
+            "supervisor runs the cycles, and each day's first order waits for the execution audit (paper "
+            "endpoint, paper key, switches, kill switches, account, reconciliation, market data) to pass. "
+            "Every order goes through the risk engine; nothing can reach a live account."
+            "\n\nThe launcher did not change this. To stop Brain orders: STOP BRAIN ORDERS on the Brain page, "
+            "QP_BRAIN_KILL_SWITCH=true in .env, or the Stop QuantPulse shortcut."
         )
     return summary, warnings
 

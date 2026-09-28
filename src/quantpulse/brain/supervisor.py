@@ -24,10 +24,18 @@ holding → an *event* cycle on that symbol; a position, portfolio or order chan
 cycles only run while the market is open.
 
 When the Brain owns the Alpaca paper account (``QP_BRAIN_MODE=paper_execution``) its cycles' decisions are
-executed by the trading service — as *scheduled* cycles, so they send nothing until paper execution has
-been armed by hand once (``QP_TRADING_SCHEDULER_REQUIRES_ARMING``). After a restart the first tick closes
-cycles the restart interrupted and reconciles with Alpaca before anything else; orders already sent keep
-their client ids, so nothing is sent twice.
+executed by the trading service — as *scheduled* cycles. The first order of each day (and of each process)
+waits for the final execution audit (:meth:`BrainExecutor.audit`): paper endpoint, paper key, trading
+switches, both kill switches, the environment, the account, reconciliation, the market clock and the data;
+only when every check passes does it arm scheduled execution (``QP_TRADING_SCHEDULER_REQUIRES_ARMING``) and
+send. While the market is open the account is reconciled every five minutes; from half an hour before the
+close a *near-close* review de-risks what should not be held into an overnight earnings release and records
+the day's decision state; after the close the day is reconciled and recorded, graded and learned from.
+
+After a restart the first tick — never assuming the previous state was right — closes cycles the restart
+interrupted, reconciles with Alpaca, brings the execution ledger up to date and runs the execution audit
+before anything else; orders already sent keep their client ids, so nothing is sent twice. Ticks never
+overlap: a tick that arrives while one is running (a duplicate scheduler event) does nothing.
 
 ``QP_BRAIN_SUPERVISOR_ENABLED`` turns it on or off at start-up; it can be paused and resumed at runtime
 (``POST /brain/supervisor``), and the state survives restarts.
@@ -295,8 +303,11 @@ class Supervisor:
         detail = await self._brain.run(trigger="supervisor: near close", kind="portfolio", wait=None)
         ctx = self._brain.orchestrator.last_ctx
         risk = (ctx.working.facts.get("event_risk") or {}) if ctx is not None else {}
+        near = (ctx.working.facts.get("near_close") or {}) if ctx is not None else {}
         positions = await self._brain.theses.positions(closed=0)
-        return await self._brain.sessions.near_close(detail, positions["open"], risk)
+        return await self._brain.sessions.near_close(
+            detail, positions["open"], risk, derisked=near.get("derisked") or []
+        )
 
     async def _improve(self) -> dict[str, Any]:
         """Look at the record and write improvement proposals (never applied automatically)."""

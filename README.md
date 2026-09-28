@@ -102,12 +102,17 @@ After the one-time setup above (the `.venv` and `.env` must exist), double-click
 | **QuantPulse Trading Control** | The same, then opens the Alpaca **paper** trading page (account, positions, orders, risk, proposed trades, kill switch, reconciliation) |
 | **Stop QuantPulse** | Stops the API and the UI the launcher started, cleanly (Ctrl+C first, forced only after 20 s) |
 
-**Starting QuantPulse never trades.** The launcher only reads:
+**The launcher never trades.** It only reads:
 
 * it makes GET requests to `/health`, `/openapi.json`, `/api/v1/trading/status` and Streamlit's health check;
 * it never runs a strategy cycle, sends a test order, or changes a setting;
-* the scheduler stays off unless `.env` says `QP_TRADING_SCHEDULER_ENABLED=true`, which is now off by
-  default. If it is on, the launcher warns you.
+* the strategy scheduler stays off unless `.env` says `QP_TRADING_SCHEDULER_ENABLED=true` (off by
+  default). If it is on, the launcher warns you.
+* The API it starts runs the Brain's supervisor. When the Brain owns the account **and** paper execution is
+  on (`QP_ALPACA_TRADING_ENABLED=true`, `QP_TRADING_DRY_RUN=false`), the Brain trades the Alpaca **paper**
+  account by itself during market hours (see [Autonomous paper execution](#autonomous-paper-execution));
+  the launcher says so at start-up. **Stop QuantPulse** stops it; so do *STOP BRAIN ORDERS* on the Brain
+  page and `QP_BRAIN_KILL_SWITCH=true`.
 
 Details:
 
@@ -1100,12 +1105,13 @@ sent while `QP_ALPACA_TRADING_ENABLED=false` or `QP_TRADING_DRY_RUN=true` (the d
 kill switch stops new Brain orders at once. The Brain itself has no broker access beyond a read-only view
 (account, positions, open orders, clock). There is no path to a live-money account.
 
-**Status (built and tested):** the agent interface, registry and orchestrator; sixteen deterministic
+**Status (built and tested):** the agent interface, registry and orchestrator; nineteen deterministic
 agents and one optional model-backed agent; working memory; opportunity detection; consensus with visible
 disagreement and an adversarial debate; proposed actions with a risk preview; grading of predictions
 against real prices, reflection and measured track records; a supervisor that runs by session and by
-event; ownership of the Alpaca paper account with execution through the trading service, the Brain kill
-switch and automatic entry halts; position theses; pre-market checks and daily closes; a per-trade audit
+event; ownership of the Alpaca paper account with **autonomous execution** through the trading service (a
+final execution audit that arms it, a last check before every submission, an execution ledger, a
+near-close review), the Brain kill switch and automatic entry halts; position theses; pre-market checks and daily closes; a per-trade audit
 trail; the market-data/SIP report; the Brain's own paper book (when it does not own the account); the
 replaced strategy as a comparison shadow; the scorecard and the 60-session evaluation; a strategy lab;
 self-improvement proposals; a provider-agnostic language-model layer (no provider is built in);
@@ -1147,11 +1153,19 @@ persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Pape
 
    **Checks fail closed.** If the data-quality agent does not run (failed, timed out or switched off),
    nothing is executable that cycle. If situational awareness does not run, the posture is *cautious*.
-4. **Decide.** Holdings: CLOSE at a stop, REDUCE when overweight or bearish, INCREASE when confidently
-   bullish below target, otherwise HOLD. New names: BUY only on a confident bullish consensus with no
+4. **Decide.** Holdings: CLOSE at a stop or a broken thesis; in the last half hour, DE_RISK half of a
+   holding with an earnings release before the next session opens (once a day); REDUCE when overweight;
+   take half the profit at the target of a *calibrated* thesis (once; no target is invented); REDUCE or
+   CLOSE when confidently bearish; INCREASE when confidently bullish below target; otherwise HOLD. Then
+   the book as a whole (each rule trims one HOLD per cycle and stops once the book is back inside): two
+   holdings that are the same bet (return correlation ≥ 0.85) and together above the position limit give
+   up the excess; a sector above 45% of equity gives up the excess; a book above 35% annualised
+   volatility trims a quarter of its largest risk contributor. New names: BUY only on a confident bullish consensus with no
    veto, outside a risk-off market, with a free slot and unborrowed cash, sized by a volatility budget
    and within the per-order limit, at most `QP_BRAIN_MAX_NEW_POSITIONS_PER_CYCLE` per cycle. Everything
-   else is WATCH or NO_ACTION, with the reason.
+   else is WATCH or NO_ACTION, with the reason. Every cycle records **why it traded or why it did not**
+   (`summary.decision`: the orders sent, or each reason nothing went — no clear bullish consensus, not
+   enough evidence, a halt, a gate, the risk engine), shown at the top of the page's *Overview*.
 5. **Risk preview.** Every proposed trade goes through `RiskBook` (sells first), which applies the same
    live-data, quote-age, spread and liquidity limits as real orders. The status is `recommended`
    (paper_recommendation mode), `dry_run_approved` (dry_run), `risk_rejected` (with the failed check),
@@ -1167,9 +1181,12 @@ persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Pape
 
 ### Evaluation: the scorecard and 60 sessions
 
-* **Execution quality** (`GET /brain/execution-quality`) — from the Brain's real Alpaca paper orders: sent,
-  filled, partly filled, canceled or expired, rejected, unknown; the fill rate; the time to fill; and each
-  fill's slippage against the price the decision assumed (positive: worse), by order type.
+* **Execution quality** (`GET /brain/execution-quality`, from the execution ledger) — the Brain's real Alpaca
+  paper orders: sent, filled, partly filled, canceled or expired, rejected, unknown; the fill rate; the time
+  to fill; submission latency; the quote's age and spread as each order left; slippage against the price
+  the decision assumed (positive: worse) by order type; and cost against the quote's midpoint, graded
+  against half the spread (good ≤ half + 2bp, fair ≤ half + 10bp, else poor). Judged on its own: a good
+  fill on a losing trade is still a good fill.
 * **Scorecard** (`GET /brain/scorecard`) — learning measured separately, never blended: prediction accuracy
   (graded consensus calls against the benchmark, with a 95% interval), calibration (hit rate by
   confidence), decision quality (earned / unlucky / lucky / process failure), luck (outcomes that disagreed
@@ -1271,7 +1288,6 @@ the horizon it is graded on, and what happens when it cannot run. The charter is
   evidence.
 * **Macro.** It needs historical rates and credit data that QuantPulse does not store (only today's
   yield curve).
-* **Execution quality.** It needs real fills.
 
 | Agent | Role | What it looks at |
 |---|---|---|
@@ -1290,6 +1306,9 @@ the horizon it is graded on, and what happens when it cannot run. The charter is
 | `portfolio` | constraint | Position weights, concentration (HHI), sector weights, beta, average correlation, margin, positions at their stop; hints close / reduce / hold |
 | `strategy_lab` | forecast (21 days) | Rankings of strategies a person promoted after validation and paper tracking (skipped when none is promoted) |
 | `research` · `situational_awareness` | context (second stage) | The research checklist and the risk posture (below) |
+| `position_monitor` | context (owned account only) | Each position against its thesis: distance to the stop, sessions held against the horizon, return against the benchmark, size against the limit (alerts for the page and the planner) |
+| `execution_quality` | context (portfolio) | The Brain's own recent fills from the execution ledger: fill rate, slippage, cost against the quote, grades, quote age, spread, latency — *unproven* below 10 fills |
+| `learning` | context (market) | What the measured record says and what it does not yet: graded calls, calibration, decision quality, agents with a verdict |
 | `briefing` | context (runs last; model-backed) | A language model's short written summary of the findings on the strongest ideas; skipped unless a model is configured |
 
 Agents that need data the cycle does not have (no stock-model run, no live option chain, no earnings
@@ -1463,8 +1482,8 @@ market session and by event, and never runs every agent all the time:
 | Session | What it does |
 |---|---|
 | Pre-market (from 08:30 New York) | Once a day. When the Brain owns the account, first the **pre-market check**: the SDK client points at the paper API, Alpaca's view of the account (blocked?), reconciliation of orders and positions, the calendar (Alpaca's clock, an early close), market data (the vendors' feeds, a live benchmark quote), overnight changes against the last close, and orders still open before the bell — kept with the day (`GET /brain/sessions`). Then a learning pass and a full cycle to prepare the session. Nothing is executable while the market is closed |
-| Market open | A full cycle every `QP_BRAIN_CYCLE_MINUTES` (30). A quote monitor for holdings and the last focus every `QP_BRAIN_MONITOR_MINUTES` (5): a move of ≥ 3 daily σ or a stale quote becomes an event. When the Brain owns the account, a reconciliation with Alpaca every 5 minutes. It reads the trading service's audit trail for orders, fills and risk limits. Event wake-ups run focused cycles, at most `QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR` (4) |
-| After hours (from 16:40) | Once a day. When the Brain owns the account, first the **close**: reconcile, then record the day — equity, the day's return and the benchmark's, exposure, positions, the Brain's orders sent and filled and their notional, cycles run and how many had new positions halted and why (`brain_sessions`, what the 60-session evaluation reads). Then a learning pass and a portfolio review of the holdings |
+| Market open | A full cycle every `QP_BRAIN_CYCLE_MINUTES` (30). A quote monitor for holdings and the last focus every `QP_BRAIN_MONITOR_MINUTES` (5): a move of ≥ 3 daily σ or a stale quote becomes an event. When the Brain owns the account, a reconciliation with Alpaca (and the execution ledger) every 5 minutes. It reads the trading service's audit trail for orders, fills and risk limits. Event wake-ups run focused cycles, at most `QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR` (4). From 30 minutes before the close, once a day: the **near-close review** — a portfolio cycle that de-risks what should not be held into an overnight earnings release, then records the day's decision state (each holding: held overnight or reduced, and why) |
+| After hours (from 16:40) | Once a day. When the Brain owns the account, first the **close**: reconcile, then record the day — equity, the day's return and the benchmark's, exposure, positions, the Brain's orders sent and filled and their notional, cycles run and how many had new positions halted and why (`brain_sessions`, what the 60-session evaluation reads). Then a learning pass, **trade lessons** (every position closed since the last pass becomes a long-term memory: the thesis, how it ended, its return against the benchmark, and its execution grades — outcome and execution kept apart), a portfolio review, the strategy lab's paper portfolios and the improvement review (proposals only) |
 | Weekends and holidays | Once a day: a learning pass, then a deep research cycle (twice the pre-screen and opportunity budget) |
 
 **Events** are recorded in `brain_events` and served by `GET /brain/events`:
@@ -1496,11 +1515,13 @@ market session and by event, and never runs every agent all the time:
 Agents not needed are recorded as skipped "not needed for a … cycle".
 
 The supervisor is on by default (`QP_BRAIN_SUPERVISOR_ENABLED=true`). When the Brain owns the account its
-cycles' decisions are executed as **scheduled** cycles: they send nothing until paper execution has been
-armed by hand once (a manual Brain cycle with paper execution on, a manual strategy cycle, or the confirmed
-test order — `QP_TRADING_SCHEDULER_REQUIRES_ARMING`). After a restart its first tick closes the cycles the
-restart interrupted and reconciles with Alpaca. It can be paused and resumed at runtime
-(`POST /brain/supervisor {"paused": true}` or the page), and its state survives restarts.
+cycles' decisions are executed as **scheduled** cycles, armed by the Brain's own **final execution audit**
+(see [Autonomous paper execution](#autonomous-paper-execution)) — no click is needed, and nothing is sent
+unless every check passes. After a restart its first tick — never assuming the previous state was right —
+closes the cycles the restart interrupted, reconciles with Alpaca, brings the execution ledger up to date
+and runs the startup audit. Ticks never overlap (a duplicate tick does nothing). It can be paused and
+resumed at runtime (`POST /brain/supervisor {"paused": true}` or the page), and its state survives
+restarts.
 
 ### Strategy lab
 
@@ -1646,8 +1667,8 @@ scripted fake provider and never reach a model.
 
 *Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
 
-* **Overview:** regime, risk posture, market, data quality, the paper portfolio (read only), what was
-  studied and why.
+* **Overview:** why the Brain traded or did not, regime, risk posture, market, data quality, the
+  portfolio, what was studied and why.
 * **Opportunities:** what the brain found by itself and how far each idea got, stage by stage.
 * **Agents:** who ran, who was skipped and why, their run history, and their track record ("unproven"
   until predictions are graded). Agents can be switched on or off here.
@@ -1655,7 +1676,10 @@ scripted fake provider and never reach a model.
   quality, vetoes), the bull case, the bear case and the devil's advocate's objections, every vote with
   its weight, and each agent's own thesis, evidence and invalidation.
 * **Proposed actions:** each action, the risk engine's preview and the checks behind it, the trading
-  controls at the time, and the execution column — always "not sent".
+  controls at the time, and the execution column (sent, filled, or why not).
+* **Execution:** the latest final execution audit (every check, the endpoint, "live trading possible: no",
+  what was about to go and what happened), execution quality, the execution ledger (every Brain order from
+  the decision to its final state), and the latest near-close review.
 * **Learning:** open and graded predictions, consensus calibration, track records ("unproven" until
   enough calls are graded), decision-vs-outcome reflections by quadrant, and failure analyses.
 * **Strategy lab:** versions with their status, gates, walk-forward and paper results; propose,
@@ -1666,7 +1690,7 @@ scripted fake provider and never reach a model.
 * **Memory** and **History.**
 
 The page keeps four layers visibly apart: ① agent analysis, ② consensus, ③ risk preview, and ④ broker
-execution. There is no execution from the Brain.
+execution — done by the trading service, never by the Brain itself.
 
 An agent returns structured `Opinion`s: stance, score (−1…1), confidence, horizon, thesis, evidence,
 data used and missing, data quality, invalidation and veto. A model-backed agent implements the same
@@ -1747,6 +1771,106 @@ floored to `QP_BRAIN_CYCLE_MINUTES`: however many cycles or restarts happen in a
 one sell per symbol can be sent in it (a repeat is refused by the order manager's write-ahead record and
 recorded as `duplicate_prevented`).
 
+### Autonomous paper execution
+
+With paper execution on, the Brain manages the Alpaca **paper** account by itself: the supervisor runs its
+cycles, and every approved decision is executed by the trading service with no click anywhere. It never
+sends an order of its own and never touches a live account.
+
+**One decision, end to end:**
+
+1. **Cycle.** Positions and theses are reconciled with Alpaca, the agents run, the consensus is built and
+   debated, and the planner proposes actions (see [One cycle](#one-cycle)). Each proposed trade is
+   previewed by the risk engine.
+2. **Gate** (`BrainExecutor.gate`). Orders go only if the Brain owns the account, the market is open,
+   Alpaca answers, and every trading switch allows them (paper keys, `QP_ALPACA_TRADING_ENABLED=true`,
+   `QP_TRADING_DRY_RUN=false`, both kill switches off, `.env` unchanged, a `PK…` key). Entry halts (daily
+   loss, data quality, clock skew, the last 15 minutes, unexpected positions, an inconsistent account,
+   exposure) hold back buys and increases only; exits and trims still go.
+3. **Final execution audit** — before the first order of each day and of each process start (and once at
+   startup). It checks and prints: the Brain mode, `QP_ALPACA_PAPER`, the SDK client's endpoint (must be
+   `https://paper-api.alpaca.markets`), the paper key, trading enabled, dry run off, both kill switches, the
+   environment, the account (status, equity, cash, buying power), a fresh reconciliation, the market clock,
+   this computer's clock against Alpaca's (±10 s), and a live benchmark quote (source and age); plus the
+   positions, open orders, the risk limits, the agents, and each order about to go with its consensus,
+   risk preview and reasons. **Only if every check passes** does it arm scheduled execution
+   (`QP_TRADING_SCHEDULER_REQUIRES_ARMING`, event `paper_armed`) and let the orders go; otherwise **no
+   order**, and each decision says which check failed. `GET /brain/execution-audit`, the page's *Execution*
+   tab, the API log and the trading events keep every audit and its outcome.
+4. **Trading service** (`TradingService.run_brain`). Reconcile, re-read the account, cancel stale orders,
+   skip symbols with a working order or in the cooldown, fresh quotes, `RiskBook` for every order (sells
+   first, then buys re-checked against the cash left) — the one risk engine; nothing is duplicated.
+5. **The last check, immediately before each order leaves** (`pre_submit_blockers`): paper setting,
+   trading enabled, dry run, the paper endpoint, the key, `.env` drift, the trading kill switch and the
+   Brain kill switch, and that the Brain still owns the account. A switch thrown while the cycle ran stops
+   the order here (`blocked_at_submit`, event `order_blocked_at_submit`).
+6. **Order manager.** Deterministic client ids (`qp-brain-<slot>-<SYMBOL>-<b|s>`) and a write-ahead record:
+   a repeat in the same slot, after a crash or a duplicate tick, is refused (`duplicate_prevented`).
+7. **After the order.** The **execution ledger** (`brain_executions`, `GET /brain/executions`) records each
+   order: proposal and Brain cycle, reason, consensus, the expected price, the submitted price, the quote as
+   it left (price, bid/ask, spread, age, source), submission latency, fills (partial fills too), time to
+   fill, final status, slippage and cost against the quote with a grade. Reconciliation every 5 minutes
+   brings late fills, cancels and rejections in; theses open and close from the fills.
+8. **Learning.** After the close: the day is recorded, predictions graded, trade lessons written, agent
+   track records and the scorecard updated, and improvement proposals reviewed — proposals only; a
+   protected control (loss, position and order limits, kill switches, paper-only, data freshness, spread,
+   account and environment checks) is never the subject of one, and nothing is applied automatically.
+
+**What the Brain manages:** stops and broken theses (protective exits), overnight earnings risk, oversized
+positions, calibrated take-profits, bearish reversals, increases toward target, the same bet held twice,
+sector concentration, portfolio volatility, and replacing a fading holding with a clearly stronger idea
+when no slot is free. **It may do nothing for days**: when there is no clear bullish consensus from two
+independent sources, the data is not live, or any gate fails, the answer is NO TRADE, and the cycle says
+why.
+
+**What stops trading** — at once: the Brain kill switch (*STOP BRAIN ORDERS*, `POST /brain/kill-switch`,
+`QP_BRAIN_KILL_SWITCH=true`), the trading kill switch, `QP_ALPACA_TRADING_ENABLED=false`,
+`QP_TRADING_DRY_RUN=true`, another `QP_BRAIN_MODE`, an edited `.env` (restart), a key that is not a paper
+key, a client not pointing at the paper endpoint, Alpaca unreachable, the market closed, a failed audit,
+pausing the supervisor, or stopping QuantPulse. New positions only: the daily loss limit, data quality,
+clock skew, the last 15 minutes of the session, an unexpected position, an inconsistent account, exposure
+above the limits. Per order: the risk engine.
+
+**The first paper trade** comes from an ordinary supervisor cycle while the market is open: a confident
+bullish consensus from at least two independent sources, a portfolio fit, a size within the limits, the
+risk preview's approval, the audit passing, fresh quotes, the risk engine's approval at send time and the
+last check. Nothing is manufactured to make a first trade happen; if nothing qualifies, nothing is sent.
+
+**Restarts and outages.** The first tick after a start closes interrupted cycles, reconciles, refreshes the
+ledger and runs the startup audit; the first order of the process waits for a passing pre-trade audit.
+An Alpaca, data or network failure fails that cycle's orders closed and the next cycle starts again from
+Alpaca's state; a failing or slow agent is recorded and the cycle goes on (a missing data-quality check
+makes nothing executable). Orders whose fate is unknown are settled by reconciliation, never resent.
+
+**Start and stop from Windows.** Double-click **QuantPulse Terminal** (or *QuantPulse Trading Control*):
+the API starts, and with it the supervisor. The launcher reports the account's owner, whether Brain orders
+are on, and the Brain kill switch. To stop Brain orders but keep watching: *STOP BRAIN ORDERS* on the Brain
+page (it also cancels the Brain's working orders). To stop everything: **Stop QuantPulse**. To keep it off
+across restarts: `QP_BRAIN_KILL_SWITCH=true` in `.env`.
+
+**`.env` for autonomous paper execution** (keys come from `.env` only and are never shown):
+
+```ini
+QP_ALPACA_API_KEY_ID=PK...                # your Alpaca PAPER key id
+QP_ALPACA_API_SECRET_KEY=...              # your Alpaca PAPER secret
+QP_ALPACA_PAPER=true                      # must stay true (anything else refuses to start)
+QP_ALPACA_TRADING_ENABLED=true
+QP_TRADING_DRY_RUN=false
+QP_TRADING_KILL_SWITCH=false
+QP_BRAIN_MODE=paper_execution
+QP_BRAIN_KILL_SWITCH=false
+QP_BRAIN_SUPERVISOR_ENABLED=true
+QP_POLLING_ENABLED=true                   # the background poller ticks the supervisor
+QP_TRADING_SCHEDULER_ENABLED=false        # the strategy's own scheduler stays off (the Brain owns the account)
+QP_TRADING_SCHEDULER_REQUIRES_ARMING=true # armed by the Brain's execution audit, never skipped
+QP_ENABLE_LIVE_DATA=true
+QP_TRADING_REQUIRE_LIVE_DATA=true
+QP_ALPACA_STOCK_FEED=iex                  # or sip with a paid plan
+QP_TRADING_MAX_QUOTE_AGE_SECONDS=600
+QP_TRADING_MAX_SPREAD_BPS=30
+QP_API_TOKEN=...                          # recommended once orders are enabled
+```
+
 ### The paper book
 
 `GET /brain/book` and the page's *Paper book* tab. Every trade the risk engine allows (`recommended` or
@@ -1793,6 +1917,8 @@ recorded as `duplicate_prevented`).
 | `GET /brain/evaluation` · `/scorecard` · `/execution-quality` · `/shadow` | The 60-session evaluation · learning measured separately · real fill quality · the replaced strategy's shadow |
 | `GET /brain/data-report?days=` | How often market data stopped the Brain, and the SIP report |
 | `GET /brain/execution` | Who owns the account, both kill switches, what would stop Brain orders (manual and scheduled), the last cycle's entry halts and orders sent |
+| `GET /brain/execution-audit` · `POST /brain/execution-audit` | The latest final execution audits (every gate, what was about to go, the outcome) · run one now (reconciles; never sends an order) |
+| `GET /brain/executions?limit=` | The execution ledger: every Brain order from the decision to its final state, with slippage, cost against the quote and a grade |
 | `GET /brain/kill-switch` · `POST /brain/kill-switch {"active": true, "reason": "…", "cancel_open_orders": true}` | The Brain kill switch: stop new Brain orders at once (or allow them again) |
 | `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |
 | `GET /brain/memory?tier=&kind=&subject=&text=` | Structured memory, newest first |
@@ -1989,9 +2115,21 @@ tests/                   unit · providers · integration · frontend · fixture
   * It trades the Alpaca **paper** account only (simulated money), and only through the trading service;
     with the default `.env` (`QP_ALPACA_TRADING_ENABLED=false`, `QP_TRADING_DRY_RUN=true`) nothing is sent.
     Its performance is not established: track records start empty and it has no live-money history.
-  * With the free IEX feed many quotes are stale by design (one exchange's last trade), so the risk engine
-    refuses many buys and **TRADING BLOCKED — DATA QUALITY INSUFFICIENT** can halt new positions. The fix
-    is real-time SIP data (a paid Alpaca plan), not a looser quote-age limit — that decision is yours.
+  * With the free IEX feed a price's age is its freshest *reliable* observation (the last IEX trade or IEX's
+    own two-sided, uncrossed bid/ask within the spread limit), so a quiet name whose IEX book still moves is
+    live; a name whose IEX book has gone quiet too is stale and refused, and IEX spreads can be wider than
+    the national best. **TRADING BLOCKED — DATA QUALITY INSUFFICIENT** can still halt new positions. The
+    fix is real-time SIP data (a paid Alpaca plan), not a looser quote-age limit — that decision is yours.
+  * It trades by itself once paper execution is on (see
+    [Autonomous paper execution](#autonomous-paper-execution)). It may go days without a trade: NO TRADE
+    is the answer whenever the evidence (two independent sources for full confidence), the data or any
+    gate is not there.
+  * The overnight earnings rule does not know whether a release comes before the open or after the close:
+    any release before the next session opens halves the position in the last half hour. It needs the
+    server running then, and an earnings calendar (the catalyst agent).
+  * Take-profit needs a calibrated target; until the consensus is calibrated there are no targets, and
+    profits are managed by the thesis checks and the consensus instead.
+  * Execution quality is *unproven* below 10 fills, and Alpaca's paper fills can be kinder than real ones.
   * Stops and thesis checks run at each cycle (every 30 minutes by default, or on a monitored price move),
     not as resting stop orders at Alpaca, so a gap can fill well beyond the stop.
   * In the modes where the strategy owns the account, the paper book's fills are modelled (spread,

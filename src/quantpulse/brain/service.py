@@ -52,8 +52,14 @@ LIMITATIONS = (
     "The strategy lab backtests today's liquid universe: its results carry survivorship bias.",
     "Paper-book and strategy-shadow fills are modelled (spread, slippage, fees); the Brain's own are Alpaca's "
     "paper fills.",
-    "With the free IEX feed many quotes are stale by design: the data checks can block trading "
-    "(real-time SIP is the fix, and your decision).",
+    "With the free IEX feed a quiet name's price can still go stale (its IEX book stops moving) and IEX "
+    "spreads can be wider than the national best: the data checks can block trading (real-time SIP is the "
+    "fix, and your decision).",
+    "It may go days without a trade: NO TRADE whenever the evidence, the data or any gate is not there.",
+    "The overnight earnings rule does not know a release's time of day: any release before the next "
+    "session halves the position in the last half hour (the server must be running then).",
+    "Take-profit needs a calibrated target: until the consensus is calibrated there are none.",
+    "Execution quality is unproven below 10 fills; Alpaca's paper fills can be kinder than real ones.",
     "Stops and thesis checks run at each cycle, not as resting stop orders: a gap can fill beyond the stop.",
     "Agent performance and the 60-session evaluation are not established until enough observations exist.",
 )

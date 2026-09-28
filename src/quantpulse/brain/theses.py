@@ -28,14 +28,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
-from quantpulse.core.market_calendar import NEW_YORK, is_trading_day
+from quantpulse.core.market_calendar import sessions_between
 from quantpulse.db.models import BrainDecisionRow, BrainThesisRow, BrokerOrderRow
 from quantpulse.db.session import Database
 from quantpulse.services.order_manager import BRAIN
@@ -84,16 +84,6 @@ def attach_entries(
     for p in proposals:
         if p.action in BUYING and p.is_trade:
             p.entry = entry_plan(ctx, p, expected.get(p.subject))
-
-
-def sessions_between(start: datetime, end: datetime) -> int:
-    a, b = start.astimezone(NEW_YORK).date(), end.astimezone(NEW_YORK).date()
-    n, d = 0, a
-    while d < b:
-        d += timedelta(days=1)
-        if is_trading_day(d):
-            n += 1
-    return n
 
 
 def check(

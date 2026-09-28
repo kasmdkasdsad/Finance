@@ -16,12 +16,12 @@ from typing import Any
 from sqlalchemy import select
 
 from quantpulse.core.clock import Clock
+from quantpulse.core.market_calendar import sessions_between
 from quantpulse.db.models import BrainExecutionRow, BrainThesisRow
 from quantpulse.db.session import Database
 
 from .memory import LONG_TERM, MemoryStore
 from .store import BrainStore
-from .theses import sessions_between
 
 STATE_KEY = "trade_lessons"
 

@@ -636,8 +636,8 @@ class Orchestrator:
                 "opportunities": _count(o.status for o in ctx.opportunities),
                 "debates": _count(d.verdict for d in result.debates.values()),
                 "posture": (ctx.working.facts.get("situation") or {}).get("posture"),
+                "decision": explain(ctx, result),  # why it traded, or why it did not
             },
-            "decision": explain(ctx, result),
             "notes": ctx.notes,
         }
 
