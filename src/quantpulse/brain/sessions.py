@@ -190,6 +190,48 @@ class SessionKeeper:
         await self._save(day, premarket=report)
         return {"ok": report["ok"], "failed": [c["name"] for c in checks if c["ok"] is False]}
 
+    # ------------------------------------------------------------------ before the bell
+    async def near_close(
+        self, cycle: dict[str, Any], theses: list[dict[str, Any]], event_risk: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The day's decision state before the close: each holding, whether it is held overnight or reduced
+        and why (its thesis check, an earnings release before the next session), and the review's orders."""
+        now = self._clock.now()
+        day = now.astimezone(NEW_YORK).date()
+        decisions = {d["subject"]: d for d in cycle.get("decisions") or []}
+        holdings = []
+        for t in theses:
+            d = decisions.get(t["symbol"]) or {}
+            days = (event_risk.get(t["symbol"]) or {}).get("days_to_earnings")
+            holdings.append(
+                {
+                    "symbol": t["symbol"],
+                    "qty": t["qty"],
+                    "weight": t.get("weight"),
+                    "return_pct": t.get("return_pct"),
+                    "relative_return": t.get("relative_return"),
+                    "thesis_check": (t.get("check") or {}).get("status"),
+                    "earnings_in_days": days,
+                    "overnight": "reduce or exit"
+                    if d.get("action") in ("reduce", "close", "de_risk", "sell")
+                    else "hold",
+                    "decision": d.get("action"),
+                    "why": (d.get("reasons") or [])[:3],
+                    "sent": bool((d.get("execution") or {}).get("sent")),
+                }
+            )
+        record = {
+            "at": now.isoformat(),
+            "cycle_id": cycle.get("id"),
+            "holdings": holdings,
+            "held_overnight": [h["symbol"] for h in holdings if h["overnight"] == "hold"],
+            "reduced": [h["symbol"] for h in holdings if h["overnight"] != "hold"],
+            "earnings_overnight": [h["symbol"] for h in holdings if h["earnings_in_days"] in (0, 1)],
+            "orders_sent": (cycle.get("summary") or {}).get("orders_sent", 0),
+        }
+        await self._save(day, near_close=record)
+        return {k: record[k] for k in ("held_overnight", "reduced", "orders_sent")}
+
     # ------------------------------------------------------------------ after the close
     async def close(self) -> dict[str, Any]:
         now = self._clock.now()
@@ -305,5 +347,6 @@ def session_view(r: BrainSessionRow) -> dict[str, Any]:
         "data_blocked_cycles": r.data_blocked_cycles,
         "halts": r.halts,
         "premarket": r.premarket,
+        "near_close": r.near_close,
         "close": r.close,
     }

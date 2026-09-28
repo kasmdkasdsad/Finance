@@ -278,6 +278,10 @@ class TradingService:
         async with self._db.session() as s:
             await repo.add_trading_event(s, kind, message, self._clock.now(), **kw)
 
+    async def log_event(self, kind: str, message: str, **kw: Any) -> None:
+        """Write to the trading audit trail (used by the Brain for its execution audits)."""
+        await self._event(kind, message, **kw)
+
     async def kill_switch(self) -> KillSwitchOut:
         if self._s.trading_kill_switch:
             return KillSwitchOut(active=True, source="env", reason="QP_TRADING_KILL_SWITCH=true")
@@ -363,6 +367,47 @@ class TradingService:
             f"Scheduled paper cycles armed ({how}): the scheduler may now send orders",
             details={"by": how},
         )
+
+    async def arm(self, how: str) -> None:
+        """Arm scheduled cycles (a person's manual paper cycle or test order, or a passing Brain execution
+        audit — :mod:`quantpulse.brain.execution`)."""
+        await self._arm(how)
+
+    async def pre_submit_blockers(self, owner: str, *, flatten: bool = False) -> list[str]:
+        """Checked immediately before every order leaves: a cycle's mode is decided at its start, and a
+        switch thrown since then — a kill switch, an edited .env, a changed key — must still stop the order.
+        Only ever adds reasons not to send; a manual flatten passes the kill switches, as it always has."""
+        s = self._s
+        out: list[str] = []
+        if not s.alpaca_paper:  # the setting refuses false; kept as a guard
+            out.append("QP_ALPACA_PAPER is not true")
+        if not s.alpaca_trading_enabled:
+            out.append("QP_ALPACA_TRADING_ENABLED=false")
+        if s.trading_dry_run:
+            out.append("QP_TRADING_DRY_RUN=true")
+        try:
+            self.verify_paper()
+        except BrokerError as exc:
+            out.append(f"the paper endpoint could not be verified: {exc}")
+        key = s.alpaca_api_key_id.get_secret_value() if s.alpaca_api_key_id is not None else None
+        if key and not key.startswith("PK"):
+            out.append("the Alpaca key does not look like a paper key (paper keys start with PK)")
+        drift = env_file_drift(s)
+        if drift:
+            out.append("the .env file changed since the API started: restart it")
+        if not flatten:
+            kill = await self.kill_switch()
+            if kill.active:
+                out.append(f"kill switch ON ({kill.reason or kill.source})")
+        if owner == "brain":
+            if not s.brain_owns_account:
+                out.append(f"QP_BRAIN_MODE={s.brain_mode}: the Brain does not manage the account")
+            brain_kill = await self.brain_kill_switch()
+            if brain_kill.active:
+                out.append(f"Brain kill switch ON ({brain_kill.reason or brain_kill.source})")
+        elif owner == "strategy" and s.brain_owns_account and not flatten:
+            out.append("the Brain owns the Alpaca paper account: the strategy sends nothing")
+        return out
 
     async def submit_blockers(
         self, kill: KillSwitchOut, *, scheduled: bool = False, owner: str = "strategy"
@@ -1379,6 +1424,9 @@ class TradingService:
                     **base,
                 )
 
+            late = await self.pre_submit_blockers("diagnostic")
+            if late:
+                raise DomainError("the test order was NOT sent: " + "; ".join(late))
             cid = f"qp-test-{now.astimezone(NEW_YORK):%Y%m%dT%H%M%S}-{symbol.replace('.', '_')}-b"
             intent = OrderIntent(
                 symbol=symbol,
@@ -2464,6 +2512,7 @@ class TradingService:
         decision: RiskDecision = book.evaluate(intent)
         order_type, limit = self._order_params(t, quote, flatten or intent.intent == "flatten")
         cid = client_order_id(slot, t.symbol, t.side)
+        qc = book.quotes.get(t.symbol)  # what the risk engine judged the market data by, as the order left
         async with self._db.session() as s:
             now = self._clock.now()
             await repo.add_trading_event(
@@ -2505,15 +2554,39 @@ class TradingService:
             if not decision.approved
             else ("dry_run" if mode != "paper" else "not_submitted"),
             stage="risk_approved" if decision.approved else "risk_rejected",
+            quote_price=qc.price if qc is not None else None,
+            quote_bid=quote.bid if quote is not None else None,
+            quote_ask=quote.ask if quote is not None else None,
+            quote_spread_bps=qc.spread_bps if qc is not None else None,
+            quote_age_seconds=qc.age_seconds if qc is not None else None,
+            quote_source=(qc.source or qc.provider) if qc is not None else None,
         )
         if not decision.approved or mode != "paper":
             if decision.approved:
                 book.commit(intent)
             return base, None
         book.commit(intent)
+        owner = "brain" if strategy == BRAIN else "strategy"
+        late = await self.pre_submit_blockers(owner, flatten=intent.intent == "flatten")
+        if late:
+            await self._event(
+                "order_blocked_at_submit",
+                f"{t.side.upper()} {t.qty:g} {t.symbol} not sent: " + "; ".join(late),
+                cycle_id=cycle_id,
+                symbol=t.symbol,
+                details={"blockers": late},
+            )
+            return (
+                base.model_copy(
+                    update={"status": "blocked_at_submit", "client_order_id": None, "error": "; ".join(late)}
+                ),
+                None,
+            )
+        started = _time.perf_counter()
         sub = await self.orders.submit(
             intent, cid=cid, order_type=order_type, limit_price=limit, cycle_id=cycle_id, strategy=strategy
         )
+        latency_ms = round((_time.perf_counter() - started) * 1000, 1)
         o = sub.order
         return (
             base.model_copy(
@@ -2525,6 +2598,7 @@ class TradingService:
                     "filled_avg_price": o.filled_avg_price if o is not None else None,
                     "submitted_at": o.submitted_at if o is not None else None,
                     "error": sub.error,
+                    "submit_latency_ms": latency_ms,
                 }
             ),
             sub,

@@ -183,6 +183,11 @@ class BrainContext:
     provider_errors: dict[str, str] = field(default_factory=dict)
     working: WorkingMemory = field(default_factory=WorkingMemory)
     llm: ModelRouter | None = None  # language models for the model-backed agents (never for calculations)
+    stop_minutes_before_close: int = 15  # QP_TRADING_STOP_MINUTES_BEFORE_CLOSE: no new position after
+    execution_quality: dict[str, Any] = field(default_factory=dict)  # the Brain's measured fills (recent)
+    track_record: dict[str, Any] = field(
+        default_factory=dict
+    )  # the scorecard, as the learning agent reads it
 
     @property
     def held(self) -> list[str]:

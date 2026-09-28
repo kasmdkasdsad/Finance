@@ -22,6 +22,8 @@ What it looks for:
 * **missing capabilities** — agents that keep skipping for lack of data (options, earnings, the model);
 * **expensive workflows** — agents or cycles that are slow for what they return;
 * **stale-data problems** — symbols whose quotes keep going stale;
+* **poor execution** — the Brain's own fills (the execution ledger) costing well beyond half the spread;
+* **excessive turnover** — positions the Brain closes within a session or two of opening them;
 * **failed strategies** — lab versions rejected by validation, or promoted ones falling short in paper;
 * **poor recommendations** — recurring process failures, and blocks that keep costing opportunities;
 * **recurring analytical mistakes** — failure-analysis findings that repeat, objections that are (or are
@@ -43,11 +45,13 @@ from quantpulse.db.models import (
     BrainAgentRunRow,
     BrainCycleRow,
     BrainEventRow,
+    BrainExecutionRow,
     BrainImprovementRow,
     BrainOpinionRow,
     BrainOpportunityRow,
     BrainReflectionRow,
     BrainStrategyRow,
+    BrainThesisRow,
 )
 from quantpulse.db.session import Database
 
@@ -90,6 +94,10 @@ PROTECTED = (
     "QP_BRAIN_MODE",
 )
 STATUSES = ("proposed", "testing", "validated", "rejected", "applied")
+EXECUTION_MIN_FILLS = 10  # graded fills before execution is judged at all
+POOR_SHARE = 0.3  # … and the share of poor fills that calls for a review
+QUICK_SESSIONS = 2
+TURNOVER_MIN = 5
 
 
 def _p(
@@ -133,6 +141,8 @@ class ImprovementEngine:
             *await self._redundancy(now),
             *await self._runs(now),
             *await self._stale_data(now),
+            *await self._execution(now),
+            *await self._turnover(now),
             *await self._strategies(),
             *await self._decisions(),
             *await self._calibration(),
@@ -395,6 +405,93 @@ class ImprovementEngine:
             )
             for sym, n in counts.items()
             if n >= 5
+        ]
+
+    async def _execution(self, now: datetime) -> list[dict[str, Any]]:
+        """Fills that pay well beyond half the spread, often enough to matter (graded fills only)."""
+        async with self._db.session() as s:
+            rows = (
+                await s.scalars(
+                    select(BrainExecutionRow).where(
+                        BrainExecutionRow.decided_at >= now - LOOKBACK, BrainExecutionRow.grade.is_not(None)
+                    )
+                )
+            ).all()
+        graded = [r for r in rows if r.grade in ("good", "fair", "poor")]
+        poor = [r for r in graded if r.grade == "poor"]
+        if len(graded) < EXECUTION_MIN_FILLS or len(poor) / len(graded) < POOR_SHARE:
+            return []
+        costs = [r.cost_vs_quote_bps for r in poor if r.cost_vs_quote_bps is not None]
+        return [
+            _p(
+                "execution",
+                "brain_orders",
+                "Brain fills often cost well beyond half the spread",
+                {
+                    "graded_fills_30d": len(graded),
+                    "poor": len(poor),
+                    "poor_share": round(len(poor) / len(graded), 3),
+                    "median_cost_bps_of_poor": round(float(np.median(costs)), 2) if costs else None,
+                    "symbols": sorted({r.symbol for r in poor})[:10],
+                    "order_types": dict(Counter(r.order_type or "unknown" for r in poor)),
+                },
+                "Review how Brain orders are priced and timed: marketable limits nearer the midpoint, avoiding "
+                "the first and last minutes of the session, or skipping the thinnest names. Execution only — "
+                "no risk limit changes.",
+                "Lower cost against the quote on the same kind of orders.",
+                [
+                    "Compare cost against the quote by order type, time of day and spread in the ledger.",
+                    "Implement the pricing change as a new version behind a setting (off by default).",
+                    "Run it on paper for enough fills and compare grades with the current version.",
+                    "Adopt only if cost against the quote is lower without fewer fills.",
+                ],
+            )
+        ]
+
+    async def _turnover(self, now: datetime) -> list[dict[str, Any]]:
+        """Positions closed within ``QUICK_SESSIONS`` of opening, not at a stop: the Brain changing its mind."""
+        from .theses import sessions_between
+
+        async with self._db.session() as s:
+            rows = (
+                await s.scalars(
+                    select(BrainThesisRow).where(
+                        BrainThesisRow.status == "closed",
+                        BrainThesisRow.origin == "brain",
+                        BrainThesisRow.closed_at >= now - LOOKBACK,
+                    )
+                )
+            ).all()
+        quick = [
+            r
+            for r in rows
+            if r.closed_at is not None
+            and sessions_between(r.opened_at, r.closed_at) <= QUICK_SESSIONS
+            and "stop" not in (r.exit_reason or "").lower()
+        ]
+        if len(quick) < TURNOVER_MIN or len(quick) * 2 < len(rows):
+            return []
+        return [
+            _p(
+                "decision",
+                "turnover",
+                "The Brain closes many positions within two sessions of opening them",
+                {
+                    "closed_positions_30d": len(rows),
+                    "closed_within_2_sessions": len(quick),
+                    "exit_reasons": dict(
+                        Counter((r.exit_reason or "unknown")[:60] for r in quick).most_common(5)
+                    ),
+                },
+                "Require more before an idea is reversed: a larger margin before a holding is replaced, or a "
+                "minimum holding period except at a stop or a broken thesis.",
+                "Fewer round trips that pay the spread twice for no change in the evidence.",
+                [
+                    "Replay the recorded cycles with the stricter rule and count the trades it removes.",
+                    "Check the removed trades' outcomes: were the quick exits right or wrong?",
+                    "Adopt only if the removed round trips did not, on balance, avoid losses.",
+                ],
+            )
         ]
 
     async def _horizons(self) -> list[dict[str, Any]]:

@@ -27,7 +27,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from quantpulse.db.models import BrainAgentPerformanceRow, BrainReflectionRow
+from quantpulse.db.models import BrainAgentPerformanceRow, BrainReflectionRow, BrainThesisRow
 from quantpulse.db.session import Database
 
 from .memory import LONG_TERM, MemoryStore
@@ -59,6 +59,7 @@ async def find(db: Database, min_observations: int) -> list[dict[str, Any]]:
         reflections = (
             await s.scalars(select(BrainReflectionRow).where(BrainReflectionRow.subject_type == "decision"))
         ).all()
+        closed = (await s.scalars(select(BrainThesisRow).where(BrainThesisRow.status == "closed"))).all()
         consensus = (
             await s.scalars(
                 select(BrainAgentPerformanceRow).where(
@@ -125,6 +126,30 @@ async def find(db: Database, min_observations: int) -> list[dict[str, Any]]:
                 "n": total,
                 "mix": mix,
                 "status": "established" if total >= min_observations else "tentative",
+            }
+        )
+    # completed positions on the Alpaca paper account: did they beat the benchmark, by how they ended
+    # imported here: trade_lessons reads the store, which reads this module
+    from .trade_lessons import ended_by
+
+    outcomes: dict[str, list[bool]] = defaultdict(list)
+    for t in closed:
+        if t.exit_price and t.entry_price and t.benchmark_return is not None:
+            beat = (t.exit_price / t.entry_price - 1) - t.benchmark_return > 0
+            outcomes["all"].append(beat)
+            outcomes[ended_by(t.exit_reason)].append(beat)
+    for name, flags in sorted(outcomes.items()):
+        if len(flags) < MIN_PATTERN:
+            continue
+        stat = _rate(sum(flags), len(flags), min_observations)
+        what = "closed positions" if name == "all" else f"positions ended by {name.replace('_', ' ')}"
+        out.append(
+            {
+                "kind": "positions",
+                "name": name,
+                "summary": f"{what} beat the benchmark {stat['k']} of {stat['n']} times ({stat['rate']:.0%}, "
+                f"interval {_interval(stat)}): {stat['status']}",
+                **stat,
             }
         )
     for row in consensus:

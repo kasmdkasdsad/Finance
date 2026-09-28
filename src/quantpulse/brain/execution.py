@@ -24,21 +24,37 @@ per decision            buys need the risk preview's approval and no veto; a dis
 
 Every decision records what happened to it (``execution`` on the decision, and the trading cycle, orders,
 fills and events in the trading service's audit trail).
+
+**The final execution audit** (:meth:`BrainExecutor.audit`). Before the Brain's first order after the
+process starts, and again on every new trading day, every gate is checked and the whole picture is
+reported — the mode, the endpoint (verified), paper key, trading switches, both kill switches, the
+environment (.env unchanged since start), the account, a fresh reconciliation, the market clock and this
+computer's clock, a live benchmark quote, positions, buying power, the risk limits, the agents, and the
+orders about to go with their consensus, risk preview and reasons. Orders go only if every required check
+passes; a passing audit also arms scheduled Brain cycles (``QP_TRADING_SCHEDULER_REQUIRES_ARMING``), so the
+first autonomous trade needs no click — and no order goes without it. Each audit is kept
+(``GET /brain/execution-audit``), logged, and written to the trading service's event log. The trading
+service still re-checks the kill switches, switches, key, endpoint and .env immediately before each order.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any
 
-from quantpulse.config import Settings
+from quantpulse.config import Settings, env_file_drift
 from quantpulse.core.clock import Clock
 from quantpulse.core.errors import DomainError
-from quantpulse.providers.alpaca_trading import BrokerError
+from quantpulse.core.market_calendar import NEW_YORK, is_trading_day, regular_close
+from quantpulse.providers.alpaca_trading import PAPER_URL, BrokerError
 from quantpulse.schemas.trading import CycleOut, ProposedTradeOut
 from quantpulse.services.order_manager import DUPLICATE_NOTE
 from quantpulse.services.trading import BrainOrder, TradingService
+from quantpulse.services.trading_data import TradingDataLoader
+from quantpulse.services.trading_risk import RiskLimits
 
 from .context import BrainContext
 from .decisions import Proposal
@@ -47,6 +63,16 @@ from .types import BUYING, MARKET, SELLING, Action, BrainMode
 logger = logging.getLogger(__name__)
 
 DATA_BLOCKED = "TRADING BLOCKED — DATA QUALITY INSUFFICIENT"
+AUDIT_KEY = "execution_audit"  # brain_state: the latest audit
+AUDITS_KEY = "execution_audits"  # brain_state: the last few
+AUDITS_KEPT = 30
+# what must pass before an order goes (the rest of an audit is the report)
+PRE_TRADE_REQUIRED = (
+    "brain_mode", "paper_setting", "paper_endpoint", "paper_key", "trading_enabled", "dry_run_off",
+    "trading_kill_switch", "brain_kill_switch", "environment", "account", "reconciliation", "market_open",
+    "clock_skew", "market_data",
+)  # fmt: skip
+STARTUP_REQUIRED = tuple(c for c in PRE_TRADE_REQUIRED if c not in ("market_open", "market_data"))
 MAX_CLOCK_SKEW_SECONDS = 10.0  # beyond this every quote age is unreliable: no new positions
 EXPOSURE_TOLERANCE = 0.02  # above the exposure limit by more than this share of equity: unexpected
 POSITION_TOLERANCE = 0.25  # a position more than 25% above its limit was not put there by the Brain
@@ -96,6 +122,17 @@ def entry_halts(ctx: BrainContext) -> list[dict[str, str]]:
                 " quote ages cannot be trusted",
             }
         )
+    local = ctx.as_of.astimezone(NEW_YORK)
+    if ctx.market_open and is_trading_day(local.date()):
+        close = datetime.combine(local.date(), regular_close(local.date()), NEW_YORK)
+        left = (close - local).total_seconds() / 60
+        if 0 <= left <= ctx.stop_minutes_before_close:
+            out.append(
+                {
+                    "code": "closing_soon",
+                    "reason": f"{left:.0f} minutes to the close: no new position this late in the session",
+                }
+            )
     unexpected = ctx.working.facts.get("unexpected_positions") or []
     if unexpected:
         out.append(
@@ -189,14 +226,225 @@ def _outcome(row: ProposedTradeOut, cycle: CycleOut) -> dict[str, Any]:
         "risk": row.risk,
         "checks": [c.model_dump() for c in row.checks],
         "error": row.error,
+        "quote_price": row.quote_price,
+        "quote_bid": row.quote_bid,
+        "quote_ask": row.quote_ask,
+        "quote_spread_bps": row.quote_spread_bps,
+        "quote_age_seconds": row.quote_age_seconds,
+        "quote_source": row.quote_source,
+        "submit_latency_ms": row.submit_latency_ms,
     }
 
 
 class BrainExecutor:
-    def __init__(self, settings: Settings, clock: Clock, trading: TradingService) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        clock: Clock,
+        trading: TradingService,
+        data: TradingDataLoader | None = None,
+        store: Any = None,  # BrainStore: where audits are kept
+        agents: Callable[[], dict[str, int]] | None = None,  # registered / enabled agents
+    ) -> None:
         self._s = settings
         self._clock = clock
         self._trading = trading
+        self._data = data
+        self._store = store
+        self._agents = agents
+        self._audited_day: Any = None  # the trading day a pre-trade audit last passed in this process
+
+    # ------------------------------------------------------------------ the final execution audit
+    async def audit(
+        self,
+        *,
+        purpose: str,
+        ctx: BrainContext | None = None,
+        orders: Sequence[Proposal] = (),
+    ) -> dict[str, Any]:
+        """Every gate an order must pass, checked now, and a report of what is about to happen.
+        ``purpose``: ``pre_trade`` (orders are waiting on it) or ``startup`` (after a restart)."""
+        s, t = self._s, self._trading
+        now = self._clock.now()
+        checks: list[dict[str, Any]] = []
+
+        def add(name: str, ok: bool | None, detail: str) -> None:
+            checks.append({"name": name, "ok": ok, "detail": detail})
+
+        add("brain_mode", s.brain_owns_account, f"QP_BRAIN_MODE={s.brain_mode}")
+        add("paper_setting", s.alpaca_paper, f"QP_ALPACA_PAPER={str(s.alpaca_paper).lower()}")
+        try:
+            endpoint = t.verify_paper()
+            add("paper_endpoint", endpoint == PAPER_URL, endpoint)
+        except BrokerError as exc:
+            add("paper_endpoint", False, str(exc))
+        key = s.alpaca_api_key_id.get_secret_value() if s.alpaca_api_key_id is not None else None
+        add(
+            "paper_key",
+            bool(key and key.startswith("PK")),
+            "set; looks like a paper key (PK…)"
+            if key and key.startswith("PK")
+            else ("not set" if not key else "does not look like a paper key (paper keys start with PK)"),
+        )
+        add(
+            "trading_enabled",
+            s.alpaca_trading_enabled,
+            f"QP_ALPACA_TRADING_ENABLED={str(s.alpaca_trading_enabled).lower()}",
+        )
+        add("dry_run_off", not s.trading_dry_run, f"QP_TRADING_DRY_RUN={str(s.trading_dry_run).lower()}")
+        kill = await t.kill_switch()
+        add(
+            "trading_kill_switch",
+            not kill.active,
+            "off" if not kill.active else f"ON ({kill.reason or kill.source})",
+        )
+        brain_kill = await t.brain_kill_switch()
+        add("brain_kill_switch", not brain_kill.active,
+            "off" if not brain_kill.active else f"ON ({brain_kill.reason or brain_kill.source})")  # fmt: skip
+        drift = env_file_drift(s)
+        add(
+            "environment",
+            not drift,
+            "the running settings match .env" if not drift else "; ".join(drift)[:300],
+        )
+        account: Any = None
+        positions: list[Any] = []
+        open_orders: list[Any] = []
+        try:
+            account = await t.broker.account()
+            add(
+                "account",
+                not account.blocked and account.equity > 0,
+                f"{account.status}; equity ${account.equity:,.2f}, cash ${account.cash:,.2f}, buying power "
+                f"${account.buying_power:,.2f}" + ("; BLOCKED by Alpaca" if account.blocked else ""),
+            )
+        except Exception as exc:  # fail closed
+            add("account", False, f"{type(exc).__name__}: {exc}")
+        try:
+            rec = await t.reconcile("brain execution audit")
+            positions = await t.broker.positions()
+            open_orders = await t.broker.open_orders()
+            add("reconciliation", True, f"{rec.positions} position(s), {rec.open_orders} open order(s), "
+                f"{rec.orders_updated} update(s), {rec.orders_added} found on Alpaca")  # fmt: skip
+        except Exception as exc:
+            add("reconciliation", False, f"{type(exc).__name__}: {exc}")
+        try:
+            before = self._clock.now()
+            clock = await t.broker.clock()
+            skew = ((before + (self._clock.now() - before) / 2) - clock.timestamp).total_seconds()
+            add("market_open", clock.is_open, "open" if clock.is_open else "closed"
+                + (f" (next open {clock.next_open.astimezone(NEW_YORK):%a %H:%M} New York)" if clock.next_open else ""))  # fmt: skip
+            add("clock_skew", abs(skew) <= MAX_CLOCK_SKEW_SECONDS,
+                f"this computer is {skew:+.1f}s from Alpaca's clock (limit ±{MAX_CLOCK_SKEW_SECONDS:.0f}s)")  # fmt: skip
+        except Exception as exc:
+            add("market_open", False, f"Alpaca's clock unavailable: {type(exc).__name__}: {exc}")
+            add("clock_skew", False, "unknown (Alpaca's clock unavailable)")
+        bench = s.benchmark_symbol
+        quote = None
+        if ctx is not None and self._data is None:
+            quote = ctx.quotes.get(bench)
+        elif self._data is not None:
+            try:
+                quote = (await self._data.live_quotes([bench], consolidated=False)).get(bench)
+            except Exception as exc:
+                add("market_data", False, f"{type(exc).__name__}: {exc}")
+        if not any(c["name"] == "market_data" for c in checks):
+            limit = s.trading_max_quote_age_seconds
+            add(
+                "market_data",
+                quote is not None and quote.age_seconds <= limit,
+                f"{bench}: {quote.price_source}, {quote.age_seconds:,.0f}s old (limit {limit:,.0f}s), "
+                f"feed {s.alpaca_stock_feed}"
+                if quote is not None
+                else f"no live quote for {bench} (feed {s.alpaca_stock_feed})",
+            )
+        required = PRE_TRADE_REQUIRED if purpose == "pre_trade" else STARTUP_REQUIRED
+        failed = [c for c in checks if c["name"] in required and not c["ok"]]
+        report: dict[str, Any] = {
+            "at": now.isoformat(),
+            "purpose": purpose,
+            "ok": not failed,
+            "failed": [f"{c['name']}: {c['detail']}" for c in failed],
+            "checks": checks,
+            "mode": s.brain_mode,
+            "endpoint": t.broker.base_url,
+            "paper": True,
+            "live_trading_possible": False,
+            "supervisor": {"enabled": s.brain_supervisor_enabled, "armed": await t.armed()},
+            "data_source": {"stock_feed": s.alpaca_stock_feed, "vendors_asked_first": ["alpaca"]},
+            "buying_power": account.buying_power if account is not None else None,
+            "equity": account.equity if account is not None else None,
+            "positions": [
+                {
+                    "symbol": p.symbol,
+                    "qty": p.qty,
+                    "market_value": p.market_value,
+                    "unrealized_plpc": p.unrealized_plpc,
+                }
+                for p in positions
+            ],
+            "open_orders": [
+                {
+                    "symbol": o.symbol,
+                    "side": o.side,
+                    "qty": o.qty,
+                    "status": o.status,
+                    "client_order_id": o.client_order_id,
+                }
+                for o in open_orders
+            ],
+            "risk_limits": asdict(RiskLimits.from_settings(s)),
+            "agents": self._agents() if self._agents is not None else None,
+            "orders": [
+                {
+                    "subject": p.subject,
+                    "action": p.action.value,
+                    "quantity": p.quantity,
+                    "est_price": p.est_price,
+                    "consensus": {
+                        "stance": p.consensus.stance.value,
+                        "score": round(p.consensus.score, 3),
+                        "confidence": round(p.consensus.confidence, 3),
+                        "sources": p.consensus.sources,
+                    }
+                    if p.consensus is not None
+                    else None,
+                    "risk_preview": (p.risk or {}).get("summary"),
+                    "reasons": p.reasons[:4],
+                }
+                for p in orders
+            ],
+        }
+        await self._keep(report)
+        return report
+
+    async def _keep(self, report: dict[str, Any]) -> None:
+        text = "; ".join(
+            f"{c['name']}={'ok' if c['ok'] else 'FAIL' if c['ok'] is False else '-'}"
+            for c in report["checks"]
+        )
+        logger.info(
+            "Brain execution audit (%s): %s — %s", report["purpose"], "PASS" if report["ok"] else "FAIL", text
+        )
+        await self._trading.log_event(
+            "brain_execution_audit",
+            f"Brain execution audit ({report['purpose']}): "
+            + ("every gate passed" if report["ok"] else "FAILED — " + "; ".join(report["failed"])[:400]),
+            details={"ok": report["ok"], "failed": report["failed"], "orders": len(report["orders"])},
+        )
+        if self._store is not None:
+            now = self._clock.now()
+            await self._store.set_state(AUDIT_KEY, report, now)
+            history = (await self._store.get_state(AUDITS_KEY) or {}).get("items", [])
+            await self._store.set_state(AUDITS_KEY, {"items": [*history, report][-AUDITS_KEPT:]}, now)
+
+    async def _audit_outcome(self, **outcome: Any) -> None:
+        if self._store is None:
+            return
+        latest = await self._store.get_state(AUDIT_KEY)
+        if latest:
+            latest["outcome"] = outcome
+            await self._store.set_state(AUDIT_KEY, latest, self._clock.now())
 
     async def gate(self, ctx: BrainContext, *, scheduled: bool) -> Gate:
         blockers: list[str] = []
@@ -209,7 +457,8 @@ class BrainExecutor:
         if not ctx.account.available:
             blockers.append(f"Alpaca unavailable ({ctx.account.error})")
         kill = await self._trading.kill_switch()
-        blockers += await self._trading.submit_blockers(kill, scheduled=scheduled, owner="brain")
+        # arming is not a blocker here: a passing pre-trade audit arms scheduled cycles (see execute)
+        blockers += await self._trading.submit_blockers(kill, scheduled=False, owner="brain")
         halts = entry_halts(ctx)
         return Gate(send=not blockers, entries=not halts, blockers=blockers, halts=halts)
 
@@ -255,6 +504,22 @@ class BrainExecutor:
                 p.execution = {"sent": False, "reason": why}
         if not chosen:
             return report
+        today = self._clock.now().astimezone(NEW_YORK).date()
+        armed = await self._trading.armed()
+        if not armed or self._audited_day != today:
+            audit = await self.audit(purpose="pre_trade", ctx=ctx, orders=chosen)
+            report["audit"] = {"ok": audit["ok"], "failed": audit["failed"], "at": audit["at"]}
+            if not audit["ok"]:
+                for p in chosen:
+                    p.status = "blocked"
+                    p.execution = {
+                        "sent": False,
+                        "reason": "execution audit failed: " + "; ".join(audit["failed"]),
+                    }
+                return report
+            if not armed:
+                await self._trading.arm("Brain pre-trade execution audit passed")
+            self._audited_day = today
         try:
             cycle = await self._trading.run_brain(
                 [to_order(p, ctx) for p in chosen], brain_cycle_id=cycle_id, scheduled=scheduled
@@ -289,4 +554,7 @@ class BrainExecutor:
                     "duplicate_prevented" if p.execution["duplicate_prevented"] else row.stage or row.status
                 )
         report["orders_sent"] = sum(1 for p in chosen if (p.execution or {}).get("sent"))
+        if "audit" in report:
+            await self._audit_outcome(trading_cycle_id=cycle.id, orders_sent=report["orders_sent"],
+                                      statuses={p.subject: p.status for p in chosen})  # fmt: skip
         return report

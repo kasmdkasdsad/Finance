@@ -2,10 +2,19 @@
 
 Position management (holdings first):
 
-* at its stop (portfolio agent) → CLOSE; overweight → REDUCE to the position limit;
+* at its stop (portfolio agent) or a broken thesis → CLOSE (a protective exit);
+* in the last half hour, earnings before the next session → DE_RISK half (the overnight gap risk);
+* overweight → REDUCE to the position limit;
+* at the target of a calibrated thesis → REDUCE half, once (take profits; no target is ever invented);
 * a confident bearish consensus → REDUCE (half) or CLOSE (strongly bearish);
 * a confident bullish consensus below its target weight → INCREASE toward it;
 * otherwise HOLD — including when the consensus is *unknown*.
+
+Then the book as a whole (one trim per rule per cycle, each converging — it stops once the book is back
+inside): two holdings that are nearly the same bet (return correlation ≥ 0.85) and together above the
+position limit → REDUCE the weaker by the excess; a sector above the portfolio agent's limit → REDUCE its
+weakest holding by the excess; portfolio volatility above ``PORTFOLIO_VOL_CAP`` → DE_RISK a quarter of the
+largest risk contributor. Only holdings the plan would otherwise HOLD are trimmed.
 
 New positions: a confident bullish consensus on a focus symbol, with no data veto, outside a risk-off
 market, with a free position slot and cash that is not borrowed → BUY at a volatility-budgeted target weight
@@ -42,6 +51,9 @@ MAX_RISK_SHARE = 0.40  # a new name carrying more of the portfolio's risk than t
 MAX_VOL_RISE = 1.3  # nor one that raises portfolio volatility by more than 30% …
 VOL_FLOOR_FOR_RISE = 0.20  # … to above 20% a year
 REPLACE_MARGIN = 0.20  # a candidate this much stronger (score × confidence) may replace a fading holding
+SAME_BET_CORR = 0.85  # two holdings this correlated are one bet: together they respect the position limit
+PORTFOLIO_VOL_CAP = 0.35  # annualised: above this the book is trimmed at its largest risk contributor
+PROFIT_TAKEN = 0.75  # a position already cut to this share of its entry has taken its profit
 
 
 @dataclass
@@ -258,6 +270,33 @@ def plan(
         if o.agent_id == "portfolio"
     }
     theses = ctx.working.facts.get("thesis_checks")  # the Alpaca account's position theses (paper_execution)
+    registry = ctx.working.facts.get("theses") or {}  # the theses themselves (entry, stop, target)
+    near_close = ctx.working.facts.get("near_close")  # the last half hour of the session
+
+    def overnight(symbol: str) -> str | None:
+        """Earnings before the next session, reviewed in the last half hour (once a day per holding)."""
+        if not near_close or symbol in (near_close.get("derisked") or []):
+            return None
+        days = (event_risk.get(symbol) or {}).get("days_to_earnings")
+        if days is not None and 0 <= days <= 1:
+            return (
+                f"overnight: earnings before the next session ({days} day(s)) — halve the position before "
+                f"the close ({near_close.get('minutes_to_close')} min left)"
+            )
+        return None
+
+    def take_profit(symbol: str, price: float, qty: float) -> str | None:
+        """At the target of a thesis with a calibrated target (none is invented), and not yet taken."""
+        t = registry.get(symbol) or {}
+        target, entry_qty = t.get("target_price"), t.get("entry_qty")
+        if not target or not entry_qty or price < target or qty <= PROFIT_TAKEN * entry_qty:
+            return None
+        exp = t.get("expected_return")
+        return (
+            f"take profit: ${price:,.2f} reached its target ${target:,.2f}"
+            + (f" (calibrated expected return {exp:+.1%})" if exp is not None else "")
+            + " — sell half, keep the rest under the thesis"
+        )
 
     # --- holdings
     for s in ctx.held:
@@ -297,6 +336,18 @@ def plan(
                     **base,
                 )
             )
+        elif overnight(s):
+            qty = _shares(pos.qty / 2, whole) or pos.qty
+            out.append(
+                Proposal(
+                    action=Action.DE_RISK,
+                    confidence=1.0,
+                    quantity=qty,
+                    target_weight=round(w / 2, 4),
+                    reasons=[overnight(s) or "", *(c.reasons if c else [])],
+                    **base,
+                )
+            )
         elif hint == "reduce" and eq > 0 and price:
             excess = (w - ctx.limits.max_position_pct) * eq / price
             qty = min(float(math.ceil(excess)) if whole else round(excess, 6), pos.qty)
@@ -307,6 +358,18 @@ def plan(
                     quantity=qty,
                     target_weight=ctx.limits.max_position_pct,
                     reasons=[f"overweight: {w:.1%} vs the {ctx.limits.max_position_pct:.0%} limit"],
+                    **base,
+                )
+            )
+        elif price and take_profit(s, price, pos.qty):
+            qty = _shares(pos.qty / 2, whole) or pos.qty
+            out.append(
+                Proposal(
+                    action=Action.REDUCE,
+                    confidence=1.0,
+                    quantity=qty,
+                    target_weight=round(w / 2, 4),
+                    reasons=[take_profit(s, price, pos.qty) or "", *(c.reasons if c else [])],
                     **base,
                 )
             )
@@ -432,6 +495,12 @@ def plan(
                 )
             )
 
+    # --- the book as a whole: the same bet twice, a concentrated sector, too much volatility
+    if eq > 0:
+        _trim_same_bets(ctx, out, consensus)
+        _trim_sector(ctx, out, consensus, constraints)
+        _trim_volatility(ctx, out)
+
     # --- new positions
     candidates: list[tuple[float, str, Consensus, dict[str, Any]]] = []
     for s, c in consensus.items():
@@ -549,6 +618,141 @@ def plan(
                 )
             )
     return out
+
+
+def _strength(c: Consensus | None) -> float:
+    return c.score * c.confidence if c is not None and not c.unknown else 0.0
+
+
+def _trim(ctx: BrainContext, out: list[Proposal], i: int, action: Action, qty: float, reason: str) -> bool:
+    """Turn the HOLD at ``out[i]`` into a trim of ``qty`` shares (whole shares for a whole position),
+    unless it is below the smallest order worth sending."""
+    old = out[i]
+    pos = ctx.portfolio.positions[old.subject]
+    price = old.est_price or pos.current_price
+    whole = float(pos.qty).is_integer()
+    qty = min(float(math.ceil(qty)) if whole else round(qty, 6), pos.qty)
+    if qty <= 0 or not price or qty * price < ctx.limits.min_order_notional:
+        return False
+    eq = ctx.portfolio.equity
+    out[i] = Proposal(
+        subject=old.subject,
+        action=action,
+        confidence=1.0,
+        quantity=qty,
+        est_price=old.est_price,
+        current_weight=old.current_weight,
+        target_weight=round(max(pos.market_value - qty * price, 0.0) / eq, 4) if eq > 0 else None,
+        consensus=old.consensus,
+        reasons=[reason, *old.reasons],
+    )
+    return True
+
+
+def _holds(ctx: BrainContext, out: list[Proposal]) -> dict[str, int]:
+    return {
+        p.subject: i
+        for i, p in enumerate(out)
+        if p.action is Action.HOLD and p.subject in ctx.portfolio.positions
+    }
+
+
+def _trim_same_bets(ctx: BrainContext, out: list[Proposal], consensus: dict[str, Consensus]) -> None:
+    """Two holdings with a six-month return correlation ≥ ``SAME_BET_CORR`` are one bet: together they
+    should respect the position limit. The weaker of the most correlated such pair gives up the excess."""
+    held = [h for h in ctx.held if h in ctx.close.columns]
+    if len(held) < 2:
+        return
+    rets = np.log(ctx.close[held].iloc[-121:].astype(float)).diff().dropna()
+    if len(rets) < 60:
+        return
+    corr = rets.corr()
+    limit = ctx.limits.max_position_pct
+    pairs = sorted(
+        (
+            (float(corr.loc[a, b]), a, b)
+            for i, a in enumerate(held)
+            for b in held[i + 1 :]
+            if float(corr.loc[a, b]) >= SAME_BET_CORR
+        ),
+        reverse=True,
+    )
+    holds = _holds(ctx, out)
+    for rho, a, b in pairs:
+        wa, wb = ctx.portfolio.weight(a), ctx.portfolio.weight(b)
+        excess = wa + wb - limit
+        if excess <= 1e-6:
+            continue
+        movable = [x for x in (a, b) if x in holds]
+        if not movable:
+            continue
+        weaker = min(movable, key=lambda x: _strength(consensus.get(x)))
+        other = b if weaker == a else a
+        price = out[holds[weaker]].est_price or ctx.portfolio.positions[weaker].current_price
+        reason = (
+            f"the same bet as {other} (return correlation {rho:.2f}): together {wa + wb:.1%} of equity, "
+            f"above the {limit:.0%} position limit — trim the weaker"
+        )
+        if price and _trim(
+            ctx, out, holds[weaker], Action.REDUCE, excess * ctx.portfolio.equity / price, reason
+        ):
+            return
+
+
+def _trim_sector(
+    ctx: BrainContext, out: list[Proposal], consensus: dict[str, Consensus], constraints: dict[str, Any]
+) -> None:
+    """A sector above the portfolio agent's limit: its weakest holding gives up the excess."""
+    holds = _holds(ctx, out)
+    weights = constraints.get("sector_weights") or {}
+    for sector, w in sorted(weights.items(), key=lambda kv: -kv[1]):
+        if sector in ("unknown", "ETF") or w <= SECTOR_LIMIT:
+            continue
+        members = [s for s in holds if ctx.sectors.get(s) == sector]
+        if not members:
+            continue
+        weakest = min(members, key=lambda x: _strength(consensus.get(x)))
+        price = out[holds[weakest]].est_price or ctx.portfolio.positions[weakest].current_price
+        reason = f"sector concentration: {sector} is {w:.0%} of equity (limit {SECTOR_LIMIT:.0%}) — trim its weakest"
+        if price and _trim(
+            ctx, out, holds[weakest], Action.REDUCE, (w - SECTOR_LIMIT) * ctx.portfolio.equity / price, reason
+        ):
+            return
+
+
+def book_volatility(ctx: BrainContext) -> tuple[float, dict[str, float]] | None:
+    """The book's annualised volatility (six months of daily returns) and each holding's share of it."""
+    held = {h: ctx.portfolio.weight(h) for h in ctx.held if h in ctx.close.columns}
+    if not held:
+        return None
+    rets = np.log(ctx.close[list(held)].iloc[-127:].astype(float)).diff().dropna(how="all").fillna(0.0)
+    if len(rets) < 60:
+        return None
+    cov = rets.cov().to_numpy() * 252
+    w = np.array(list(held.values()))
+    var = float(w @ cov @ w)
+    if var <= 0:
+        return None
+    contrib = w * (cov @ w) / var
+    return float(np.sqrt(var)), {s: float(c) for s, c in zip(held, contrib, strict=True)}
+
+
+def _trim_volatility(ctx: BrainContext, out: list[Proposal]) -> None:
+    """Portfolio volatility above ``PORTFOLIO_VOL_CAP``: trim a quarter of the largest risk contributor."""
+    measured = book_volatility(ctx)
+    if measured is None or measured[0] <= PORTFOLIO_VOL_CAP:
+        return
+    vol, shares = measured
+    holds = _holds(ctx, out)
+    movable = [s for s in shares if s in holds]
+    if not movable:
+        return
+    top = max(movable, key=lambda s: shares[s])
+    reason = (
+        f"portfolio volatility {vol:.0%} is above {PORTFOLIO_VOL_CAP:.0%}: trim a quarter of {top}, "
+        f"the largest contributor ({shares[top]:.0%} of the risk)"
+    )
+    _trim(ctx, out, holds[top], Action.DE_RISK, ctx.portfolio.positions[top].qty / 4, reason)
 
 
 def _replace_weakest(

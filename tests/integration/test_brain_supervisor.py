@@ -139,7 +139,7 @@ async def test_monitor_turns_a_big_move_into_an_event_and_a_focused_cycle(tmp_pa
 
 
 async def test_off_hours_learn_review_and_research_once_a_day(tmp_path):
-    for moment, expected in ((AFTER_HOURS, {"learn", "review", "lab_paper", "improve"}), (SATURDAY, {"offday_learn", "deep"}),
+    for moment, expected in ((AFTER_HOURS, {"learn", "trade_lessons", "review", "lab_paper", "improve"}), (SATURDAY, {"offday_learn", "deep"}),
                              (PRE_MARKET, {"premarket_learn", "premarket"})):  # fmt: skip
         clock = FakeClock(moment)
         fake = FakeAlpacaPaper(clock=clock)

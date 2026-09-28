@@ -38,12 +38,16 @@ AGENTS = {
     "research",
     "situational_awareness",
     "strategy_lab",
+    "position_monitor",
+    "execution_quality",
+    "learning",
     "briefing",
 }
 # without a stock model run, live option chains or an earnings calendar (the fakes have none) these skip
 NEEDS_RESEARCH = {"fundamental", "valuation", "factor", "options", "catalyst", "strategy_lab"}
 NEEDS_MODEL = {"briefing"}  # skips itself unless a language model is configured (none is, by default)
-RAN = AGENTS - NEEDS_RESEARCH - NEEDS_MODEL
+NEEDS_OWNERSHIP = {"position_monitor"}  # position theses exist only while the Brain owns the account
+RAN = AGENTS - NEEDS_RESEARCH - NEEDS_MODEL - NEEDS_OWNERSHIP
 TRADES = {"buy", "increase", "reduce", "close", "sell"}
 
 # a cross-section wide enough for momentum ranking: the standard trend names plus more of each kind
@@ -167,8 +171,14 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
             assert -1 <= o["score"] <= 1 and 0 <= o["confidence"] <= 1 and o["thesis"]
         for s in focus:
             assert {"data_quality", "technical", "momentum"} <= seen[s]
-        assert seen["@market"] == {"data_quality", "market_regime", "volatility", "situational_awareness"}
-        assert seen["@portfolio"] == {"portfolio"}
+        assert seen["@market"] == {
+            "data_quality",
+            "market_regime",
+            "volatility",
+            "situational_awareness",
+            "learning",
+        }
+        assert seen["@portfolio"] == {"portfolio", "execution_quality"}
         tech = next(o for o in cycle["opinions"] if o["agent_id"] == "technical" and o["subject"] == "UPC")
         assert tech["stance"] == "bullish" and tech["evidence"] and tech["invalidation"]
 
@@ -251,7 +261,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
 
         status = (await api.get(f"{BRAIN}/status")).json()
         assert status["paper_only"] and status["last_cycle"]["id"] == cycle["id"]
-        assert status["agents"] == {"registered": 17, "enabled": 17} and not status["running"]
+        assert status["agents"] == {"registered": 20, "enabled": 20} and not status["running"]
         assert status["open_predictions"] == len(preds) and "predictions graded" in status["learning"]
 
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
@@ -488,7 +498,7 @@ async def test_agent_controls_and_background_runs(tmp_path):
         assert (await api.get(f"{BRAIN}/agents/momentum")).json()["enabled"] is False
         assert (await api.get(f"{BRAIN}/agents/nobody")).status_code == 404
         assert (await api.post(f"{BRAIN}/agents/nobody", json={"enabled": True})).status_code == 404
-        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 17, "enabled": 16}
+        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 20, "enabled": 19}
 
         cycle = await run_cycle(api, symbols=["DNA"])
         runs = by(cycle["runs"], "agent_id")
@@ -571,7 +581,8 @@ async def test_every_agent_takes_part_when_its_data_exists(tmp_path, monkeypatch
         assert cycle["status"] == "completed"
         statuses = {r["agent_id"]: r["status"] for r in cycle["runs"]}
         # nothing promoted, no language model
-        assert statuses == {a: "skipped" if a in ("strategy_lab", "briefing") else "ok" for a in AGENTS}
+        skipped = {"strategy_lab", "briefing", "position_monitor"}
+        assert statuses == {a: "skipped" if a in skipped else "ok" for a in AGENTS}
         voters = {v["agent_id"] for c in cycle["consensus"] for v in c["detail"]["votes"]}
         assert {"fundamental", "valuation", "factor", "options", "technical", "momentum"} <= voters
         catalyst = [o for o in cycle["opinions"] if o["agent_id"] == "catalyst"]

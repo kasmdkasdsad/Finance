@@ -82,6 +82,10 @@ class BrainStore:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    @property
+    def db(self) -> Database:
+        return self._db
+
     # ------------------------------------------------------------------ agents
     async def sync_agents(self, agents: Sequence[Agent], now: datetime) -> dict[str, bool]:
         """Mirror the code-registered agents into ``brain_agents``; returns the stored enabled flags."""

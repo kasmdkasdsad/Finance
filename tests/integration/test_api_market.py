@@ -281,7 +281,7 @@ async def test_system_status_hides_secrets(tmp_path, clock):
         "dry_run": True,
         "can_submit": False,
     }
-    assert body["database"]["revision"] == body["database"]["head"] == "0017"
+    assert body["database"]["revision"] == body["database"]["head"] == "0018"
     for secret in ("SECRET-POLYGON-KEY", "SMTP-PASS", "PK-ALPACA-KEY-ID", "ALPACA-SECRET-VALUE"):
         assert secret not in r.text
     assert session["session"] == "regular" and session["is_trading_day"] is True

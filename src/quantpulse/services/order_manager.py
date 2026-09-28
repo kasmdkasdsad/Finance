@@ -104,8 +104,8 @@ def trade_stage(approved: bool, status: str | None) -> str:
     """Where a proposed trade got to, from its risk decision and its order status (see ``TradeStage``)."""
     if not approved or status == "risk_rejected":
         return "risk_rejected"
-    if status in (None, "", "dry_run", "not_submitted"):
-        return "risk_approved"
+    if status in (None, "", "dry_run", "not_submitted", "blocked_at_submit"):
+        return "risk_approved"  # approved, never sent
     if status in WORKING_STATUSES:
         return "accepted"
     return _STAGE_FOR_STATUS.get(status, "submitted")

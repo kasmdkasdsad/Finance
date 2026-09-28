@@ -20,7 +20,7 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 
 from quantpulse.config import Settings
@@ -34,6 +34,7 @@ from .decisions import Proposal, plan, risk_preview
 from .events import EventBus, from_cycle
 from .execution import BrainExecutor
 from .learning import PredictionRecorder
+from .ledger import ExecutionLedger
 from .llm import ModelRouter
 from .memory import LONG_TERM, SHORT_TERM, WORKING, MemoryStore
 from .opportunities import trace
@@ -43,9 +44,10 @@ from .registry import AgentRegistry, AgentRun, Skip
 from .routing import route
 from .store import BrainStore
 from .theses import ThesisBook, attach_entries
-from .types import MARKET, PORTFOLIO, SELLING, BrainMode, Opinion, Stance
+from .types import MARKET, PORTFOLIO, SELLING, Action, BrainMode, Opinion, Stance
 
 logger = logging.getLogger(__name__)
+NEAR_CLOSE_MINUTES = 30  # the last half hour: holdings are reviewed for the overnight (earnings releases)
 
 
 @dataclass
@@ -82,6 +84,7 @@ class Orchestrator:
         book: PaperBook | None = None,
         executor: BrainExecutor | None = None,
         theses: ThesisBook | None = None,
+        ledger: ExecutionLedger | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -95,6 +98,7 @@ class Orchestrator:
         self._book = book
         self._executor = executor
         self._theses = theses
+        self._ledger = ledger
         self._lock = asyncio.Lock()
         self.last_ctx: BrainContext | None = None  # the latest completed cycle's picture (for the monitor)
 
@@ -138,6 +142,12 @@ class Orchestrator:
             ctx.strategy_signals = await self._store.get_state("promoted_signals") or {}
             ctx.llm = self._models
             result.ctx = ctx
+            owns = mode is BrainMode.PAPER_EXECUTION and self._theses is not None and ctx.account.available
+            if (
+                owns and self._theses is not None
+            ):  # the account's positions and theses, reconciled with Alpaca
+                result.theses = await self._theses.sync(ctx, cycle_id)
+            await self._context(ctx)
             wanted = only if only is not None else plan_route.agents
             selections, skips = self.registry.select(ctx, wanted)
             if wanted is not None:
@@ -155,9 +165,7 @@ class Orchestrator:
             self._fail_safe(ctx, runs, skips)
             result.consensus = self._consensus(ctx, reliability, runs, skips)
             result.debates = review(ctx, result.consensus)  # bull, bear, devil's advocate
-            if mode is BrainMode.PAPER_EXECUTION and self._theses is not None and ctx.account.available:
-                # the account's positions and their theses, reconciled with Alpaca, then checked
-                result.theses = await self._theses.sync(ctx, cycle_id)
+            if owns and self._theses is not None:  # each thesis checked against this cycle's evidence
                 checks = await self._theses.review(ctx, result.consensus, self._s.brain_min_confidence)
                 result.theses["checks"] = _count(c["status"] for c in checks.values())
             if mode is not BrainMode.RESEARCH_ONLY:
@@ -203,6 +211,8 @@ class Orchestrator:
                     ctx, result.proposals, cycle_id=cycle_id, scheduled=trigger != "manual"
                 )
                 await self._store.record_execution(decision_ids, result.proposals)
+                if self._ledger is not None:  # every order sent, from the decision to its final state
+                    await self._ledger.record(cycle_id, decision_ids, result.proposals)
             elif self._book is not None:  # the Brain's paper book: simulated fills, never a broker order
                 result.fills = await self._book.execute(
                     ctx,
@@ -233,6 +243,37 @@ class Orchestrator:
             result.status, result.error = "failed", f"{type(exc).__name__}: {exc}"
             await self._store.finish_cycle(cycle_id, self._clock.now(), status="failed", error=result.error)
         return result
+
+    async def _context(self, ctx: BrainContext) -> None:
+        """What the context agents read: the Brain's measured execution and track record (from its own
+        records — nothing estimated), and whether the close is near (the overnight review)."""
+        from quantpulse.core.market_calendar import NEW_YORK, is_trading_day, regular_close
+
+        from .scorecard import execution_quality, scorecard
+
+        db = self._store.db
+        try:
+            ctx.execution_quality = await execution_quality(db, ctx.as_of - timedelta(days=30))
+            ctx.track_record = await scorecard(db, self._s)
+        except Exception as exc:  # context only: the agents that read it abstain
+            ctx.provider_errors["track_record"] = f"{type(exc).__name__}: {exc}"[:200]
+        local = ctx.as_of.astimezone(NEW_YORK)
+        if ctx.market_open and is_trading_day(local.date()):
+            close = datetime.combine(local.date(), regular_close(local.date()), NEW_YORK)
+            left = (close - local).total_seconds() / 60
+            if 0 <= left <= NEAR_CLOSE_MINUTES:
+                # holdings already halved for tonight (from the ledger, so a restart does not repeat it)
+                derisked: list[str] = []
+                if self._ledger is not None:
+                    start = datetime.combine(local.date(), time(0, 0), NEW_YORK)
+                    derisked = sorted(
+                        {
+                            r["symbol"]
+                            for r in await self._ledger.rows(limit=200, since=start)
+                            if r["side"] == "sell" and (r["reason"] or "").startswith("overnight:")
+                        }
+                    )
+                ctx.working.post("near_close", {"minutes_to_close": round(left, 1), "derisked": derisked})
 
     # ------------------------------------------------------------------ events
     async def _publish(
@@ -596,8 +637,86 @@ class Orchestrator:
                 "debates": _count(d.verdict for d in result.debates.values()),
                 "posture": (ctx.working.facts.get("situation") or {}).get("posture"),
             },
+            "decision": explain(ctx, result),
             "notes": ctx.notes,
         }
+
+
+def explain(ctx: BrainContext, result: CycleResult) -> dict[str, Any]:
+    """Why the Brain traded, or why it did not — in plain words, from what this cycle recorded."""
+    mode = ctx.mode
+    proposals = result.proposals
+    trades = [p for p in proposals if p.is_trade]
+    sent = [p for p in trades if (p.execution or {}).get("sent")]
+    ex = result.execution or {}
+    why: list[str] = []
+    if mode is BrainMode.RESEARCH_ONLY:
+        return {"outcome": "research_only", "headline": "research only: no decisions are made in this mode",
+                "orders": [], "reasons": []}  # fmt: skip
+    if sent:
+        orders = [
+            {
+                "subject": p.subject,
+                "action": p.action.value,
+                "qty": (p.execution or {}).get("qty") or p.quantity,
+                "status": p.status,
+                "client_order_id": (p.execution or {}).get("client_order_id"),
+                "why": p.reasons[:3],
+            }
+            for p in sent
+        ]
+        headline = f"{len(sent)} Alpaca paper order(s) sent: " + ", ".join(
+            f"{o['action']} {o['qty']:g} {o['subject']}" for o in orders
+        )
+        for p in trades:
+            if p not in sent:
+                why.append(f"{p.action.value} {p.subject} not sent: {_not_sent(p)}")
+        return {"outcome": "traded", "headline": headline, "orders": orders, "reasons": why}
+    if trades:
+        for p in trades:
+            why.append(f"{p.action.value} {p.subject}: {_not_sent(p)}")
+        if mode is BrainMode.PAPER_EXECUTION:
+            headline = "no trade: the proposed trade(s) did not pass every gate"
+        else:
+            headline = f"no order: QP_BRAIN_MODE={mode.value} proposes only"
+        return {"outcome": "no_trade", "headline": headline, "orders": [], "reasons": why[:12]}
+    unknown = [p.subject for p in proposals if p.action is Action.NO_ACTION and p.reasons
+               and p.reasons[0].startswith("I do not know")]  # fmt: skip
+    watch = [p for p in proposals if p.action is Action.WATCH]
+    holds = [p for p in proposals if p.action is Action.HOLD]
+    if not ctx.market_open:
+        why.append("the market is closed")
+    why += [f"data: {v}" for v in (ctx.working.facts.get("system_vetoes") or [])]
+    market = next((o for o in ctx.working.opinions.get(MARKET, []) if o.agent_id == "data_quality"), None)
+    if market is not None and market.veto:
+        why.append(f"data quality: {market.veto}")
+    why += [f"halt: {h['reason']}" for h in ex.get("entry_halts") or []]
+    if not any(c.stance is Stance.BULLISH and c.actionable_view for s, c in result.consensus.items()
+               if s != MARKET):  # fmt: skip
+        why.append("no symbol has a clear bullish consensus")
+    if unknown:
+        why.append(f"not enough evidence for a view on {len(unknown)} symbol(s): " + ", ".join(unknown[:6]))
+    for p in watch[:6]:
+        why.append(f"watch {p.subject}: " + "; ".join(p.reasons)[:200])
+    if holds:
+        why.append(f"{len(holds)} holding(s) kept: nothing calls for a change")
+    return {
+        "outcome": "no_trade",
+        "headline": "no trade: no opportunity met every requirement — doing nothing is the decision",
+        "orders": [],
+        "reasons": why[:14],
+    }
+
+
+def _not_sent(p: Proposal) -> str:
+    ex = p.execution or {}
+    if ex.get("reason"):
+        return str(ex["reason"])
+    if p.risk_approved is False:
+        return "the risk engine: " + str((p.risk or {}).get("summary") or "rejected")
+    if p.blocked_by:
+        return "blocked: " + "; ".join(p.blocked_by)
+    return p.status
 
 
 def _count(values: Any) -> dict[str, int]:

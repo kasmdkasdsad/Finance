@@ -10,6 +10,7 @@ from .factor import FactorAgent
 from .fundamental import FundamentalAgent, ValuationAgent
 from .mean_reversion import MeanReversionAgent
 from .momentum import MomentumAgent
+from .monitor import ExecutionQualityAgent, LearningAgent, PositionMonitorAgent
 from .options import OptionsAgent
 from .portfolio import PortfolioAgent
 from .regime import MarketRegimeAgent
@@ -38,6 +39,9 @@ def default_agents() -> list[Agent]:
         PortfolioAgent(),
         ResearchAgent(),
         SituationalAwarenessAgent(),
+        PositionMonitorAgent(),
+        ExecutionQualityAgent(),
+        LearningAgent(),
         BriefingAgent(),  # model-backed: skips itself unless a language model is configured
     ]
 

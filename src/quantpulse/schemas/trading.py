@@ -218,6 +218,14 @@ class ProposedTradeOut(StrictModel):
     filled_avg_price: float | None = None
     submitted_at: AwareDatetime | None = None
     error: str | None = None
+    # the market data the risk engine judged the order by as it left, and how long Alpaca took to answer
+    quote_price: float | None = None
+    quote_bid: float | None = None
+    quote_ask: float | None = None
+    quote_spread_bps: float | None = None
+    quote_age_seconds: float | None = None
+    quote_source: str | None = None
+    submit_latency_ms: float | None = None
 
 
 class SignalOut(StrictModel):

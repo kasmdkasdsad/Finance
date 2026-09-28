@@ -283,6 +283,35 @@ async def shadow(c: Container = ContainerDep) -> dict[str, Any]:
     return {"started": True, "equity": round(equity_of(state), 2), **state}
 
 
+@router.get(
+    "/executions", summary="The execution ledger: every Brain order from the decision to its final state"
+)
+async def executions(limit: int = Query(100, ge=1, le=1000), c: Container = ContainerDep) -> dict[str, Any]:
+    await c.brain.ledger.refresh()
+    return {"executions": await c.brain.ledger.rows(limit)}
+
+
+@router.get(
+    "/execution-audit", summary="The latest final execution audits (every gate, and what was about to go)"
+)
+async def execution_audit(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.execution import AUDIT_KEY, AUDITS_KEY
+
+    return {
+        "latest": await c.brain.store.get_state(AUDIT_KEY),
+        "history": ((await c.brain.store.get_state(AUDITS_KEY)) or {}).get("items", [])[::-1][:10],
+    }
+
+
+@router.post(
+    "/execution-audit",
+    dependencies=ControlAuth,
+    summary="Run the execution audit now (checks and reports; reconciles with Alpaca; never sends an order)",
+)
+async def run_execution_audit(c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.executor.audit(purpose="on_demand")
+
+
 @router.get("/kill-switch", response_model=KillSwitchOut, summary="The Brain kill switch")
 async def brain_kill_switch(c: Container = ContainerDep) -> KillSwitchOut:
     return await c.trading.brain_kill_switch()

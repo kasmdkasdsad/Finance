@@ -415,6 +415,7 @@ class Perception:
             focus_reasons=reasons,
             notes=list(inputs.notes) + ([inputs.model_note] if inputs.model_note else []) + self._notes,
             provider_errors=errors,
+            stop_minutes_before_close=self._s.trading_stop_minutes_before_close,
         )
         if inputs.price_status is DataStatus.SYNTHETIC:
             ctx.notes.append("prices are SYNTHETIC (no live data): nothing is executable")

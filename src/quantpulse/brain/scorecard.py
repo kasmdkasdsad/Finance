@@ -35,15 +35,13 @@ from quantpulse.core.market_calendar import NEW_YORK
 from quantpulse.db.models import (
     BrainAgentPerformanceRow,
     BrainCycleRow,
-    BrainDecisionRow,
+    BrainExecutionRow,
     BrainPredictionRow,
     BrainReflectionRow,
     BrainSessionRow,
     BrainThesisRow,
-    BrokerOrderRow,
 )
 from quantpulse.db.session import Database
-from quantpulse.services.order_manager import BRAIN
 
 from .performance import wilson
 from .reflection import consensus_calibration
@@ -62,51 +60,47 @@ def _status(n: int, needed: int) -> str:
 
 # ---------------------------------------------------------------------------------------------- execution
 async def execution_quality(db: Database, since: datetime | None = None) -> dict[str, Any]:
+    """From the execution ledger (the Brain's real Alpaca paper orders): execution only, never profit."""
     async with db.session() as s:
-        q = select(BrokerOrderRow).where(BrokerOrderRow.strategy == BRAIN)
+        q = select(BrainExecutionRow)
         if since is not None:
-            q = q.where(BrokerOrderRow.created_at >= since)
-        orders = (await s.scalars(q)).all()
-        decisions = (
-            await s.scalars(
-                select(BrainDecisionRow).where(BrainDecisionRow.subject.in_({o.symbol for o in orders}))
-            )
-        ).all() if orders else []  # fmt: skip
-    est = {
-        (d.execution or {}).get("client_order_id"): (d.execution or {}).get("est_price") or d.est_price
-        for d in decisions
-        if (d.execution or {}).get("client_order_id")
-    }
-    sent = [o for o in orders if o.alpaca_order_id]
-    filled = [o for o in sent if o.filled_quantity > 0]
-    slips: list[float] = []
+            q = q.where(BrainExecutionRow.decided_at >= since)
+        rows = (await s.scalars(q)).all()
+    sent = [r for r in rows if r.alpaca_order_id]
+    filled = [r for r in sent if r.filled_qty > 0]
+    slips = [r.slippage_bps for r in filled if r.slippage_bps is not None]
+    costs = [r.cost_vs_quote_bps for r in filled if r.cost_vs_quote_bps is not None]
     by_type: dict[str, list[float]] = defaultdict(list)
-    waits: list[float] = []
-    for o in filled:
-        e = est.get(o.client_order_id)
-        if e and o.average_fill_price:
-            sign = 1 if o.side == "buy" else -1
-            bps = sign * (o.average_fill_price / e - 1) * 10_000
-            slips.append(bps)
-            by_type[o.order_type].append(bps)
-        if o.filled_at and o.submitted_at:
-            waits.append((o.filled_at - o.submitted_at).total_seconds())
-    statuses = Counter(o.status for o in orders)
+    for r in filled:
+        if r.slippage_bps is not None:
+            by_type[r.order_type or "?"].append(r.slippage_bps)
+    waits = [r.seconds_to_fill for r in filled if r.seconds_to_fill is not None]
+    latency = [r.submit_latency_ms for r in sent if r.submit_latency_ms is not None]
+    ages = [r.quote_age_s for r in sent if r.quote_age_s is not None]
+    spreads = [r.spread_bps for r in sent if r.spread_bps is not None]
+    statuses = Counter(r.status for r in rows)
+    grades = Counter(r.grade or "unknown" for r in filled)
     return {
-        "orders": len(orders),
+        "orders": len(rows),
         "sent": len(sent),
         "filled": len(filled),
-        "partially_filled": sum(1 for o in sent if 0 < o.filled_quantity < (o.quantity or 0)),
+        "partially_filled": sum(1 for r in rows if r.partial),
         "canceled_or_expired": statuses["canceled"] + statuses["expired"],
         "rejected": statuses["rejected"] + statuses["submit_failed"],
         "unknown": statuses["submit_unknown"] + statuses["pending_submit"],
         "fill_rate": _r(len(filled) / len(sent), 4) if sent else None,
         "slippage_bps_mean": _r(sum(slips) / len(slips), 2) if slips else None,
         "slippage_bps_median": _r(median(slips), 2) if slips else None,
+        "cost_vs_quote_bps_mean": _r(sum(costs) / len(costs), 2) if costs else None,
         "slippage_bps_by_order_type": {k: _r(sum(v) / len(v), 2) for k, v in by_type.items()},
+        "grades": dict(grades),
         "fills_measured": len(slips),
         "seconds_to_fill_median": _r(median(waits), 1) if waits else None,
-        "note": "slippage is measured against the price the decision assumed (positive: worse for us)",
+        "submit_latency_ms_median": _r(median(latency), 1) if latency else None,
+        "quote_age_s_median": _r(median(ages), 1) if ages else None,
+        "spread_bps_median": _r(median(spreads), 2) if spreads else None,
+        "note": "slippage against the price the decision assumed, cost against the quote's midpoint as the "
+        "order left (positive: worse for us); graded against half the spread — execution only, not profit",
     }
 
 

@@ -1120,5 +1120,58 @@ class BrainSessionRow(Base):
     data_blocked_cycles: Mapped[int] = mapped_column(Integer, default=0)
     halts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # entry-halt code -> cycles
     premarket: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    near_close: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # overnight risk, hold or reduce
     close: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainExecutionRow(Base):
+    """One Brain order, from the decision to its final state: what was expected, what the market looked like
+    as it left, what Alpaca did, how long it took, and how good the execution was — independent of whether
+    the trade made money. Kept in step with the order records by reconciliation."""
+
+    __tablename__ = "brain_executions"
+    __table_args__ = (Index("ix_brain_executions_symbol", "symbol", "submitted_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_order_id: Mapped[str] = mapped_column(String(128), unique=True)
+    alpaca_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    brain_cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trading_cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    symbol: Mapped[str] = mapped_column(String(24))
+    side: Mapped[str] = mapped_column(String(4))
+    action: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consensus: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    qty: Mapped[float] = mapped_column(Float)
+    order_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    expected_price: Mapped[float | None] = mapped_column(Float, nullable=True)  # what the decision assumed
+    submitted_price: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # the limit (market: the quote)
+    quote_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_age_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_source: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    submit_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_to_submit_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filled_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    filled_avg_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    seconds_to_fill: Mapped[float | None] = mapped_column(Float, nullable=True)
+    partial: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(24))
+    final: Mapped[bool] = mapped_column(Boolean, default=False)
+    slippage_bps: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # vs the expected price (+: worse)
+    cost_vs_quote_bps: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # vs the midpoint as it left
+    grade: Mapped[str | None] = mapped_column(String(12), nullable=True)  # good | fair | poor | unknown
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime())

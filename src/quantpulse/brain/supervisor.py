@@ -35,6 +35,7 @@ their client ids, so nothing is sent twice.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections import deque
@@ -44,7 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
-from quantpulse.core.market_calendar import NEW_YORK, is_market_open
+from quantpulse.core.market_calendar import NEW_YORK, is_market_open, regular_close
 
 from .context import brain_session
 from .events import Event, EventBus, EventType, TradingEventBridge
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 PREMARKET_FROM = time(8, 30)
 AFTER_HOURS_FROM = time(16, 40)
+NEAR_CLOSE_MINUTES = 30  # the near-close review: overnight risk, hold or reduce, the day's decision state
 STATE_KEY = "supervisor"
 RECONCILE_EVERY = timedelta(minutes=5)
 
@@ -95,6 +97,7 @@ class Supervisor:
         self.log: deque[dict[str, Any]] = deque(maxlen=200)
         self._booted_at = clock.now()
         self._recovered = False
+        self._tick_lock = asyncio.Lock()  # a duplicate or overlapping tick never runs the same work twice
         bus.subscribe([*SYMBOL_EVENTS, *PORTFOLIO_EVENTS, EventType.MARKET_REGIME_CHANGED], self._on_event)
 
     # ------------------------------------------------------------------ state
@@ -153,6 +156,12 @@ class Supervisor:
     async def tick(self) -> str:
         if not self._s.brain_supervisor_enabled:
             return "disabled"
+        if self._tick_lock.locked():
+            return "busy: the previous tick is still running"
+        async with self._tick_lock:
+            return await self._tick()
+
+    async def _tick(self) -> str:
         state = await self._state()
         if state.get("paused"):
             return "paused"
@@ -195,7 +204,7 @@ class Supervisor:
         owns = self._s.brain_owns_account and self._brain.trading.broker.configured()
         if session is BrainSession.OPEN and is_market_open(now):
             if owns and due("reconcile", RECONCILE_EVERY):
-                await run("reconcile", self._brain.trading.reconcile("brain periodic"))
+                await run("reconcile", self._reconcile("brain periodic"))
             if (
                 owns
                 and self._s.brain_strategy_shadow
@@ -208,6 +217,10 @@ class Supervisor:
                 self.queue.pop(("full", ()), None)
                 await run("cycle", self._cycle("full", (), "scheduled"))
             await self._drain(run)
+            closing = datetime.combine(local.date(), regular_close(local.date()), NEW_YORK)
+            near = (closing - timedelta(minutes=NEAR_CLOSE_MINUTES)).time()
+            if owns and due("near_close", daily_from=near):  # overnight risk: hold or reduce, recorded
+                await run("near_close", self._near_close())
         elif session is BrainSession.PRE_MARKET:
             if due("premarket", daily_from=PREMARKET_FROM):
                 if owns:  # verify the account, reconcile, calendar, data, overnight changes
@@ -217,8 +230,9 @@ class Supervisor:
         elif session is BrainSession.AFTER_HOURS:
             if due("after_hours", daily_from=AFTER_HOURS_FROM):
                 if owns:  # reconcile and record the day (what the 60-session evaluation reads)
-                    await run("session_close", self._brain.sessions.close())
+                    await run("session_close", self._close())
                 await run("learn", self._brain.learn(wait=None))
+                await run("trade_lessons", self._brain.trade_lessons())
                 await run("review", self._cycle("portfolio", (), "after-hours review"))
                 await run("lab_paper", self._brain.lab.paper_update())
                 await run("improve", self._improve())
@@ -247,15 +261,42 @@ class Supervisor:
             await run(label, self._cycle(wake.kind, wake.symbols, wake.reason))
 
     async def _recover(self) -> dict[str, Any]:
-        """After a restart: close the Brain cycles it interrupted and, when the Brain owns the account,
-        reconcile with Alpaca (which also closes interrupted trading cycles) before any new decision."""
+        """After a restart — never assuming the previous state was right: close the Brain cycles it
+        interrupted; when the Brain owns the account, reconcile with Alpaca (which also closes interrupted
+        trading cycles), bring the execution ledger up to date, and run the execution audit (the paper
+        account, endpoint, key, environment, kill switches, clock and data). Orders resume only once a
+        pre-trade audit passes (the executor runs one before the first order in every process)."""
         closed = await self._brain.store.close_interrupted(self._booted_at, self._clock.now())
         out: dict[str, Any] = {"interrupted_cycles": len(closed)}
         trading = self._brain.trading
         if self._s.brain_owns_account and trading.broker.configured():
             report = await trading.reconcile("startup")
-            out.update(open_orders=report.open_orders, positions=report.positions)
+            await self._brain.ledger.refresh()
+            audit = await self._brain.executor.audit(purpose="startup")
+            out.update(
+                open_orders=report.open_orders,
+                positions=report.positions,
+                audit="passed" if audit["ok"] else "failed: " + "; ".join(audit["failed"])[:200],
+            )
         return out
+
+    async def _reconcile(self, trigger: str) -> dict[str, Any]:
+        report = await self._brain.trading.reconcile(trigger)
+        updated = await self._brain.ledger.refresh()
+        return {"positions": report.positions, "open_orders": report.open_orders, "executions": updated}
+
+    async def _close(self) -> dict[str, Any]:
+        await self._brain.ledger.refresh()
+        return await self._brain.sessions.close()
+
+    async def _near_close(self) -> dict[str, Any]:
+        """A portfolio review before the bell: the planner de-risks what should not be held into an earnings
+        release overnight, the thesis checks run once more, and the day's decision state is recorded."""
+        detail = await self._brain.run(trigger="supervisor: near close", kind="portfolio", wait=None)
+        ctx = self._brain.orchestrator.last_ctx
+        risk = (ctx.working.facts.get("event_risk") or {}) if ctx is not None else {}
+        positions = await self._brain.theses.positions(closed=0)
+        return await self._brain.sessions.near_close(detail, positions["open"], risk)
 
     async def _improve(self) -> dict[str, Any]:
         """Look at the record and write improvement proposals (never applied automatically)."""

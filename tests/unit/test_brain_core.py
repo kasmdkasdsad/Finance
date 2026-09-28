@@ -246,6 +246,9 @@ def test_default_agents_are_deterministic_except_the_optional_briefing():
         "portfolio": "constraint",
         "research": "context",
         "situational_awareness": "context",
+        "position_monitor": "context",
+        "execution_quality": "context",
+        "learning": "context",
         "briefing": "context",
     }
     assert {a.spec.id for a in reg.all() if a.spec.stage == 1} == {"research", "situational_awareness"}

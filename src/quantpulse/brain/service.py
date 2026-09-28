@@ -29,6 +29,7 @@ from .execution import BrainExecutor
 from .improvement import ImprovementEngine
 from .lab.service import StrategyLab
 from .learning import Learner, PredictionRecorder
+from .ledger import ExecutionLedger
 from .llm import ModelRouter
 from .memory import MemoryStore
 from .orchestrator import Orchestrator
@@ -97,9 +98,20 @@ class BrainService:
         self.memory = MemoryStore(db)
         self.models = ModelRouter(settings, clock, store=self.store)  # 'none' unless a provider is configured
         self.book = PaperBook(settings, db, clock)  # the Brain's own hypothetical portfolio
-        self.theses = ThesisBook(
-            settings, db, clock
-        )  # the Alpaca account's position theses (paper_execution)
+        # the Alpaca account's position theses (paper_execution)
+        self.theses = ThesisBook(settings, db, clock)
+        self.ledger = ExecutionLedger(db, clock)  # every Brain order, decision to final state
+        self.executor = BrainExecutor(  # the only way a Brain decision becomes an order (via trading)
+            settings,
+            clock,
+            trading,
+            data,
+            self.store,
+            lambda: {
+                "registered": len(self.registry.all()),
+                "enabled": sum(1 for a in self.registry.all() if self.registry.enabled(a.spec.id)),
+            },
+        )
         self.perception = Perception(
             settings, clock, data, BrokerView(broker), trading, reference, model, options, market, self.book
         )
@@ -114,8 +126,9 @@ class BrainService:
             self.bus,
             self.models,
             self.book,
-            BrainExecutor(settings, clock, trading),
+            self.executor,
             self.theses,
+            self.ledger,
         )
         self._synced = False
         self.learner = (
@@ -180,6 +193,12 @@ class BrainService:
             raise BrainCycleRunning(job) from None
 
     # ------------------------------------------------------------------ learning
+    async def trade_lessons(self) -> dict[str, Any]:
+        """Structured lessons from the positions closed since the last pass (after each close)."""
+        from .trade_lessons import learn_from_trades
+
+        return await learn_from_trades(self._db, self.memory, self._clock)
+
     async def learn(self, *, wait: float | None = None) -> dict[str, Any]:
         """Grade matured predictions and learn from them (a background job; 202 while it runs)."""
         if self.learner is None:

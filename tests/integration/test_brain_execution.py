@@ -179,12 +179,22 @@ async def test_a_paper_endpoint_mismatch_fails_closed(tmp_path, monkeypatch):
             raise NotPaperTrading("refusing to trade: the client points at https://api.alpaca.markets")
 
         monkeypatch.setattr(broker, "verify_paper_client", not_paper)
-        cycle = await run_cycle(api)
+        cycle = await run_cycle(api)  # the pre-trade audit stops it before anything is handed on
         assert cycle["summary"]["orders_sent"] == 0 and posts(api.fake) == []
-        failed = [d for d in cycle["decisions"] if d["status"] == "failed"]
-        assert failed and all("refusing to trade" in d["execution"]["reason"] for d in failed)
-        cycles = (await api.get(f"{TRADING}/cycles")).json()
-        assert cycles[0]["status"] == "failed"
+        stopped = [d for d in cycle["decisions"] if d["quantity"] and d["action"] in ("buy", "increase")]
+        assert stopped and all(
+            "execution audit failed: paper_endpoint" in d["execution"]["reason"] for d in stopped
+        )
+        audit = (await api.get(f"{API}/execution-audit")).json()["latest"]
+        assert not audit["ok"] and any(
+            f.startswith("paper_endpoint: refusing to trade") for f in audit["failed"]
+        )
+        # and the trading service fails closed on its own, whoever calls it
+        from quantpulse.services.trading import BrainOrder
+
+        order = BrainOrder("UPA", "buy", 1, api.feed.live_price("UPA"), "buy", "test")
+        tc = await api.container.trading.run_brain([order], brain_cycle_id=cycle["id"], scheduled=False)
+        assert tc.status == "failed" and "refusing to trade" in (tc.error or "") and posts(api.fake) == []
 
 
 async def test_entry_halts_hold_back_buys_but_let_exits_through(tmp_path, monkeypatch):
@@ -218,19 +228,55 @@ async def test_nothing_is_sent_while_the_market_is_closed(tmp_path, monkeypatch)
                 assert "market is closed" in d["execution"]["reason"]
 
 
-async def test_supervisor_cycles_send_nothing_until_paper_execution_was_armed_by_hand(tmp_path, monkeypatch):
+async def test_a_passing_execution_audit_lets_the_supervisor_trade_on_its_own(tmp_path, monkeypatch):
     with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
     async for api in brain_client(tmp_path, clock, **OWNS, **ENABLED):
+        assert not (await api.get(f"{TRADING}/status")).json()["scheduler_armed"]
         sup = api.container.brain.supervisor
-        assert "cycle" in await sup.tick()  # the scheduled full cycle ran
+        assert "cycle" in await sup.tick()  # the scheduled full cycle: no click anywhere
         cycle = (await api.get(f"{API}/cycles")).json()[0]
-        assert cycle["trigger"] == "supervisor: scheduled" and posts(api.fake) == []
-        ex = (await api.get(f"{API}/execution")).json()
-        assert any("not armed" in b for b in ex["blockers_scheduled"]) and ex["blockers_manual"] == []
-        await run_cycle(api)  # a manual Brain cycle sends and arms
-        assert brain_orders(api.fake)
-        assert (await api.get(f"{API}/execution")).json()["blockers_scheduled"] == []
+        assert cycle["trigger"] == "supervisor: scheduled" and brain_orders(api.fake)
+        audit = (await api.get(f"{API}/execution-audit")).json()["latest"]
+        assert audit["ok"] and audit["purpose"] == "pre_trade" and audit["failed"] == []
+        names = {c["name"] for c in audit["checks"]}
+        assert {"paper_endpoint", "paper_key", "trading_kill_switch", "brain_kill_switch", "environment",
+                "reconciliation", "market_open", "clock_skew", "market_data"} <= names  # fmt: skip
+        assert (
+            audit["endpoint"] == "https://paper-api.alpaca.markets"
+            and audit["live_trading_possible"] is False
+        )
+        assert audit["orders"] and all(o["consensus"] and o["reasons"] for o in audit["orders"])
+        assert audit["risk_limits"]["max_spread_bps"] == 30 and audit["agents"]["registered"] >= 17
+        assert audit["outcome"]["orders_sent"] == len(brain_orders(api.fake))
+        status = (await api.get(f"{TRADING}/status")).json()
+        assert status["scheduler_armed"]  # armed by the audit
+        events = [e["kind"] for e in (await api.get(f"{TRADING}/events")).json()]
+        assert "brain_execution_audit" in events and "paper_armed" in events
+
+
+async def test_a_failing_execution_audit_sends_nothing_and_arms_nothing(tmp_path, monkeypatch):
+    from quantpulse.brain import execution
+
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, **OWNS, **ENABLED):
+        # only the audit sees the drift here, so it is the audit that must stop the orders
+        monkeypatch.setattr(execution, "env_file_drift", lambda s: ["QP_TRADING_DRY_RUN: .env says true"])
+        await api.container.brain.supervisor.tick()
+        assert posts(api.fake) == []
+        assert not (await api.get(f"{TRADING}/status")).json()["scheduler_armed"]
+        audit = (await api.get(f"{API}/execution-audit")).json()["latest"]
+        assert not audit["ok"] and audit["failed"] == ["environment: QP_TRADING_DRY_RUN: .env says true"]
+        cycle = (await api.get(f"{API}/cycles/{(await api.get(f'{API}/cycles')).json()[0]['id']}")).json()
+        stopped = [d for d in cycle["decisions"] if d["action"] in ("buy", "increase") and d["quantity"]]
+        assert stopped and all(d["execution"]["reason"].startswith("execution audit failed") for d in stopped)
+        monkeypatch.setattr(
+            execution, "env_file_drift", lambda s: []
+        )  # fixed (a restart): the next cycle trades
+        clock.advance(31 * 60)
+        await api.container.brain.supervisor.tick()
+        assert brain_orders(api.fake) and (await api.get(f"{TRADING}/status")).json()["scheduler_armed"]
 
 
 async def test_the_first_tick_after_a_restart_closes_interrupted_cycles_and_reconciles(tmp_path):
