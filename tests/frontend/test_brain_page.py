@@ -140,6 +140,14 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert any("**Final execution audit**" in m.value for m in at.markdown)
     assert any("**Execution ledger**" in m.value for m in at.markdown)
     assert any("execution quality is unproven" in c.value for c in at.caption)
+    # the experiment tab: checkpoints, reviews, the record, ideas, behaviour, data — nothing declared
+    assert any("**The paper experiment**" in m.value for m in at.markdown)
+    assert any("20 / 40 / 60-session checkpoints" in m.value for m in at.markdown)
+    assert any("**What the record says**" in m.value for m in at.markdown)
+    assert any("**Behaviour**" in m.value for m in at.markdown)
+    assert any("When data stopped trading" in m.value for m in at.markdown)
+    assert any("never solved by a looser" in c.value for c in at.caption)
+    assert any("Traceability:" in c.value for c in at.caption)
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
     assert "AgentCompleted" in set(events["event"])
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}

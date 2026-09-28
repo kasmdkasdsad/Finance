@@ -61,6 +61,9 @@ LIMITATIONS = (
     "session halves the position in the last half hour (the server must be running then).",
     "Take-profit needs a calibrated target: until the consensus is calibrated there are none.",
     "Execution quality is unproven below 10 fills; Alpaca's paper fills can be kinder than real ones.",
+    "Event days are detected from prices (a large benchmark move or VIX ≥ 30); there is no macro calendar.",
+    "Ideas are graded at one horizon per kind of idea, from their first detection that day.",
+    "Past checkpoint windows have no unrealised P&L: positions are not re-marked historically.",
     "Stops and thesis checks run at each cycle, not as resting stop orders: a gap can fill beyond the stop.",
     "Agent performance and the 60-session evaluation are not established until enough observations exist.",
 )

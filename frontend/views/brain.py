@@ -958,6 +958,93 @@ def _evaluation() -> None:
         st.caption(_md(f"• {c_}"))
 
 
+def _experiment() -> None:
+    """The long-term paper experiment: checkpoints, reviews, what the record says, rejected ideas, behaviour, data."""
+    st.markdown(
+        "**The paper experiment** — measured, never declared: every figure carries its sample, and nothing here "
+        "calls the Brain successful or unsuccessful. Nothing on this tab changes a rule, a threshold or a limit."
+    )
+    cp = guarded(lambda: api().get(f"{BASE}/checkpoints"), "checkpoints") or {}
+    if cp:
+        st.markdown(f"**20 / 40 / 60-session checkpoints** — {cp.get('sessions', 0)} session(s) recorded")
+        rows = []
+        for key, w in [*((f"first {k}", v) for k, v in (cp.get("checkpoints") or {}).items()),
+                       ("last 20", cp.get("rolling")), ("so far", cp.get("so_far"))]:  # fmt: skip
+            if not w or "brain" not in w:
+                rows.append({"window": key, "status": (w or {}).get("status", "—")})
+                continue
+            rows.append({
+                "window": key, "sessions": w["sessions"], "Brain": pct(w["brain"].get("total_return"), 2),
+                "benchmark": pct(w["benchmark"].get("total_return"), 2), "shadow": pct(w["shadow"].get("total_return"), 2),
+                "max drawdown": pct(w["brain"].get("max_drawdown"), 2), "volatility": pct(w["brain"].get("volatility"), 1),
+                "turnover/session": pct((w.get("turnover") or {}).get("per_session"), 1),
+                "status": w.get("status", ""), "statistics": w["significance"].get("statement", ""),
+            })  # fmt: skip
+        st.dataframe(pd.DataFrame(rows).astype(str), hide_index=True, use_container_width=True)
+    reviews = guarded(lambda: api().get(f"{BASE}/reviews", limit=10), "reviews") or []
+    st.markdown("**Automatic reviews** (daily after the close, weekly after the week's last session)")
+    if not reviews:
+        st.caption("No review yet (the supervisor writes one after the close).")
+    for r in reviews[:4]:
+        with st.expander(_md(f"{r['kind'].upper()} · {r['headline']}")):
+            for lesson in r["lessons"]:
+                st.markdown(
+                    _md(
+                        f"- **{lesson['topic']}** ({lesson['strength']}, sample {lesson['sample']}): {lesson['lesson']}"
+                    )
+                )
+            for p in r.get("proposals") or []:
+                st.caption(_md(f"proposal ({p['status']}): {p['title']}"))
+    lr = guarded(lambda: api().get(f"{BASE}/learning-report"), "learning report") or {}
+    if lr:
+        cons = lr.get("consensus") or {}
+        cal = cons.get("calibration") or {}
+        st.markdown(
+            _md(f"**What the record says** — {lr.get('graded_calls', 0)} graded calls; consensus "
+                f"{(cons.get('record') or {}).get('verdict', 'unproven')}, calibration {cal.get('status', 'unproven')}"
+                + (f" (error {cal['ece']:.2f})" if cal.get("ece") is not None else ""))
+        )  # fmt: skip
+        agents = lr.get("agents") or {}
+        if agents:
+            st.dataframe(pd.DataFrame([
+                {"agent": a, "verdict": v["record"]["verdict"], "hit rate": pct(v["record"].get("hit_rate"), 0),
+                 "independent calls": v["record"]["n_effective"], "needs": v["needs"],
+                 "calibration": v["calibration"].get("status"), "vs consensus": v["versus_consensus"]["status"]}
+                for a, v in agents.items()
+            ]).astype(str), hide_index=True, use_container_width=True)  # fmt: skip
+        regimes = (lr.get("regimes") or {}).get("consensus") or {}
+        if regimes:
+            st.caption(_md("Consensus by regime: " + "; ".join(
+                f"{b} {pct(c.get('hit_rate'), 0)} over {c['n_effective']} ({c['verdict']})" for b, c in regimes.items())))  # fmt: skip
+    ideas = guarded(lambda: api().get(f"{BASE}/opportunity-outcomes"), "rejected ideas") or {}
+    if ideas:
+        st.markdown(_md(f"**Ideas considered** — {ideas['recorded']} recorded, {ideas['graded']} graded; taken vs "
+                        f"rejected: {ideas['taken_vs_rejected']['status']}"))  # fmt: skip
+        if ideas.get("by_reason"):
+            st.dataframe(pd.DataFrame([
+                {"rejected for": g["meaning"], "status": g["status"], "decisive": g["decisive"],
+                 "avoided share": pct(g.get("avoided_share"), 0), "needs": g["needs"],
+                 "protected control": "yes" if g["protected"] else ""}
+                for g in ideas["by_reason"].values()
+            ]).astype(str), hide_index=True, use_container_width=True)  # fmt: skip
+    behaviour = guarded(lambda: api().get(f"{BASE}/behavior"), "behaviour") or {}
+    if behaviour:
+        st.markdown(_md(f"**Behaviour** (last {behaviour['window_days']} days): {behaviour['headline']}"))
+        for f in behaviour["findings"]:
+            icon = {"alert": "🔴", "warning": "🟠", "info": "·"}[f["severity"]]
+            st.caption(_md(f"{icon} {f['code'].replace('_', ' ')}: {f['finding']} (sample {f['sample']})"))
+    blockage = guarded(lambda: api().get(f"{BASE}/data-blockage"), "data blockage") or {}
+    if blockage:
+        st.markdown(_md(f"**When data stopped trading** — {blockage['headline']}"))
+        if blockage.get("categories"):
+            st.dataframe(pd.DataFrame([
+                {"cause": k.replace("_", " "), "symbol-cycles": v["symbol_cycles"], "behind halts": v["behind_halts"],
+                 "decisions stopped": v["decisions_stopped"], "what would address it": v["remedy"]}
+                for k, v in blockage["categories"].items()
+            ]).astype(str), hide_index=True, use_container_width=True)  # fmt: skip
+        st.caption(_md(blockage.get("principle", "")))
+
+
 def _sessions() -> None:
     data = guarded(lambda: api().get(f"{BASE}/sessions", limit=60), "sessions")
     rows = (data or {}).get("sessions") or []
@@ -1396,7 +1483,9 @@ def _improvements() -> None:
         "The Brain reviews its own record and writes **proposals** — problem, evidence, proposed change, expected "
         "improvement and validation plan. **Nothing is applied automatically**; changes are built as new versions and "
         "must pass PROPOSE → VERSION → TEST → BACKTEST → WALK-FORWARD → PAPER EVALUATION → COMPARE → PROMOTE ONLY IF "
-        "VALIDATED. Risk controls are never a subject."
+        "VALIDATED. A proposal that would touch a protected control (loss, position and order limits, kill "
+        "switches, paper-only settings, data freshness and spread, account checks) is only ever recorded as "
+        "**protected_review** — for you to look at; the Brain never changes those controls."
     )
     review = st.button("Review the record now", icon=":material/rule:", key="improve-review")
     if review and guarded(lambda: api().post(f"{BASE}/improvements/review"), "review") is not None:
@@ -1429,6 +1518,11 @@ def _improvements() -> None:
     )
     chosen = next(r for r in rows if r["id"] == pick)
     p = chosen["proposal"]
+    if chosen["status"] == "protected_review":
+        st.warning(
+            _md(p.get("protected") or "touches a protected control: for your review only"),
+            icon=":material/shield:",
+        )
     st.markdown(_md(f"**Problem:** {chosen['title']}"))
     st.markdown(_md(f"**Evidence:** {chosen['evidence']}"))
     st.markdown(_md(f"**Proposed change:** {p.get('change')}"))
@@ -1681,6 +1775,7 @@ def render() -> None:
             "Audit trail",
             "Market data & SIP",
             "Evaluation",
+            "Experiment",
             "Paper book",
             "Memory",
             "History",
@@ -1715,8 +1810,10 @@ def render() -> None:
     with tabs[13]:
         _evaluation()
     with tabs[14]:
-        _book()
+        _experiment()
     with tabs[15]:
-        _memory()
+        _book()
     with tabs[16]:
+        _memory()
+    with tabs[17]:
         _history(cycles)

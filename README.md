@@ -1600,7 +1600,9 @@ record and writes **improvement proposals**. Each one has a problem, the evidenc
 an expected improvement, and a validation plan. A proposal can never weaken a guardrail, and this is
 enforced: one that names a protected control — the loss, position and order limits, the kill switches, the
 data-quality requirements (`QP_TRADING_REQUIRE_LIVE_DATA`, the quote-age and spread limits), the paper-only
-and execution switches, the Brain's mode — is withheld before it is stored. It looks for:
+and execution switches, the Brain's mode — is never a suggestion: it is recorded with the status
+**`protected_review`** and the control it touches, for a person to look at, and nothing ever applies it.
+It looks for:
 
 * weak agents (a significant *evidence of harm* verdict on enough independent calls);
 * agents that fail in one regime or volatility environment (a routing proposal);
@@ -1618,7 +1620,11 @@ and execution switches, the Brain's mode — is withheld before it is stored. It
     person's decision);
   * a system clock that keeps drifting;
 * established patterns: objections that are usually right (weigh them more) or usually wrong (soften
-  them), and hypotheses that keep losing.
+  them), and hypotheses that keep losing;
+* poor execution (fills well beyond half the spread) and excessive turnover (positions closed within two
+  sessions);
+* from the weekly review: rejection reasons that have been costing opportunities, and behaviour alerts
+  (round trips, repeated losses from the same agents, herding, concentration).
 
 **Nothing is applied automatically.** A person records a decision (`POST /brain/improvements/{id}`:
 testing, validated, rejected or applied). A change is built as a new version and follows
@@ -1687,6 +1693,10 @@ scripted fake provider and never reach a model.
 * **Improvements:** proposals with their evidence and validation plan, and the decision buttons.
 * **Supervisor & events:** the supervisor's state, its queued wake-ups and recent work, a pause/resume
   button, language-model status and usage, and the event stream.
+* **Experiment:** the 20/40/60-session checkpoints, the latest daily and weekly reviews with their
+  lessons and proposals, what the record says (agents, calibration, agents against the consensus, the
+  consensus by regime), the ideas considered and the rejection reasons' record, behaviour findings, and
+  when and why market data stopped trading.
 * **Memory** and **History.**
 
 The page keeps four layers visibly apart: ① agent analysis, ② consensus, ③ risk preview, and ④ broker
@@ -1770,6 +1780,60 @@ recomputed; a stage that did not happen says so.
 floored to `QP_BRAIN_CYCLE_MINUTES`: however many cycles or restarts happen in a slot, at most one buy and
 one sell per symbol can be sent in it (a repeat is refused by the order manager's write-ahead record and
 recorded as `duplicate_prevented`).
+
+### The long-term paper experiment
+
+The Brain runs the paper account as an experiment: it should get better at recognising good opportunities,
+avoiding bad ones and knowing when it lacks the evidence to act — not trade more. Everything below is built
+from what was recorded at the time, carries its sample, and changes nothing by itself.
+
+* **Every trade traceable** (`GET /brain/decisions/{id}/audit`, `GET /brain/traces`): opportunity →
+  agents → opinions → evidence → disagreement → consensus → debate → portfolio fit → decision → risk check
+  → order → Alpaca → execution ledger → fill → position → P&L → benchmark-relative outcome → prediction
+  grade → decision quality → lesson. A stage is *done*, *pending* (it comes later), *none*, *n/a* or
+  **missing** — a gap in the record, reported only once the pass that should have written it has run.
+  `/traces` checks every sent order. Decisions made later the same day on a repeated consensus view are
+  graded on that day's call (a claim is recorded once a day).
+* **Ideas not taken** (`GET /brain/opportunity-outcomes`): every idea considered is kept once per day
+  (kind, symbol, direction; repeats folded in) with whether a trade went out and, if not, why — the focus
+  budget, data quality, no view, an unknown or opposing consensus, low confidence, earnings, a risk-off
+  market, the posture, the devil's advocate, portfolio fit, the new-position limit, cash, the risk engine,
+  an entry halt, the market being closed. After the kind's horizon it is graded against the benchmark:
+  *missed*, *avoided* or *noise* (within half a standard deviation) — *worked* or *failed* when taken. Per
+  rejection reason: has it been saving money or costing opportunities? *Unproven* until there are
+  `QP_BRAIN_MIN_RELIABILITY_OBSERVATIONS` decisive ideas.
+* **The learning report** (`GET /brain/learning-report`): each agent's record and how many independent
+  calls it still needs; each agent against the consensus on the same calls (who is right when they
+  disagree); calibration error and direction, not just the hit rate; every source in bullish, bearish,
+  sideways, high- and low-volatility markets and on **event days** (a benchmark move ≥ 2 daily σ or VIX ≥ 30
+  — detected from prices; there is no macro calendar), all cells adjusted together for the false-discovery
+  rate; which consensus patterns work (independent sources, disagreement, challenge, confidence); calls on
+  unusable data; failure modes; the Brain, the benchmark and the replaced strategy by regime.
+* **Behaviour** (`GET /brain/behavior`): repeated buying and selling of one symbol, quick non-stop exits,
+  turnover against the shadow, concentration and heavy sectors, correlated holdings, repeated losses on
+  one symbol or from the same agents, kinds of idea never taken (and what they did), herding and agents in
+  lockstep, the consensus flipping within a day, chasing or freezing after a losing streak.
+* **Reviews** (`GET /brain/reviews`): after each close a **daily review** (the day against the benchmark and
+  the shadow, why cycles traded or not, trades, closed positions, ideas and why not, what was graded,
+  execution, data blockage, behaviour, traceability) and after the week's last session a **weekly review**
+  (performance, turnover, execution, the learning report and what changed since last week, rejection
+  reasons, behaviour, the week's lessons). Lessons are structured — topic, lesson, sample, *tentative* or
+  *established*. The weekly review writes proposals; one that would touch a protected control is recorded
+  as `protected_review`.
+* **The 20/40/60-session evaluation** (`GET /brain/checkpoints`): the first 20, 40 and 60 sessions (fixed once
+  reached), the last 20 and everything so far — the Brain, the benchmark and the shadow; realised and
+  unrealised P&L; drawdown; volatility; turnover; execution quality; calibration; decision quality; risk
+  behaviour; agent reliability; and the mean daily excess return's t-statistic and 95% interval. **The
+  verdict is always "none"**: no window declares the Brain successful or unsuccessful.
+* **When data stopped trading** (`GET /brain/data-blockage`, the data report's `blockage`): stale trade,
+  stale quote, wide spread, missing quote, provider failure, market closed, delayed vendor, insufficient
+  coverage (plus invalid timestamp, clock skew, broker unavailable, synthetic) — counted per symbol, per
+  halt and per stopped decision, by day, by hour and as episodes, with what would address each. Never a
+  looser quote-age or spread limit.
+
+Agent weights still move only through the existing reliability rule — a significant verdict over enough
+independent graded calls. Nothing in the experiment loosens a loss, position or order limit, a kill switch,
+the paper-only protections, the data-freshness or spread requirements, or the account checks.
 
 ### Autonomous paper execution
 
@@ -1919,6 +1983,13 @@ QP_API_TOKEN=...                          # recommended once orders are enabled
 | `GET /brain/execution` | Who owns the account, both kill switches, what would stop Brain orders (manual and scheduled), the last cycle's entry halts and orders sent |
 | `GET /brain/execution-audit` · `POST /brain/execution-audit` | The latest final execution audits (every gate, what was about to go, the outcome) · run one now (reconciles; never sends an order) |
 | `GET /brain/executions?limit=` | The execution ledger: every Brain order from the decision to its final state, with slippage, cost against the quote and a grade |
+| `GET /brain/traces?limit=` | Is every sent Brain order traceable end to end? Gaps (missing links) and stages still to come |
+| `GET /brain/opportunity-outcomes` · `/opportunity-outcomes/rows?verdict=&reason=` | Ideas considered, taken or not and why not, graded later: per rejection reason, kind and regime |
+| `GET /brain/learning-report` | Agents vs the consensus, calibration, regimes (incl. event days), consensus patterns, data mistakes, failure modes, strategies by regime |
+| `GET /brain/behavior?days=` | Pathological behaviour findings (nothing is changed) |
+| `GET /brain/reviews?kind=` · `POST /brain/reviews/{daily\|weekly}` | The automatic daily and weekly reviews · write one now |
+| `GET /brain/checkpoints` | The 20/40/60-session evaluation (never a verdict) |
+| `GET /brain/data-blockage?days=` | When and why market data kept the Brain from trading |
 | `GET /brain/kill-switch` · `POST /brain/kill-switch {"active": true, "reason": "…", "cancel_open_orders": true}` | The Brain kill switch: stop new Brain orders at once (or allow them again) |
 | `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |
 | `GET /brain/memory?tier=&kind=&subject=&text=` | Structured memory, newest first |
@@ -2130,6 +2201,11 @@ tests/                   unit · providers · integration · frontend · fixture
   * Take-profit needs a calibrated target; until the consensus is calibrated there are no targets, and
     profits are managed by the thesis checks and the consensus instead.
   * Execution quality is *unproven* below 10 fills, and Alpaca's paper fills can be kinder than real ones.
+  * Most of the experiment's measures stay *unproven* for weeks or months: agents need 30 independent graded
+    calls, rejection reasons 30 decisive ideas, and the checkpoints 20/40/60 trading days.
+  * Event days are detected from prices (a benchmark move ≥ 2 daily σ or VIX ≥ 30), not from a macro
+    calendar; ideas are graded at one horizon per kind of idea; past checkpoint windows have no unrealised
+    P&L (positions are not re-marked historically).
   * Stops and thesis checks run at each cycle (every 30 minutes by default, or on a monitored price move),
     not as resting stop orders at Alpaca, so a gap can fill well beyond the stop.
   * In the modes where the strategy owns the account, the paper book's fills are modelled (spread,
