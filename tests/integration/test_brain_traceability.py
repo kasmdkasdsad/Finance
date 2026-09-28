@@ -83,6 +83,25 @@ async def test_a_closed_and_graded_trade_is_traceable_from_the_idea_to_the_lesso
         exit_trail = (await api.get(f"{API}/decisions/{exit_['id']}/audit")).json()
         assert exit_trail["gaps"] == [] and stages(exit_trail)["pnl"]["detail"]["kind"] == "realised"
 
+        # the learning report: everything measured, nothing judged on one day's calls
+        lr = (await api.get(f"{API}/learning-report")).json()
+        assert lr["graded_calls"] == learned["evaluated"] and lr["min_observations"] == 30
+        assert lr["consensus"]["record"]["verdict"] == "unproven"
+        assert (
+            lr["consensus"]["calibration"]["status"] == "unproven"
+            and lr["consensus"]["calibration"]["needs"] > 0
+        )
+        assert {"technical", "momentum"} <= set(lr["agents"])
+        for a in lr["agents"].values():
+            assert a["record"]["verdict"] == "unproven" and a["needs"] > 0
+            assert a["versus_consensus"]["status"] == "unproven"
+        assert lr["agents"]["technical"]["versus_consensus"]["pairs"] > 0
+        cells = [c for source in lr["regimes"].values() for c in source.values()]
+        assert cells and all(c["verdict"] == "unproven" for c in cells)
+        assert lr["data"]["on_usable_data"]["calls"] > 0 and lr["caveats"]
+        graded = [p for p in await api.container.brain.store.predictions() if p.status == "evaluated"]
+        assert graded and all("market_event" in p.context for p in graded)
+
         report = (await api.get(f"{API}/traces")).json()
         assert report["with_gaps"] == 0 and report["trades"] >= 2
         mine = next(t for t in report["trades_detail"] if t["decision_id"] == buy["id"])

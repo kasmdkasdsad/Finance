@@ -222,6 +222,17 @@ async def trades(limit: int = Query(50, ge=1, le=500), c: Container = ContainerD
 
 
 @router.get(
+    "/learning-report",
+    summary="What the graded record says: agents vs the consensus, calibration, regimes, consensus patterns, "
+    "data mistakes, failure modes, strategies by regime — each with its sample, unproven until it is enough",
+)
+async def learning_report(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.learning_report import build
+
+    return await build(c.brain.db, c.settings)
+
+
+@router.get(
     "/opportunity-outcomes",
     summary="Ideas considered, taken or not and why not, graded later: which rejections saved money, which "
     "cost opportunities",

@@ -144,5 +144,10 @@ def market_statistics(close: pd.DataFrame, benchmark: pd.Series) -> dict[str, fl
         "benchmark_rv21": float(bret.iloc[-21:].std() * ANNUAL),
         "benchmark_rv252": float(bret.iloc[-252:].std() * ANNUAL) if len(bret) > 252 else None,
         "advancers_1d": float((ret.iloc[-1] > 0).mean()),
+        # the benchmark's last move in units of its daily volatility: a market-wide shock day when ≥ 2
+        "benchmark_ret_1d": float(bret.iloc[-1]),
+        "benchmark_move_z": float(bret.iloc[-1] / bret.iloc[-22:-1].std())
+        if bret.iloc[-22:-1].std() > 0
+        else None,
     }
     return {k: (v if v is None or math.isfinite(v) else None) for k, v in out.items()}

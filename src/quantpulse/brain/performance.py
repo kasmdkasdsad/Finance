@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -72,6 +72,9 @@ class Graded:
     timing: float | None = None  # favourable relative return before the next close (not capturable)
     data_ok: bool = True  # made on usable data
     market_vol: float | None = None  # the benchmark's realised volatility when the call was made
+    cycle_id: int | None = None
+    market_event: bool | None = None  # a market-wide shock day when the call was made (None: unknown)
+    context: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)  # recorded with the call
     by_horizon: dict[str, float] | None = None  # relative return at each standard horizon up to its own
 
     @property
@@ -294,6 +297,9 @@ async def graded(db: Database) -> list[Graded]:
                 data_ok=state is None or state in USABLE_DATA,
                 market_vol=(r.context or {}).get("market_vol"),
                 by_horizon=outcome.get("by_horizon"),
+                cycle_id=r.cycle_id,
+                market_event=(r.context or {}).get("market_event"),
+                context=r.context or {},
             )
         )
     return out

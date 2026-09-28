@@ -110,6 +110,8 @@ class PredictionRecorder:
                 "quote_age_s": round(diag.trade_age_s, 1) if diag and diag.trade_age_s is not None else None,
                 "vol": round(float(vol), 5) if vol else None,
                 "market_vol": ctx.market_stats.get("benchmark_rv21"),  # the volatility environment
+                "market_event": market_event(ctx),  # a market-wide shock day (benchmark move, VIX)
+                "benchmark_move_z": ctx.market_stats.get("benchmark_move_z"),
                 "portfolio": {
                     "held": subject in ctx.held,
                     "weight": round(ctx.portfolio.weight(subject), 4) if subject != MARKET else None,
@@ -236,6 +238,20 @@ class PredictionRecorder:
                     fresh.append(r)
             s.add_all(fresh)
         return len(fresh)
+
+
+EVENT_MOVE_Z = 2.0  # the benchmark moved at least two daily standard deviations
+EVENT_VIX = 30.0
+
+
+def market_event(ctx: BrainContext) -> bool | None:
+    """Was this a market-wide event day? Detected from prices — the benchmark's move of at least
+    ``EVENT_MOVE_Z`` daily σ, or VIX at ``EVENT_VIX`` or more — not from a macro calendar (there is none).
+    ``None`` when neither is known."""
+    z = ctx.market_stats.get("benchmark_move_z")
+    if z is None and ctx.vix is None:
+        return None
+    return bool((z is not None and abs(z) >= EVENT_MOVE_Z) or (ctx.vix is not None and ctx.vix >= EVENT_VIX))
 
 
 class Learner:
