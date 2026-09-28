@@ -39,6 +39,7 @@ dev = [
     "respx>=0.21",
     "ruff>=0.6",
     "mypy>=1.11",
+    "hypothesis>=6.100",  # property-based tests (payoff and Greek invariants)
 ]
 
 [project.scripts]

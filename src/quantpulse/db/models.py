@@ -1257,3 +1257,7 @@ class ServiceLeaseRow(Base):
     acquired_at: Mapped[datetime] = mapped_column(UTCDateTime())
     heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime())
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+# the options layer (revision 0023) lives in its own module; importing it registers its tables
+from quantpulse.db import options_models as options_models  # noqa: E402
