@@ -764,6 +764,8 @@ def _diagnostics(status: dict[str, Any]) -> None:
                         "spread_bps",
                         "spread_source",
                         "spread_ok",
+                        "price_source",
+                        "price_age_seconds",
                         "quote_age_seconds",
                         "trade_age_seconds",
                         "problems",
@@ -783,6 +785,10 @@ def _diagnostics(status: dict[str, Any]) -> None:
                     "spread_bps": st.column_config.NumberColumn("Spread used (bp)", format="%.1f"),
                     "spread_ok": st.column_config.CheckboxColumn(
                         f"≤ {diag['quotes'][0]['max_spread_bps']:g}bp"
+                    ),
+                    "price_source": st.column_config.TextColumn("Price from"),
+                    "price_age_seconds": st.column_config.NumberColumn(
+                        "Price age (s)", format="%.0f", help="What the live-data check measures"
                     ),
                     "quote_age_seconds": st.column_config.NumberColumn("Bid/ask age (s)", format="%.0f"),
                     "trade_age_seconds": st.column_config.NumberColumn("Trade age (s)", format="%.0f"),

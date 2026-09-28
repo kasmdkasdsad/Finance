@@ -615,6 +615,7 @@ def quote_checks(ctx: BrainContext) -> dict[str, QuoteCheck]:
             spread_source=qq.spread_source,
             quote_problems=qq.problems,
             entry_blocks=qq.entry_blocks,
+            source=q.price_source,
         )
     return out
 

@@ -204,11 +204,12 @@ class MarketService:
         results = await asyncio.gather(*(self.quote(s, force_refresh=force_refresh) for s in symbols))
         return dict(zip(symbols, results, strict=True))
 
-    async def live_quotes(self, symbols: Sequence[str]) -> LiveQuotes:
+    async def live_quotes(self, symbols: Sequence[str], prefer: Sequence[str] = ()) -> LiveQuotes:
         """Fresh quotes for many symbols, for trading: multi-symbol snapshots from a vendor that offers them
         (Alpaca), then per-symbol lookups for the few it missed. Only answers a live vendor gave *now* are
         returned — a symbol with nothing better than a cached, stale or synthetic price is listed in
-        ``missing`` instead."""
+        ``missing`` instead. ``prefer`` names vendors to ask first (trading asks the broker's own feed
+        before the general order of ``QP_MARKET_PROVIDERS``, which may start with a delayed plan)."""
         symbols = list(dict.fromkeys(symbols))
         now = self._clock.now()
         out = LiveQuotes({}, {}, now)
@@ -216,7 +217,11 @@ class MarketService:
             out.missing = dict.fromkeys(symbols, "live data disabled (QP_ENABLE_LIVE_DATA=false)")
             return out
         todo = list(symbols)
-        for p in self._providers:
+        rank = {name: i for i, name in enumerate(prefer)}
+        ordered = sorted(
+            self._providers, key=lambda p: rank.get(p.name, len(rank))
+        )  # stable: the rest keep their order
+        for p in ordered:
             if not todo or not (hasattr(p, "quotes") and p.configured()):
                 continue
             batcher: BatchQuoteProvider = p  # type: ignore[assignment]

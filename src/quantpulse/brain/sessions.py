@@ -163,7 +163,7 @@ class SessionKeeper:
             add(
                 "market_data",
                 q is not None and not refused,
-                (f"{bench} quote from {q.provider} ({q.feed or 'unknown feed'}), last trade {q.age_seconds:,.0f}s old"
+                (f"{bench} quote from {q.provider} ({q.feed or 'unknown feed'}), {q.price_source}, {q.age_seconds:,.0f}s old"
                  if q is not None else f"no live quote for {bench}")
                 + ("; refused feeds: " + ", ".join(str(f.get("stock_feed")) for f in refused) if refused else ""),
             )  # fmt: skip

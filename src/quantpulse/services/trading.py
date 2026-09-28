@@ -1198,7 +1198,9 @@ class TradingService:
                     provider=q.provider,
                     feed=q.feed,
                     price=q.price,
-                    trade_age_seconds=q.age_seconds,
+                    price_source=q.price_source,
+                    price_age_seconds=q.age_seconds,
+                    trade_age_seconds=q.trade_age_seconds,
                     bid=q.bid,
                     ask=q.ask,
                     quote_age_seconds=q.quote_age_seconds,
@@ -1274,12 +1276,28 @@ class TradingService:
             if q is None:
                 checks.append(RiskCheck("live_data", False, f"no live quote for {symbol}"))
             elif q.age_seconds > L.max_quote_age_seconds:
-                checks.append(RiskCheck("live_data", False, f"quote is {q.age_seconds:.0f}s old"))
+                when = q.timestamp.astimezone(NEW_YORK)
+                checks.append(
+                    RiskCheck(
+                        "live_data",
+                        False,
+                        f"quote is {q.age_seconds:.0f}s old (limit {L.max_quote_age_seconds:.0f}s): the "
+                        f"{q.price_source} is from {when:%a %H:%M:%S} New York"
+                        + (
+                            " — the market is closed, so no live price exists; run the test during the "
+                            "regular session"
+                            if not is_open
+                            else ""
+                        ),
+                    )
+                )
             else:
                 price = q.price
                 checks.append(
                     RiskCheck(
-                        "live_data", True, f"${q.price:,.2f} from {q.provider}, {q.age_seconds:.0f}s old"
+                        "live_data",
+                        True,
+                        f"${q.price:,.2f}: {q.price_source}, {q.age_seconds:.0f}s old",
                     )
                 )
             qty: float | None = None
@@ -2105,6 +2123,7 @@ class TradingService:
                 spread_source=qq.spread_source,
                 quote_problems=qq.problems,
                 entry_blocks=qq.entry_blocks,
+                source=q.price_source,
             )
             live[sym] = q
         trades = [_repriced(t, quotes[t.symbol].price) if t.symbol in quotes else t for t in trades]
@@ -2325,7 +2344,7 @@ class TradingService:
                 blocks.append(f"spread cannot be measured ({why})")
             blocks.extend(qq.entry_blocks)
             if q.age_seconds > s.trading_max_quote_age_seconds:
-                blocks.append(f"quote {q.age_seconds:.0f}s old")
+                blocks.append(f"quote {q.age_seconds:.0f}s old ({q.price_source})")
             if symbol in inputs.earnings:
                 when, source = inputs.earnings[symbol]
                 if 0 <= (when - today).days <= s.trading_earnings_blackout_days:
@@ -2365,6 +2384,7 @@ class TradingService:
                 spread_source=qq.spread_source,
                 quote_problems=qq.problems,
                 entry_blocks=qq.entry_blocks,
+                source=q.price_source,
             )
         return out
 
@@ -2392,6 +2412,7 @@ class TradingService:
                     qq.spread_source,
                     qq.problems,
                     qq.entry_blocks,
+                    q.price_source,
                 )
             elif p.current_price > 0:
                 out[sym] = QuoteCheck(

@@ -425,7 +425,13 @@ class QuoteDiagnosticOut(StrictModel):
     provider: str
     feed: str | None
     price: float
-    trade_age_seconds: float
+    price_source: str = Field(
+        "", description="What the price and its age come from (the last trade, or a fresher tight bid/ask)"
+    )
+    price_age_seconds: float | None = Field(
+        None, description="Age of the price: what the live-data check uses"
+    )
+    trade_age_seconds: float | None = Field(None, description="Age of the last trade on the feed")
     bid: float | None
     ask: float | None
     quote_age_seconds: float | None

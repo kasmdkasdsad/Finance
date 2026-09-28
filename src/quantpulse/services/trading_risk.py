@@ -88,6 +88,7 @@ class QuoteCheck:
     spread_source: str | None = None  # e.g. "SIP", "IEX only"
     quote_problems: tuple[str, ...] = ()  # why parts of the quote were not believed
     entry_blocks: tuple[str, ...] = ()  # price inconsistencies that forbid new buying
+    source: str | None = None  # what the price and its age come from, e.g. "last IEX trade (alpaca)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +216,8 @@ class RiskBook:
             check(
                 "live_data",
                 False,
-                f"quote is {q.age_seconds:.0f}s old (limit {L.max_quote_age_seconds:.0f}s)",
+                f"quote is {q.age_seconds:.0f}s old (limit {L.max_quote_age_seconds:.0f}s"
+                + (f"; {q.source})" if q.source else ")"),
             )
         else:
             age = f", {q.age_seconds:.0f}s old" if q.age_seconds is not None else ""

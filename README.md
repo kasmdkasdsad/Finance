@@ -1209,8 +1209,8 @@ kept with the cycle:
 
 | Status | Meaning | Executable |
 |---|---|---|
-| `fresh` · `live` | A real-time print within `QP_BRAIN_FRESH_QUOTE_SECONDS` / `QP_TRADING_MAX_QUOTE_AGE_SECONDS` | yes |
-| `stale` | The market is open but the feed's last print is older than the limit | no |
+| `fresh` · `live` | A real-time price (a print, or a tight live bid/ask — see below) within `QP_BRAIN_FRESH_QUOTE_SECONDS` / `QP_TRADING_MAX_QUOTE_AGE_SECONDS` | yes |
+| `stale` | The market is open but the price's freshest reliable observation is older than the limit | no |
 | `no_trade_today` | The feed has not printed the symbol since the open: the price is the previous session's | no |
 | `delayed` | The price feed itself is 15 minutes delayed | no |
 | `missing` · `provider_error` · `subscription_unavailable` | No quote; the request failed; the vendor refused the feed for this subscription | no |
@@ -1227,10 +1227,29 @@ is more than 30 s off.
 
 What was found while investigating stale quotes:
 
-* **IEX is one exchange.** On the free plan, prices come from IEX, which carries a few percent of US
-  volume. Its last trade in a mid-cap stock can be minutes old while the stock trades elsewhere. Those
-  prices are treated as stale by design. The fix is real-time SIP data (`QP_ALPACA_STOCK_FEED=sip` with a
-  subscription that includes it), not a longer `QP_TRADING_MAX_QUOTE_AGE_SECONDS`.
+* **The age measured the wrong thing** (the `live_data: quote is 5886s old` refusals). A price's age was
+  the age of the feed's last *trade* only. On the free plan that is IEX's last trade — one exchange with a
+  few percent of US volume — so it can be an hour old while IEX's own book quotes the stock every second.
+  A price is now as fresh as its most recent **reliable** real-time observation: the last trade, or the
+  midpoint of IEX's bid/ask when that is newer, two-sided, not crossed, stamped by the vendor (never in the
+  future) and no wider than `QP_TRADING_MAX_SPREAD_BPS` (30 bp) — a wider book is never a price. The
+  quote-age limit (`QP_TRADING_MAX_QUOTE_AGE_SECONDS`, 600 s) and `QP_TRADING_REQUIRE_LIVE_DATA` are
+  unchanged and apply to that observation. A fresh book far (more than 3%) from a *recent* print is still
+  not believed, so its spread cannot be measured and nothing is bought on it. Every refusal now says what
+  was measured and from where ("the last IEX trade (alpaca) is from Fri 08:21:54 New York", "IEX bid/ask
+  midpoint (alpaca), 2s old"); the diagnostics' quote table shows the price's source and age beside the
+  trade's and the bid/ask's.
+* **Trading asked a possibly delayed vendor first.** `QP_MARKET_PROVIDERS` defaults to `polygon, alpaca,
+  yahoo`, and trading prices followed that order: with a Polygon key on a 15-minute-delayed plan every
+  price was at least 900 s old. Trading (the strategy, the Brain, the test order, the monitor) now asks the
+  broker's own feed first — Alpaca, in `QP_ALPACA_STOCK_FEED` — and only then the others; the other pages
+  keep your order.
+* **Outside the session there is no live price.** A test order sent while the market is closed is refused
+  with "the market is closed, so no live price exists; run the test during the regular session" instead
+  of an unexplained age.
+* **IEX is still one exchange.** A symbol whose IEX book is quiet or wider than 30 bp is still refused for
+  new buys. Real-time SIP data (`QP_ALPACA_STOCK_FEED=sip` with a subscription that includes it) gives the
+  whole market's trades and quotes; a longer quote-age limit is never the fix.
 * **Two data-layer bugs were fixed.** Alpaca and Polygon snapshots that carried a price but no timestamp
   used to be stamped with the current time, so a price of unknown age looked brand new. They are now
   dropped (Alpaca falls back to the daily bar's own time).

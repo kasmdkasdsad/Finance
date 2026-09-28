@@ -60,7 +60,10 @@ class TrendFeed:
         self.drifts = dict(drifts or DRIFTS)
         self.live_move: dict[str, float] = {}  # today's move vs the last close, per symbol
         self.quotes_enabled = True
-        self.quote_age = timedelta(seconds=5)
+        self.quote_age = timedelta(seconds=5)  # of the last trade
+        self.bidask_age: timedelta | None = None  # of the bid/ask (None: the vendor gives no bid/ask time)
+        self.half_spread = 0.0002  # bid/ask this far either side of the price (0.0002: a 4bp spread)
+        self.feed: str | None = None
         today = clock.now().astimezone(NEW_YORK).date()
         self.days = sessions_before(today, sessions)
         rng = np.random.default_rng(seed)
@@ -109,14 +112,16 @@ class TrendFeed:
             symbol=symbol,
             price=price,
             previous_close=self.last_close(symbol),
-            bid=price * 0.9998,
-            ask=price * 1.0002,
+            bid=price * (1 - self.half_spread),
+            ask=price * (1 + self.half_spread),
             volume=1_500_000,
             vwap=price * 0.999,
             day_open=self.last_close(symbol),
             day_high=price * 1.002,
             day_low=min(price, self.last_close(symbol)) * 0.998,
             timestamp=self.clock.now() - self.quote_age,
+            quote_timestamp=self.clock.now() - self.bidask_age if self.bidask_age is not None else None,
+            feed=self.feed,
         )
 
     async def quote(self, symbol: str) -> Quote:

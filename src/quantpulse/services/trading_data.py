@@ -6,6 +6,12 @@
   holdings are always included.
 * **Prices** — daily bars from the warehouse-first universe panel (only missing sessions are downloaded),
   plus today's live snapshot (price, volume, VWAP, bid/ask) for every candidate.
+* **Freshness** — a price is as fresh as its most recent reliable real-time observation: the last trade,
+  or the midpoint of a two-sided, uncrossed bid/ask no wider than ``QP_TRADING_MAX_SPREAD_BPS``, whichever
+  is newer (:func:`_live_quote`). On Alpaca's IEX feed the last *trade* is IEX's alone — one exchange with
+  a few percent of US volume — so it can be many minutes old while IEX's own book is quoting the stock
+  second by second; measuring only the print called live prices stale. The age limit is unchanged and
+  applies to that observation; a quote wider than the spread limit is never a price.
 * **Quote quality** — every quote is checked before its spread is believed (:func:`assess_quote`): a
   one-sided, crossed, stale or off-market bid/ask is not a spread. Alpaca's free IEX feed is a single
   exchange whose book can be far wider than the market, so the consolidated (SIP) quote is used for the
@@ -63,6 +69,9 @@ FEED_LABELS = {"iex": "IEX", "sip": "SIP", "delayed_sip": "SIP (15-min delayed)"
 # A timestamp this far ahead of our clock is not a fresh quote: its age cannot be known (bad data or a
 # wrong system clock). It is never read as "0 seconds old".
 FUTURE_TOLERANCE_SECONDS = 5.0
+# Trading prices come from the broker's own market data first (Alpaca, in QP_ALPACA_STOCK_FEED), whatever
+# order QP_MARKET_PROVIDERS gives the other pages: a vendor first in that list may be on a delayed plan.
+TRADING_QUOTE_VENDORS = ("alpaca",)
 Progress = Callable[[float, str], None]
 
 
@@ -88,9 +97,9 @@ class LiveQuote:
     day_high: float | None
     day_low: float | None
     day_open: float | None
-    timestamp: datetime  # of the last trade (the price)
+    timestamp: datetime  # of the price (the last trade, or the bid/ask it was taken from)
     provider: str
-    age_seconds: float  # of the last trade
+    age_seconds: float  # of the price: its freshest reliable real-time observation
     quote_time: datetime | None = None  # of the bid/ask
     feed: str | None = None  # vendor feed: "iex" is one exchange, "sip" all of them
     previous_close: float | None = None  # the vendor's previous session close
@@ -101,10 +110,27 @@ class LiveQuote:
     nbbo_time: datetime | None = None
     nbbo_feed: str | None = None
     history_close: float | None = None  # the last completed close in QuantPulse's price history
+    price_basis: str = "trade"  # "trade": the last print; "quote": the midpoint of a fresher, tight bid/ask
+    trade_price: float | None = None  # the last print, whatever the price basis
+    trade_time: datetime | None = None
 
     @property
     def venue(self) -> str:
         return FEED_LABELS.get(self.feed or "", self.provider)
+
+    @property
+    def price_source(self) -> str:
+        """Where the price (and its age) come from, in words."""
+        if self.price_basis == "quote":
+            return f"{self.venue} bid/ask midpoint ({self.provider})"
+        return f"last {self.venue} trade ({self.provider})"
+
+    @property
+    def trade_age_seconds(self) -> float | None:
+        stamp = self.trade_time or (self.timestamp if self.price_basis == "trade" else None)
+        if stamp is None or self.as_of is None:
+            return None
+        return max((self.as_of - stamp).total_seconds(), 0.0)
 
     def ahead_seconds(self, stamp: datetime | None) -> float:
         """How far ``stamp`` is ahead of the time this quote was read (0 when not ahead or unknown)."""
@@ -162,6 +188,16 @@ class QuoteQuality:
         return not any(p.startswith("primary:") for p in self.problems)
 
 
+def _print_reference(q: LiveQuote, max_age_seconds: float) -> float | None:
+    """The trade a bid/ask midpoint must agree with: the price itself when it is the last print; when the
+    price is a fresher bid/ask, the last print only if it is itself recent (an old print says nothing about
+    where the market is now)."""
+    if q.price_basis != "quote":
+        return q.price
+    age = q.trade_age_seconds
+    return q.trade_price if q.trade_price and age is not None and age <= max_age_seconds else None
+
+
 def assess_quote(q: LiveQuote, max_age_seconds: float) -> QuoteQuality:
     """Validate a quote before its spread is used: one-sided, crossed, stale or off-market bid/asks are
     discarded (never read as a spread), the consolidated quote is preferred over a single exchange, and
@@ -171,7 +207,7 @@ def assess_quote(q: LiveQuote, max_age_seconds: float) -> QuoteQuality:
 
     venue: float | None = None
     label = q.venue
-    trade_ahead = q.ahead_seconds(q.timestamp)
+    trade_ahead = q.ahead_seconds(q.trade_time or q.timestamp)
     if trade_ahead > FUTURE_TOLERANCE_SECONDS:
         blocks.append(
             f"last trade is stamped {trade_ahead:,.0f}s in the future: its age cannot be known "
@@ -189,10 +225,12 @@ def assess_quote(q: LiveQuote, max_age_seconds: float) -> QuoteQuality:
         problems.append(
             f"primary: {label} bid/ask is {q.quote_age_seconds:,.0f}s old (limit {max_age_seconds:,.0f}s)"
         )
-    elif abs(0.5 * (q.bid + q.ask) / q.price - 1) > OFF_MARKET_PCT:
-        off = 0.5 * (q.bid + q.ask) / q.price - 1
+    elif (ref := _print_reference(q, max_age_seconds)) is not None and abs(
+        0.5 * (q.bid + q.ask) / ref - 1
+    ) > OFF_MARKET_PCT:
+        off = 0.5 * (q.bid + q.ask) / ref - 1
         problems.append(
-            f"primary: {label} bid/ask midpoint is {off:+.1%} from the last trade ${q.price:,.2f}: not the market"
+            f"primary: {label} bid/ask midpoint is {off:+.1%} from the last trade ${ref:,.2f}: not the market"
         )
     else:
         venue = q.venue_spread_bps
@@ -494,10 +532,17 @@ class TradingDataLoader:
     ) -> tuple[dict[str, LiveQuote], dict[str, str]]:
         if not symbols:
             return {}, {}
-        got = await self._market.live_quotes(symbols)
+        got = await self._market.live_quotes(symbols, prefer=TRADING_QUOTE_VENDORS)
         now = self._clock.now()
         out = {
-            sym: _live_quote(sym, q, got.providers.get(sym, "?"), now, (history_close or {}).get(sym))
+            sym: _live_quote(
+                sym,
+                q,
+                got.providers.get(sym, "?"),
+                now,
+                (history_close or {}).get(sym),
+                max_spread_bps=self._s.trading_max_spread_bps,
+            )
             for sym, q in got.quotes.items()
         }
         need = [sym for sym, q in out.items() if q.feed != "sip"] if consolidated else []
@@ -533,12 +578,40 @@ class TradingDataLoader:
         return float(last.close)
 
 
+def reliable_midpoint(q: Quote, now: datetime, max_spread_bps: float) -> tuple[float, datetime] | None:
+    """The midpoint of ``q``'s bid/ask and its time, when the bid/ask can stand for the price: two-sided,
+    not crossed, no wider than ``max_spread_bps``, and stamped by the vendor (never in the future)."""
+    stamp = q.quote_timestamp
+    if stamp is None or not q.bid or not q.ask or not q.ask >= q.bid > 0:
+        return None
+    if (stamp - now).total_seconds() > FUTURE_TOLERANCE_SECONDS:
+        return None
+    spread = spread_of(q.bid, q.ask)
+    if spread is None or spread > max_spread_bps:
+        return None
+    return 0.5 * (q.bid + q.ask), stamp
+
+
 def _live_quote(
-    symbol: str, q: Quote, provider: str, now: datetime, history_close: float | None = None
+    symbol: str,
+    q: Quote,
+    provider: str,
+    now: datetime,
+    history_close: float | None = None,
+    *,
+    max_spread_bps: float | None = None,
 ) -> LiveQuote:
+    """A vendor quote as a trading price. The price and its age come from the most recent reliable
+    real-time observation: the last trade, or — when it is newer — the midpoint of a tight, two-sided bid/ask
+    (see :func:`reliable_midpoint`). ``max_spread_bps=None`` uses the last trade only."""
+    price, stamp, basis = q.price, q.timestamp, "trade"
+    if max_spread_bps is not None:
+        mid = reliable_midpoint(q, now, max_spread_bps)
+        if mid is not None and mid[1] > q.timestamp:
+            price, stamp, basis = mid[0], mid[1], "quote"
     return LiveQuote(
         symbol=symbol,
-        price=q.price,
+        price=price,
         bid=q.bid,
         ask=q.ask,
         vwap=q.vwap,
@@ -546,12 +619,15 @@ def _live_quote(
         day_high=q.day_high,
         day_low=q.day_low,
         day_open=q.day_open,
-        timestamp=q.timestamp,
+        timestamp=stamp,
         provider=provider,
-        age_seconds=max((now - q.timestamp).total_seconds(), 0.0),
+        age_seconds=max((now - stamp).total_seconds(), 0.0),
         quote_time=q.quote_timestamp,
         feed=q.feed,
         previous_close=q.previous_close,
         as_of=now,
         history_close=history_close,
+        price_basis=basis,
+        trade_price=q.price,
+        trade_time=q.timestamp,
     )

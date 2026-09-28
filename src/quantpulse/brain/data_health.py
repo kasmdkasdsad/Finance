@@ -106,6 +106,8 @@ class QuoteDiagnosis:
     coverage: str = "none"
     trade_age_s: float | None = None
     quote_age_s: float | None = None
+    price_age_s: float | None = None  # what the live-data check measures (the freshest reliable observation)
+    price_source: str | None = None
     consolidated: str | None = None  # what the spread could be checked against beyond the primary feed
     spread_bps: float | None = None
     spread_source: str = "unavailable"
@@ -123,6 +125,8 @@ class QuoteDiagnosis:
             "feed": self.feed,
             "coverage": self.coverage,
             "trade_age_s": None if self.trade_age_s is None else round(self.trade_age_s, 1),
+            "price_age_s": None if self.price_age_s is None else round(self.price_age_s, 1),
+            "price_source": self.price_source,
             "quote_age_s": None if self.quote_age_s is None else round(self.quote_age_s, 1),
             "consolidated": self.consolidated,
             "spread_bps": None if self.spread_bps is None else round(self.spread_bps, 1),
@@ -150,8 +154,10 @@ def diagnose(
     if quote is not None:
         d.feed = quote.feed
         d.coverage = COVERAGE.get(quote.feed or "", quote.provider)
-        d.trade_age_s = quote.age_seconds
+        d.trade_age_s = quote.trade_age_seconds
         d.quote_age_s = quote.quote_age_seconds
+        d.price_age_s = quote.age_seconds
+        d.price_source = quote.price_source
         if quote.nbbo_feed:
             age = quote.nbbo_age_seconds
             d.consolidated = FEED_LABELS.get(quote.nbbo_feed, quote.nbbo_feed) + (
@@ -168,7 +174,11 @@ def diagnose(
         return d
     if not market_open:
         d.status = QuoteStatus.HOLIDAY if closed == "holiday" else QuoteStatus.MARKET_CLOSED
-        when = f"; last print {quote.timestamp.astimezone(NEW_YORK):%a %H:%M} New York" if quote else ""
+        when = (
+            f"; last print {(quote.trade_time or quote.timestamp).astimezone(NEW_YORK):%a %H:%M} New York"
+            if quote
+            else ""
+        )
         d.reasons.insert(0, f"market closed ({closed or 'outside the regular session'}){when}")
         return d
     if quote is None:
@@ -182,7 +192,7 @@ def diagnose(
         d.reasons.insert(0, reason)
         return d
 
-    ahead = quote.ahead_seconds(quote.timestamp)
+    ahead = quote.ahead_seconds(quote.trade_time or quote.timestamp)
     if ahead > FUTURE_TOLERANCE_SECONDS:
         d.status = QuoteStatus.INVALID_TIMESTAMP
         d.trade_age_s = None
@@ -194,7 +204,7 @@ def diagnose(
         return d
     local = quote.timestamp.astimezone(NEW_YORK)
     today = (quote.as_of or quote.timestamp).astimezone(NEW_YORK).date()
-    if local.date() < today or local.time() < REGULAR_OPEN:
+    if quote.price_basis == "trade" and (local.date() < today or local.time() < REGULAR_OPEN):
         d.status = QuoteStatus.NO_TRADE_TODAY
         d.reasons.insert(
             0,
@@ -207,9 +217,13 @@ def diagnose(
         age = max(age, quote.quote_age_seconds)  # a believed bid/ask older than the print counts too
     if age > max_age_seconds:
         d.status = QuoteStatus.STALE
-        d.reasons.insert(0, f"last print {age:,.0f}s old (limit {max_age_seconds:,.0f}s)")
+        d.reasons.insert(0, f"{quote.price_source} {age:,.0f}s old (limit {max_age_seconds:,.0f}s)")
     else:
         d.status = QuoteStatus.FRESH if age <= fresh_seconds else QuoteStatus.LIVE
+        if quote.price_basis == "quote" and d.trade_age_s is not None:
+            d.reasons.append(
+                f"priced from {quote.venue}'s live bid/ask: no {quote.venue} print for {d.trade_age_s:,.0f}s"
+            )
     if quote.feed == "iex" and d.status is not QuoteStatus.FRESH and not quote.nbbo_feed:
         d.reasons.append("IEX alone: a quiet IEX book says little about the whole market")
     return d
