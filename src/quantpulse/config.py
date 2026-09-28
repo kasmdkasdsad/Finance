@@ -528,6 +528,13 @@ class Settings(BaseSettings):
         "its approved decisions go to the trading service). Can be paused at runtime.",
     )
     brain_cycle_minutes: int = Field(default=30, ge=5, le=390, description="Full cycles in the session.")
+    brain_lease_seconds: int = Field(
+        default=180,
+        ge=30,
+        le=3600,
+        description="The single-supervisor lease: at most one process supervises the Brain and sends orders; "
+        "if it stops renewing (a crash), another may take over only after this many seconds.",
+    )
     brain_monitor_minutes: int = Field(
         default=5, ge=1, le=120, description="Quote monitor for holdings and the last focus in the session."
     )

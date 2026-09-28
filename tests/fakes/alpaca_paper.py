@@ -46,6 +46,7 @@ class FakeAlpacaPaper(BaseAdapter):
         self.auth_headers_seen: list[bool] = []
         self.blocked = False
         self.fail_status: int | None = None  # next request answers this HTTP status
+        self.outage = False  # every request fails as if the network (or Alpaca) were down
         self.buying_power_override: float | None = None  # e.g. a margin account's buying power
         self.bodies: list[dict[str, Any]] = []  # JSON body of every POST /v2/orders, as the SDK sent it
 
@@ -279,6 +280,8 @@ class FakeAlpacaPaper(BaseAdapter):
         self.auth_headers_seen.append(
             bool(request.headers.get("APCA-API-KEY-ID")) and bool(request.headers.get("APCA-API-SECRET-KEY"))
         )
+        if self.outage:
+            raise requests.exceptions.ConnectionError("simulated network interruption: Alpaca unreachable")
         if self.fail_status is not None:
             status, self.fail_status = self.fail_status, None
             return self._error(request, status, 50010000, "internal server error")

@@ -1244,3 +1244,16 @@ class BrainReviewRow(Base):
     lessons: Mapped[list[Any]] = mapped_column(JSON, default=list)
     proposals: Mapped[list[Any]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class ServiceLeaseRow(Base):
+    """A lease that at most one process holds at a time (the Brain supervisor and its order submission):
+    who holds it, since when, when it was last renewed and when it lapses if it is not renewed."""
+
+    __tablename__ = "service_leases"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(128))
+    acquired_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())

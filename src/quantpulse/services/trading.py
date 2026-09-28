@@ -106,6 +106,7 @@ from quantpulse.schemas.trading import (
     TradingRegimeOut,
     TradingStatus,
 )
+from quantpulse.services.lease import Lease
 from quantpulse.services.order_manager import (
     AT_ALPACA,
     BRAIN,
@@ -248,11 +249,13 @@ class TradingService:
         broker: AlpacaPaperBroker,
         data: TradingDataLoader,
         jobs: JobRegistry,
+        lease: Lease | None = None,
     ) -> None:
         self._s = settings
         self._db = db
         self._clock = clock
         self.broker = broker
+        self.lease = lease  # the single-process lease: only its holder sends orders
         self._data = data
         self._jobs = jobs
         self.orders = OrderManager(
@@ -401,6 +404,11 @@ class TradingService:
             kill = await self.kill_switch()
             if kill.active:
                 out.append(f"kill switch ON ({kill.reason or kill.source})")
+        if self.lease is not None and not flatten and not await self.lease.acquire():
+            info = await self.lease.info()
+            out.append(
+                f"another QuantPulse process holds the order lease ({info.get('holder')}): this one sends nothing"
+            )
         if owner == "brain":
             if not s.brain_owns_account:
                 out.append(f"QP_BRAIN_MODE={s.brain_mode}: the Brain does not manage the account")

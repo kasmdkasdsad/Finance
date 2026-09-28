@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING, Any
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
-from quantpulse.core.market_calendar import NEW_YORK, is_market_open, regular_close
+from quantpulse.core.market_calendar import NEW_YORK, is_market_open, next_open, regular_close
 
 from .context import brain_session
 from .events import Event, EventBus, EventType, TradingEventBridge
@@ -70,6 +70,9 @@ PREMARKET_FROM = time(8, 30)
 AFTER_HOURS_FROM = time(16, 40)
 NEAR_CLOSE_MINUTES = 30  # the near-close review: overnight risk, hold or reduce, the day's decision state
 STATE_KEY = "supervisor"
+# startup checks that must pass before supervision resumes after a start (see _recover)
+RESUME_REQUIRED = ("paper_setting", "paper_endpoint", "paper_key", "environment", "account", "reconciliation",
+                   "clock_skew")  # fmt: skip
 RECONCILE_EVERY = timedelta(minutes=5)
 
 SYMBOL_EVENTS = {
@@ -108,6 +111,10 @@ class Supervisor:
         self.log: deque[dict[str, Any]] = deque(maxlen=200)
         self._booted_at = clock.now()
         self._recovered = False
+        self.waiting: str | None = None  # why supervision has not resumed after a start
+        self.standby: str | None = None  # another process holds the supervisor lease
+        self.last_tick_at: datetime | None = None
+        self.last_result: str | None = None
         self._tick_lock = asyncio.Lock()  # a duplicate or overlapping tick never runs the same work twice
         bus.subscribe([*SYMBOL_EVENTS, *PORTFOLIO_EVENTS, EventType.MARKET_REGIME_CHANGED], self._on_event)
 
@@ -149,7 +156,28 @@ class Supervisor:
                 "max_event_cycles_per_hour": self._s.brain_max_event_cycles_per_hour,
             },
             "recent": list(self.log)[-20:],
+            "recovered": self._recovered,
+            "waiting": self.waiting,
+            "standby": self.standby,
+            "last_tick_at": self.last_tick_at.isoformat() if self.last_tick_at else None,
+            "last_result": self.last_result,
+            "next_cycle_at": self.next_cycle_at(state).isoformat(),
+            "lease": await self._brain.trading.lease.info()
+            if self._brain.trading.lease is not None
+            else None,
         }
+
+    def next_cycle_at(self, state: dict[str, Any]) -> datetime:
+        """When the next scheduled full cycle is due: in the session, the last one plus the interval;
+        otherwise the next open."""
+        now = self._clock.now()
+        if is_market_open(now):
+            last = (state.get("last") or {}).get("cycle")
+            if last:
+                due = datetime.fromisoformat(last) + timedelta(minutes=self._s.brain_cycle_minutes)
+                return max(due, now)
+            return now
+        return next_open(now)
 
     # ------------------------------------------------------------------ events → wake-ups
     async def _on_event(self, e: Event) -> None:
@@ -170,7 +198,18 @@ class Supervisor:
         if self._tick_lock.locked():
             return "busy: the previous tick is still running"
         async with self._tick_lock:
-            return await self._tick()
+            lease = self._brain.trading.lease
+            if lease is not None:  # one supervisor at a time, across every process on this database
+                if not await lease.acquire():
+                    info = await lease.info()
+                    self.standby = f"another process supervises the Brain ({info.get('holder')})"
+                    return f"standby: {self.standby}"
+                self.standby = None
+                lease.start_heartbeat()
+            self.last_tick_at = self._clock.now()
+            result = await self._tick()
+            self.last_result = result
+            return result
 
     async def _tick(self) -> str:
         state = await self._state()
@@ -202,11 +241,15 @@ class Supervisor:
                 )
             last[task] = now.isoformat()
 
-        if (
-            not self._recovered
-        ):  # retried every tick until it works (every Brain execution reconciles first too)
+        if not self._recovered:  # after a start: nothing else until recovery and its safety checks pass
             await run("startup_recovery", self._recover())
             self._recovered = "startup_recovery" in done
+            if not self._recovered:
+                state["last"] = last
+                await self._save(state)
+                self.waiting = self.log[-1].get("error") if self.log else "startup recovery failed"
+                return f"waiting: startup recovery has not passed ({self.waiting}); no cycles, no orders"
+            self.waiting = None
 
         trading_events = await self._bridge.poll()
         if trading_events:
@@ -292,6 +335,15 @@ class Supervisor:
                 positions=report.positions,
                 audit="passed" if audit["ok"] else "failed: " + "; ".join(audit["failed"])[:200],
             )
+            # supervision resumes only if the account is the paper account, reachable, reconciled, the
+            # environment is the one configured and the clock can be trusted (a kill switch or a disabled
+            # trading switch does not stop the analysis — the order gates keep enforcing those)
+            unsafe = [c for c in audit["checks"] if c["name"] in RESUME_REQUIRED and not c["ok"]]
+            if unsafe:
+                raise RuntimeError(
+                    "startup safety checks failed: "
+                    + "; ".join(f"{c['name']}: {c['detail']}" for c in unsafe)[:400]
+                )
         return out
 
     async def _reconcile(self, trigger: str) -> dict[str, Any]:

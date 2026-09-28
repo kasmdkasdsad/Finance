@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -35,6 +36,7 @@ from quantpulse.services.backfill import BackfillService
 from quantpulse.services.facts import FactsService
 from quantpulse.services.forecast import ForecastService
 from quantpulse.services.fundamentals import FundamentalsService
+from quantpulse.services.lease import Lease
 from quantpulse.services.market import MarketService
 from quantpulse.services.model import ModelService
 from quantpulse.services.notifications import EmailNotifier
@@ -186,6 +188,8 @@ class Container:
             _secret(settings.alpaca_api_secret_key),
             timeout=settings.http_timeout_seconds,
         )
+        # at most one process supervises the Brain and sends orders (a database lease)
+        self.lease = Lease(self.db, self.clock, ttl=timedelta(seconds=settings.brain_lease_seconds))
         self.trading = TradingService(
             settings,
             self.db,
@@ -193,6 +197,7 @@ class Container:
             self.broker,
             TradingDataLoader(settings, self.clock, self.market, self.model, self.options, self.reference),
             self.jobs,
+            lease=self.lease,
         )
         # The brain: specialist agents over a read-only view of the paper account. It proposes; the trading
         # service's deterministic risk engine is the only path to an order.
@@ -225,6 +230,10 @@ class Container:
 
     async def shutdown(self) -> None:
         await self.poller.stop()
+        try:  # hand the Brain over at once instead of after the lease lapses
+            await self.lease.release()
+        except Exception:  # the database may already be gone: the lease then lapses on its own
+            logger.warning("releasing the Brain lease at shutdown failed; it lapses by itself")
         await self.jobs.shutdown()
         await self.http.aclose()
         await self.db.dispose()

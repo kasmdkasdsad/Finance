@@ -263,7 +263,13 @@ async def test_a_failing_execution_audit_sends_nothing_and_arms_nothing(tmp_path
     async for api in brain_client(tmp_path, clock, **OWNS, **ENABLED):
         # only the audit sees the drift here, so it is the audit that must stop the orders
         monkeypatch.setattr(execution, "env_file_drift", lambda s: ["QP_TRADING_DRY_RUN: .env says true"])
-        await api.container.brain.supervisor.tick()
+        sup = api.container.brain.supervisor
+        # at start-up the environment check is a resume gate: supervision does not even begin
+        waiting = await sup.tick()
+        assert waiting.startswith("waiting: startup recovery has not passed") and "environment" in waiting
+        assert (await api.get(f"{API}/cycles")).json() == [] and posts(api.fake) == []
+        sup._recovered = True  # the drift appears after a clean start: the pre-trade audit is what stops it
+        await sup.tick()
         assert posts(api.fake) == []
         assert not (await api.get(f"{TRADING}/status")).json()["scheduler_armed"]
         audit = (await api.get(f"{API}/execution-audit")).json()["latest"]
