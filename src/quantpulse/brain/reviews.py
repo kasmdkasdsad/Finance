@@ -47,6 +47,7 @@ from quantpulse.db.session import Database
 
 from .audit import completeness
 from .behavior import monitor
+from .data_blockage import report as blockage_report
 from .improvement import ImprovementEngine, _p
 from .learning_report import build as learning_report
 from .memory import LONG_TERM, MemoryStore
@@ -175,6 +176,7 @@ class Reviewer:
         sent = [d for d in decisions if (d.execution or {}).get("sent")]
         behaviour = await monitor(self._db, self._s, now)
         traces = await completeness(self._db, limit=100)
+        blockage = await blockage_report(self._db, self._s, start, end)
         shadow = ((session.close or {}).get("strategy_shadow") or {}).get("day_return") if session else None
         body: dict[str, Any] = {
             "day": {
@@ -241,6 +243,15 @@ class Reviewer:
                 ),
             },
             "behaviour": [f for f in behaviour["findings"] if f["severity"] != "info"],
+            "data": {
+                "headline": blockage["headline"],
+                "blocked_cycles": blockage["blocked_cycles"],
+                "categories": {
+                    k: {x: v[x] for x in ("symbol_cycles", "behind_halts", "decisions_stopped")}
+                    for k, v in blockage["categories"].items()
+                },
+                "episodes": blockage["episodes"],
+            },
             "traceability": {k: traces[k] for k in ("trades", "with_gaps", "gaps_by_stage", "headline")},
         }
         lessons = self._daily_lessons(body, reflections, closed, executions)
@@ -277,9 +288,12 @@ class Reviewer:
             out.append(_lesson("execution", f"{len(poor)} of {len(executions)} fill(s) cost well beyond half the spread",
                                len(executions), symbols=sorted({e.symbol for e in poor})))  # fmt: skip
         d = body["day"]
-        if d["data_blocked_cycles"] and d["cycles"] and d["data_blocked_cycles"] * 2 >= d["cycles"]:
-            out.append(_lesson("data", f"market data blocked new positions in {d['data_blocked_cycles']} of "
-                               f"{d['cycles']} cycles", d["cycles"]))  # fmt: skip
+        blocked = body["data"]["blocked_cycles"]
+        if blocked and d["cycles"] and blocked * 2 >= d["cycles"]:
+            top = max(body["data"]["categories"].items(), key=lambda kv: kv[1]["behind_halts"], default=None)
+            out.append(_lesson("data", f"market data blocked new positions in {blocked} of {d['cycles']} cycles"
+                               + (f", mostly {top[0].replace('_', ' ')}" if top and top[1]["behind_halts"] else ""),
+                               d["cycles"]))  # fmt: skip
         if d["failed_cycles"]:
             out.append(_lesson("operations", f"{d['failed_cycles']} cycle(s) failed", d["cycles"]))
         for f in body["behaviour"]:

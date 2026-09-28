@@ -23,6 +23,7 @@ from quantpulse.core.market_calendar import NEW_YORK
 from quantpulse.db.models import BrainCycleRow, BrainDecisionRow, BrainOpinionRow, BrainOpportunityRow
 from quantpulse.db.session import Database
 
+from .data_blockage import report as blockage_report
 from .execution import DATA_BLOCKED
 
 TRADE_ACTIONS = ("buy", "increase", "reduce", "close", "sell", "de_risk", "rebalance")
@@ -129,8 +130,10 @@ async def data_report(db: Database, settings: Settings, since: datetime, now: da
     rejected_opps = [o for o in opportunities if o.status == "rejected_data"]
     agents = Counter(o.agent_id for o in stale_opinions)
     trade_decisions = len(decisions)
+    blockage = await blockage_report(db, settings, since, now)
     return {
         "window": {"since": since.isoformat(), "until": now.isoformat()},
+        "blockage": blockage,
         "headline": (
             f"{len(blocked)} of {len(session)} in-session cycles had new positions halted ({DATA_BLOCKED}); "
             f"{len(stopped)} of {trade_decisions} trade decisions were stopped by market data"

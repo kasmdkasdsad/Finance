@@ -222,6 +222,20 @@ async def trades(limit: int = Query(50, ge=1, le=500), c: Container = ContainerD
 
 
 @router.get(
+    "/data-blockage",
+    summary="When and why market data kept the Brain from trading: stale trade or quote, wide spread, missing "
+    "quote, provider failure, market closed, delayed vendor, insufficient coverage — by day, hour and episode",
+)
+async def data_blockage(days: int = Query(30, ge=1, le=365), c: Container = ContainerDep) -> dict[str, Any]:
+    from datetime import timedelta
+
+    from quantpulse.brain.data_blockage import report
+
+    now = c.clock.now()
+    return await report(c.brain.db, c.settings, now - timedelta(days=days), now)
+
+
+@router.get(
     "/checkpoints",
     summary="The 20/40/60-session evaluation: Brain vs benchmark vs the replaced strategy, P&L, drawdown, "
     "volatility, turnover, execution, calibration, decision quality, risk behaviour, agent reliability — never a verdict",

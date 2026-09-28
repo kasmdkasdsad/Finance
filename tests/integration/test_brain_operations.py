@@ -98,10 +98,33 @@ async def test_the_data_report_counts_what_stale_quotes_stopped(tmp_path, monkey
         assert report["how_often"]["by_day"] == [{"day": "2026-09-25", "cycles": 1, "data_blocked": 1}]
         assert "TRADING BLOCKED" in report["headline"]
         assert report["quote_age"]["statuses"].get("stale") and report["quote_age"]["limit_s"] == 600
+        blockage = report["blockage"]  # exactly what kind of data problem, and when
+        assert blockage["blocked_cycles"] == 1 and len(blockage["episodes"]) == 1
+        cats = blockage["categories"]
+        assert cats["stale_trade"]["symbol_cycles"] > 0 and cats["stale_trade"]["behind_halts"] == 1
+        assert cats["insufficient_coverage"]["behind_halts"] == 1 and "SIP" in cats["stale_trade"]["remedy"]
+        assert blockage["by_hour"] == {"10:00": blockage["episodes"][0]["causes"]}
+        assert "never solved by a looser" in blockage["principle"]
+        direct = (await api.get(f"{API}/data-blockage")).json()
+        assert direct["blocked_cycles"] == 1 and direct["categories"].keys() == cats.keys()
         sip = report["sip"]
         assert sip["configured_feed"] == "iex" and "QP_ALPACA_STOCK_FEED=sip" in sip["decision"]
         assert "never buys it" in sip["cost"] and "not a forecast of returns" in sip["expected_benefit"]
         assert posts(api.fake) == []  # nothing is bought on stale data
+
+
+async def test_a_wide_spread_is_named_as_such_not_as_stale_data(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    feed = TrendFeed(clock, drifts=WIDE)
+    feed.half_spread = 0.004  # an 80bp book everywhere (the limit is 30bp): fresh prices, unusable spreads
+    async for api in brain_client(tmp_path, clock, feed=feed, **OWNS, **ENABLED):
+        await run_cycle(api)
+        blockage = (await api.get(f"{API}/data-blockage")).json()
+        cats = blockage["categories"]
+        assert cats["wide_spread"]["symbol_cycles"] > 0 and "stale_trade" not in cats
+        assert cats["wide_spread"]["decisions_stopped"] >= 1 or cats["wide_spread"]["behind_halts"] >= 1
+        assert posts(api.fake) == []  # nothing is bought across an 80bp spread
 
 
 async def test_the_pre_market_check_is_recorded_with_the_day(tmp_path):
