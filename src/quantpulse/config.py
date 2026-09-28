@@ -146,14 +146,29 @@ class Settings(BaseSettings):
 
     # --- Runtime -----------------------------------------------------------------------------
     environment: Literal["development", "production", "test"] = "development"
+    deployment: Literal["local", "cloud"] = Field(
+        default="local",
+        description="cloud: the 24/7 server. Start-up refuses to run unless the preflight passes (Alpaca PAPER "
+        "endpoint and key, API token, dashboard password, PostgreSQL, protected risk controls), and every "
+        "request needs the API token (no exemption for this machine).",
+    )
     log_level: str = "INFO"
     log_json: bool = False
+    log_dir: str | None = Field(
+        default=None,
+        description="Also write logs to <dir>/quantpulse.log (rotated at 10 MB, ten old files kept; secrets masked).",
+    )
     database_url: str = "sqlite+aiosqlite:///./data/quantpulse.db"
     auto_migrate: bool = True
     api_token: SecretStr | None = Field(
         default=None, description="If set, every /api request must send `X-API-Key: <token>`."
     )
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:8501", "http://127.0.0.1:8501"]
+    dashboard_password_hash: SecretStr | None = Field(
+        default=None,
+        description="PBKDF2 hash of the dashboard password (make it with quantpulse-hash-password); required "
+        "in the cloud.",
+    )
 
     # --- Live data switches ------------------------------------------------------------------
     enable_live_data: bool = Field(
@@ -649,6 +664,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "api_token",
+        "dashboard_password_hash",
         "polygon_api_key",
         "alpaca_api_key_id",
         "alpaca_api_secret_key",
@@ -664,6 +680,11 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("log_dir", mode="before")
+    @classmethod
+    def _blank_dir(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("alpaca_paper")
     @classmethod

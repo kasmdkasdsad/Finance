@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:  # allow `streamlit run frontend/app.py` from the repo root
     sys.path.insert(0, str(ROOT))
 
+from frontend import auth  # noqa: E402
 from frontend.api_client import ApiClient, ApiError  # noqa: E402
 from frontend.views import (  # noqa: E402
     brain,
@@ -46,15 +47,23 @@ def sidebar() -> None:
         # Always visible, on every page: QuantPulse only ever trades Alpaca's paper account.
         st.badge("PAPER TRADING · simulated money", icon=":material/science:", color="orange")
         st.caption("Alpaca paper account only: there is no live-money path.")
-        st.session_state.setdefault("api_url", ApiClient().base_url)
-        url = st.text_input("API URL", st.session_state["api_url"])
-        token = st.text_input(
-            "API token",
-            st.session_state.get("api_token", ""),
-            type="password",
-            help="Only if QP_API_TOKEN is set",
-        )
+        if auth.cloud():
+            # the server's own API, with the server's token: neither can be changed (or seen) from a browser,
+            # so the token can never be sent anywhere else
+            url, token = ApiClient().base_url, ""
+        else:
+            st.session_state.setdefault("api_url", ApiClient().base_url)
+            url = st.text_input("API URL", st.session_state["api_url"])
+            token = st.text_input(
+                "API token",
+                st.session_state.get("api_token", ""),
+                type="password",
+                help="Only if QP_API_TOKEN is set",
+            )
         st.session_state["api_url"], st.session_state["api_token"] = url.rstrip("/"), token
+        if auth.password_hash() and st.button("Sign out", icon=":material/logout:", key="qp_sign_out"):
+            auth.sign_out()
+            st.rerun()
         try:
             health = ApiClient(url, token or None, timeout=5).health()
             st.badge(f"API online · v{health['version']}", icon=":material/check_circle:", color="green")
@@ -71,6 +80,7 @@ def sidebar() -> None:
         )
 
 
+auth.require_login()  # nothing below renders (no page, no data, no control) before the password is verified
 sidebar()
 if ICON.is_file():
     st.logo(str(ICON), size="large")

@@ -8,3 +8,13 @@ data
 tests
 *.db
 .env
+.env.*
+deploy/.env
+deploy/*.env
+backups
+logs
+*.dump
+*.sql.gz
+*.pem
+*.key
+.streamlit/secrets.toml

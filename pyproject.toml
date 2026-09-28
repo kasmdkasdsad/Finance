@@ -45,6 +45,8 @@ dev = [
 quantpulse-api = "quantpulse.cli:run_api"
 quantpulse-migrate = "quantpulse.cli:run_migrations"
 quantpulse-transfer = "quantpulse.cli:run_transfer"
+quantpulse-preflight = "quantpulse.cli:run_preflight"
+quantpulse-hash-password = "quantpulse.cli:run_hash_password"
 
 [tool.setuptools.packages.find]
 where = ["src"]

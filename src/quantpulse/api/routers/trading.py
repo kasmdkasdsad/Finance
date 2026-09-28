@@ -7,9 +7,9 @@ also require either ``QP_API_TOKEN`` (checked for every /api request) or a reque
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, Path, Query, Request
 
-from quantpulse.api.deps import ContainerDep
+from quantpulse.api.deps import ContainerDep, local_only_allowed
 from quantpulse.schemas.jobs import JobOut
 from quantpulse.schemas.trading import (
     ActionOut,
@@ -34,22 +34,14 @@ from quantpulse.schemas.trading import (
 from quantpulse.services.container import Container
 
 router = APIRouter(prefix="/trading", tags=["trading"])
-LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
+
 RUNNING = {202: {"model": JobOut, "description": "A cycle is running: poll /jobs/{id} or /trading/job"}}
 
 
 async def orders_allowed(request: Request) -> None:
     """With ``QP_API_TOKEN`` set, the key was already verified for this request. Without one, order
-    endpoints refuse anything that does not come from this machine."""
-    container: Container = request.app.state.container
-    if container.settings.api_token is not None:
-        return
-    host = request.client.host if request.client else None
-    if host not in LOOPBACK:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="order endpoints accept remote requests only when QP_API_TOKEN is set",
-        )
+    endpoints refuse anything that does not come from this machine (and, in the cloud, everything)."""
+    local_only_allowed(request, "order endpoints")
 
 
 OrderAuth = [Depends(orders_allowed)]

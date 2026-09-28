@@ -49,3 +49,51 @@ def run_transfer() -> None:
     except TransferError as exc:
         raise SystemExit(f"transfer refused: {exc}") from None
     print(f"copied {out['rows']} row(s) across {len(out['counts'])} non-empty table(s); row counts verified")
+
+
+def run_preflight() -> None:
+    """Check a cloud deployment's environment without starting anything (exit 0: pass, 2: fail).
+
+    Prints masked values only: never a key, secret, token, password or database password."""
+    import json
+
+    from quantpulse.config import get_settings
+    from quantpulse.services import preflight
+
+    parser = argparse.ArgumentParser(description="Check the (cloud) environment before starting QuantPulse")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    args = parser.parse_args()
+    try:
+        settings = get_settings()
+    except Exception as exc:  # a setting that does not even load (QP_ALPACA_PAPER=false, a typo, ...)
+        errors = getattr(exc, "errors", None)
+        names = sorted({str(e["loc"][0]) for e in errors() if e.get("loc")}) if callable(errors) else []
+        print(
+            f"QuantPulse preflight: FAIL: the settings do not load ({', '.join(names) or type(exc).__name__})"
+        )
+        raise SystemExit(2) from None
+    report = preflight.run(settings)
+    print(json.dumps(report.as_dict(), indent=2) if args.json else "\n".join(report.lines()))
+    raise SystemExit(0 if report.ok else 2)
+
+
+def run_hash_password() -> None:
+    """Make the dashboard password hash for QP_DASHBOARD_PASSWORD_HASH (the password is typed, never shown)."""
+    import getpass
+    import sys
+
+    from quantpulse.core.passwords import MIN_LENGTH, PasswordHashError, hash_password
+
+    argparse.ArgumentParser(
+        description=f"Hash a dashboard password (at least {MIN_LENGTH} characters) for QP_DASHBOARD_PASSWORD_HASH"
+    ).parse_args()
+    if sys.stdin.isatty():
+        first = getpass.getpass("Dashboard password: ")
+        if getpass.getpass("Again: ") != first:
+            raise SystemExit("the two passwords differ: nothing was made")
+    else:  # piped in (never as an argument: it would land in the shell history)
+        first = sys.stdin.readline().rstrip("\n")
+    try:
+        print(hash_password(first))
+    except PasswordHashError as exc:
+        raise SystemExit(f"not hashed: {exc}") from None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -33,8 +34,11 @@ from quantpulse.api.routers import (
     vehicle,
 )
 from quantpulse.config import Settings, get_settings
-from quantpulse.logging_config import configure_logging
+from quantpulse.logging_config import configure_logging, settings_secrets
+from quantpulse.services import preflight
 from quantpulse.services.container import Container
+
+logger = logging.getLogger(__name__)
 
 API_PREFIX = "/api/v1"
 DESCRIPTION = """
@@ -51,10 +55,21 @@ can always tell real-time data from fallbacks. Analytics that combine several fe
 
 def create_app(settings: Settings | None = None, container: Container | None = None) -> FastAPI:
     settings = settings or (container.settings if container else get_settings())
-    configure_logging(settings.log_level, settings.log_json)
+    configure_logging(
+        settings.log_level, settings.log_json, secrets=settings_secrets(settings), log_dir=settings.log_dir
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # In the cloud nothing starts (no database, supervisor, poller or order) unless the preflight passes.
+        try:
+            report = preflight.enforce(settings)
+        except preflight.PreflightFailed as exc:
+            for line in exc.report.lines():
+                logger.critical(line)
+            raise
+        if report is not None:
+            logger.info("cloud preflight passed: %d checks", len(report.checks))
         c = container or Container(settings)
         app.state.container = c
         await c.startup()

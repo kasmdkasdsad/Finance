@@ -11,10 +11,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
 
-from quantpulse.api.deps import ContainerDep
-from quantpulse.api.routers.trading import LOOPBACK
+from quantpulse.api.deps import ContainerDep, local_only_allowed
 from quantpulse.schemas.brain import (
     AgentToggleIn,
     BookResetIn,
@@ -40,16 +39,8 @@ RUNNING = {202: {"model": JobOut, "description": "A cycle is running: poll /jobs
 
 async def control_allowed(request: Request) -> None:
     """Running a cycle or switching an agent on or off: like the trading order endpoints, only from this
-    machine unless ``QP_API_TOKEN`` is set (and was verified for this request)."""
-    container: Container = request.app.state.container
-    if container.settings.api_token is not None:
-        return
-    host = request.client.host if request.client else None
-    if host not in LOOPBACK:
-        raise HTTPException(
-            status_code=403,
-            detail="brain controls accept remote requests only when QP_API_TOKEN is set",
-        )
+    machine unless ``QP_API_TOKEN`` is set (and was verified for this request); in the cloud, only with it."""
+    local_only_allowed(request, "brain controls")
 
 
 ControlAuth = [Depends(control_allowed)]
