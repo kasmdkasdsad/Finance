@@ -158,8 +158,31 @@ class Settings(BaseSettings):
         default=None,
         description="Also write logs to <dir>/quantpulse.log (rotated at 10 MB, ten old files kept; secrets masked).",
     )
-    database_url: str = "sqlite+aiosqlite:///./data/quantpulse.db"
-    auto_migrate: bool = True
+    database_url: str = Field(
+        default="sqlite+aiosqlite:///./data/quantpulse.db",
+        description="SQLite locally; PostgreSQL in the cloud. postgres:// and postgresql:// URLs (as Render and "
+        "other hosts hand them out) are accepted and use the asyncpg driver.",
+    )
+    auto_migrate: bool = Field(
+        default=True,
+        description="Apply migrations at start-up. In the cloud they run once per deploy instead (the pre-deploy "
+        "command), and the API refuses to start on a schema that is not at the head.",
+    )
+    db_pool_size: int = Field(default=5, ge=1, le=50, description="PostgreSQL connections kept open.")
+    db_max_overflow: int = Field(
+        default=5, ge=0, le=50, description="Extra PostgreSQL connections under load."
+    )
+    db_connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    db_command_timeout_seconds: float = Field(
+        default=120.0, gt=0, le=3600, description="A PostgreSQL statement that takes longer is cancelled."
+    )
+    shutdown_drain_seconds: float = Field(
+        default=75.0,
+        ge=0,
+        le=280,
+        description="On shutdown (a deploy, a restart) a Brain or trading cycle already running may finish for "
+        "this long before it is cancelled; no new one starts meanwhile.",
+    )
     api_token: SecretStr | None = Field(
         default=None, description="If set, every /api request must send `X-API-Key: <token>`."
     )
@@ -713,6 +736,18 @@ class Settings(BaseSettings):
         """``QP_X=`` (as copied from .env.example) means "not set", not an empty credential."""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _async_database_url(cls, value: object) -> object:
+        """``postgres://`` / ``postgresql://`` (Render, Heroku, …) → the asyncpg driver QuantPulse uses."""
+        if isinstance(value, str):
+            v = value.strip()
+            for prefix in ("postgres://", "postgresql://", "postgresql+psycopg://", "postgresql+psycopg2://"):
+                if v.startswith(prefix):
+                    return "postgresql+asyncpg://" + v[len(prefix) :]
+            return v
         return value
 
     @field_validator("log_dir", mode="before")

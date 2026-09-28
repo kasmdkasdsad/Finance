@@ -13,7 +13,10 @@ Paper only
     ids start with ``PK``) and the market-data URL must be Alpaca's own, so the keys go nowhere else.
 Access
     ``QP_API_TOKEN`` of at least 32 characters (every API request needs it; nothing is exempt for this
-    machine in the cloud), and a dashboard password hash (``quantpulse-hash-password``).
+    machine in the cloud). The dashboard service enforces its own password.
+Ownership
+    ``QP_BRAIN_MODE=paper_execution`` (the Brain owns the paper account), ``QP_TRADING_SCHEDULER_ENABLED=false``
+    (one scheduler: the Brain supervisor), and no credential given twice with different values.
 Storage
     PostgreSQL (``postgresql+asyncpg://``): the Brain's history lives in a database with its own volume and
     backups, not a file inside a container.
@@ -50,6 +53,12 @@ ENDPOINT_VARIABLES = (
     "QP_ALPACA_TRADING_URL",
     "QP_ALPACA_ENDPOINT",
 )
+# The same credential can be given under several names (QuantPulse's and the Alpaca SDK's): if two of them
+# disagree, which one is used is ambiguous — refused.
+CREDENTIAL_ALIASES = {
+    "the Alpaca key id": ("QP_ALPACA_API_KEY_ID", "APCA_API_KEY_ID", "ALPACA_API_KEY_ID"),
+    "the Alpaca secret": ("QP_ALPACA_API_SECRET_KEY", "APCA_API_SECRET_KEY", "ALPACA_API_SECRET_KEY"),
+}
 PAPER_FLAGS = ("ALPACA_PAPER", "APCA_PAPER", "QP_ALPACA_ENV", "ALPACA_ENV")
 DATA_URL = "https://data.alpaca.markets"
 MIN_TOKEN = 32
@@ -221,14 +230,55 @@ def run(settings: Settings, environ: Mapping[str, str] | None = None) -> Report:
         else ""
     )
     add("api_token", not weak, weak or f"set ({len(token)} characters); required on every API request")
+    # The dashboard enforces its own password (it stays locked without one); a hash given to this service too
+    # must at least be a valid one.
     hashed = _secret(settings.dashboard_password_hash)
-    problem = "" if hashed else "QP_DASHBOARD_PASSWORD_HASH is not set (make one: quantpulse-hash-password)"
+    problem = ""
     if hashed:
         try:
             parse(hashed)
         except PasswordHashError as exc:
             problem = f"QP_DASHBOARD_PASSWORD_HASH: {exc}"
-    add("dashboard_password", not problem, problem or "a PBKDF2 password hash is set")
+    add(
+        "dashboard_password",
+        not problem,
+        problem
+        or (
+            "a PBKDF2 password hash is set"
+            if hashed
+            else "enforced by the dashboard service (locked without one)"
+        ),
+    )
+
+    # --- ownership: the Brain alone trades the paper account in the cloud ------------------------
+    add(
+        "brain_mode",
+        settings.brain_mode == "paper_execution",
+        "QP_BRAIN_MODE=paper_execution: the Brain owns the paper account (every order through the trading service)"
+        if settings.brain_mode == "paper_execution"
+        else f"QP_BRAIN_MODE={settings.brain_mode}: the cloud deployment runs the Brain as the account owner "
+        "(paper_execution); to observe only, keep it and set QP_ALPACA_TRADING_ENABLED=false or the kill switch",
+    )
+    add(
+        "one_scheduler",
+        not settings.trading_scheduler_enabled,
+        "QP_TRADING_SCHEDULER_ENABLED=false: the Brain supervisor alone schedules (the old strategy is a shadow)"
+        if not settings.trading_scheduler_enabled
+        else "QP_TRADING_SCHEDULER_ENABLED=true: two schedulers for one account is ambiguous; the Brain supervisor "
+        "schedules in the cloud — set it to false",
+    )
+    ambiguous = [
+        f"{field} ({', '.join(names)})"
+        for field, names in CREDENTIAL_ALIASES.items()
+        if len({(everything.get(n) or "").strip() for n in names if (everything.get(n) or "").strip()}) > 1
+    ]
+    add(
+        "unambiguous_credentials",
+        not ambiguous,
+        "each Alpaca credential is set once (or its aliases agree)"
+        if not ambiguous
+        else "set to different values under different names: " + "; ".join(ambiguous) + " — keep one",
+    )
 
     # --- storage ------------------------------------------------------------------------------
     url = settings.database_url

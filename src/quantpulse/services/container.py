@@ -11,6 +11,7 @@ import httpx
 
 from quantpulse import __version__
 from quantpulse.config import Settings
+from quantpulse.core import runtime
 from quantpulse.core.cache import TTLCache
 from quantpulse.core.clock import Clock, SystemClock
 from quantpulse.core.gateway import DataGateway
@@ -19,7 +20,8 @@ from quantpulse.core.jobs import JobRegistry
 from quantpulse.core.market_calendar import next_open, session_at
 from quantpulse.core.rate_limit import TokenBucket
 from quantpulse.db import migrate
-from quantpulse.db.session import Database
+from quantpulse.db.session import Database, PoolSettings
+from quantpulse.logging_config import log_event
 from quantpulse.providers.alpaca import Alpaca
 from quantpulse.providers.alpaca_trading import AlpacaPaperBroker
 from quantpulse.providers.eia import EIA
@@ -115,7 +117,15 @@ class Container:
         )
         # Rate limiting is about real elapsed time, so limiters always use the system clock.
         self.http = http or build_http(settings, SystemClock(), transport)
-        self.db = Database(settings.database_url)
+        self.db = Database(
+            settings.database_url,
+            pool=PoolSettings(
+                size=settings.db_pool_size,
+                max_overflow=settings.db_max_overflow,
+                connect_timeout=settings.db_connect_timeout_seconds,
+                command_timeout=settings.db_command_timeout_seconds,
+            ),
+        )
         self.jobs = JobRegistry(self.clock)
 
         # providers
@@ -231,12 +241,37 @@ class Container:
         self.started_at = self.clock.now()
 
     async def startup(self) -> None:
+        rt = runtime.current()
+        log_event(logger, "app.startup", f"QuantPulse {rt.version} starting ({self.settings.deployment})",
+                  commit=rt.short_commit, branch=rt.branch, instance=rt.instance, platform=rt.platform,
+                  deployment=self.settings.deployment, brain_mode=self.settings.brain_mode)  # fmt: skip
         if self.settings.auto_migrate:
             await asyncio.to_thread(migrate.upgrade, self.settings.database_url)
+        else:  # migrations ran once per deploy (the pre-deploy command): the schema must be at the head
+            current = await asyncio.to_thread(migrate.current_revision, self.settings.database_url)
+            head = migrate.head_revision()
+            if current != head:
+                raise RuntimeError(
+                    f"the database schema is at {current}, this version needs {head}: run quantpulse-migrate "
+                    "(the pre-deploy command) — nothing was started"
+                )
         if self.settings.polling_enabled:
             self.poller.start()
 
     async def shutdown(self) -> None:
+        # a deploy or restart: take no new Brain tick, and let a cycle that may be sending orders finish (up to
+        # QP_SHUTDOWN_DRAIN_SECONDS) before the lease is handed over; whatever is still running is cancelled
+        # safely (orders are recorded before they are sent, and the next supervisor reconciles first)
+        drain = self.settings.shutdown_drain_seconds
+        log_event(logger, "app.shutdown", "QuantPulse shutting down: draining the Brain", drain_seconds=drain)
+        try:
+            finished = await self.brain.supervisor.drain(drain)
+            still = await self.jobs.drain({"brain", "trading"}, drain if finished else 0.0)
+            if still or not finished:
+                log_event(logger, "app.shutdown.cancel", "work still running at shutdown is cancelled",
+                          level=logging.WARNING, jobs=",".join(still), tick_finished=finished)  # fmt: skip
+        except Exception:
+            logger.warning("draining the Brain at shutdown failed", exc_info=True)
         await self.poller.stop()
         try:  # hand the Brain over at once instead of after the lease lapses
             await self.lease.release()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from alembic import command
 from alembic.config import Config
@@ -16,8 +17,17 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
 def sync_url(url: str) -> str:
-    """Alembic runs synchronously; swap async drivers for their sync counterparts."""
-    return url.replace("+aiosqlite", "").replace("+asyncpg", "+psycopg")
+    """Alembic runs synchronously; swap async drivers for their sync counterparts (psycopg for PostgreSQL,
+    which reads ``sslmode`` natively and gets a connect timeout so a migration never hangs on the network)."""
+    url = url.replace("+aiosqlite", "").replace("+asyncpg", "+psycopg")
+    if not url.startswith("postgresql+psycopg"):
+        return url
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    if "ssl" in query and "sslmode" not in query:
+        query["sslmode"] = query.pop("ssl")
+    query.setdefault("connect_timeout", "10")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def alembic_config(url: str) -> Config:

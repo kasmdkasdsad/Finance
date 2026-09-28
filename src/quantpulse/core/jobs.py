@@ -153,6 +153,18 @@ class JobRegistry:
         for job in finished[: max(0, len(finished) - KEEP_FINISHED)]:
             del self._jobs[job.id]
 
+    async def drain(self, kinds: set[str], timeout: float) -> tuple[str, ...]:
+        """Wait up to ``timeout`` seconds for running jobs of these kinds to finish (a deploy lets a cycle that
+        is sending orders complete); the ids of those still running afterwards."""
+        tasks = {
+            j.id: j.task
+            for j in self._jobs.values()
+            if j.kind in kinds and j.task is not None and not j.task.done()
+        }
+        if tasks and timeout > 0:
+            await asyncio.wait(list(tasks.values()), timeout=timeout)
+        return tuple(jid for jid, t in tasks.items() if not t.done())
+
     async def shutdown(self) -> None:
         tasks = [j.task for j in self._jobs.values() if j.task is not None and not j.task.done()]
         for t in tasks:

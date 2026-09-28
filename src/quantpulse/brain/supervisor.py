@@ -54,8 +54,10 @@ from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 from quantpulse.config import Settings
+from quantpulse.core import runtime
 from quantpulse.core.clock import Clock
 from quantpulse.core.market_calendar import NEW_YORK, is_market_open, next_open, regular_close
+from quantpulse.logging_config import log_event
 
 from .context import brain_session
 from .events import Event, EventBus, EventType, TradingEventBridge
@@ -74,6 +76,10 @@ STATE_KEY = "supervisor"
 RESUME_REQUIRED = ("paper_setting", "paper_endpoint", "paper_key", "environment", "account", "reconciliation",
                    "clock_skew")  # fmt: skip
 RECONCILE_EVERY = timedelta(minutes=5)
+RUNTIME_KEY = "supervisor_runtime"  # the leader's heartbeat (last tick, result, recovery), for every instance
+STANDBY_KEY = "supervisor_standby"  # processes that found the lease taken, recently
+STANDBY_WINDOW = timedelta(minutes=10)
+TICK_LOG_EVERY = timedelta(minutes=15)  # an idle supervisor still logs that it is alive
 
 SYMBOL_EVENTS = {
     EventType.PRICE_MOVE_DETECTED,
@@ -115,6 +121,9 @@ class Supervisor:
         self.standby: str | None = None  # another process holds the supervisor lease
         self.last_tick_at: datetime | None = None
         self.last_result: str | None = None
+        self.leader = False  # this process holds the supervisor lease
+        self.stopping = False  # shutting down: no new tick
+        self._last_tick_log: datetime | None = None
         self._tick_lock = asyncio.Lock()  # a duplicate or overlapping tick never runs the same work twice
         bus.subscribe([*SYMBOL_EVENTS, *PORTFOLIO_EVENTS, EventType.MARKET_REGIME_CHANGED], self._on_event)
 
@@ -165,6 +174,17 @@ class Supervisor:
             "lease": await self._brain.trading.lease.info()
             if self._brain.trading.lease is not None
             else None,
+            "leader": self.leader,
+            "stopping": self.stopping,
+            "heartbeat": await self._brain.store.get_state(RUNTIME_KEY),
+            "standby_processes": await self.standby_processes(),
+        }
+
+    async def standby_processes(self) -> dict[str, Any]:
+        now = self._clock.now()
+        seen = await self._brain.store.get_state(STANDBY_KEY) or {}
+        return {
+            h: v for h, v in seen.items() if now - datetime.fromisoformat(v["last_seen"]) < STANDBY_WINDOW
         }
 
     def next_cycle_at(self, state: dict[str, Any]) -> datetime:
@@ -195,6 +215,8 @@ class Supervisor:
     async def tick(self) -> str:
         if not self._s.brain_supervisor_enabled:
             return "disabled"
+        if self.stopping:
+            return "stopping: this process is shutting down; no new work"
         if self._tick_lock.locked():
             return "busy: the previous tick is still running"
         async with self._tick_lock:
@@ -202,14 +224,84 @@ class Supervisor:
             if lease is not None:  # one supervisor at a time, across every process on this database
                 if not await lease.acquire():
                     info = await lease.info()
-                    self.standby = f"another process supervises the Brain ({info.get('holder')})"
+                    standby = f"another process supervises the Brain ({info.get('holder')})"
+                    if self.leader:
+                        log_event(logger, "supervisor.lost", "this process lost the supervisor lease: it stands by",
+                                  level=logging.WARNING, holder=info.get("holder"), this=lease.holder)  # fmt: skip
+                    elif self.standby != standby:
+                        log_event(
+                            logger,
+                            "supervisor.standby",
+                            standby,
+                            holder=info.get("holder"),
+                            this=lease.holder,
+                        )
+                    self.leader, self.standby = False, standby
+                    await self._note_standby(lease.holder)
                     return f"standby: {self.standby}"
-                self.standby = None
+                if not self.leader:
+                    rt = runtime.current()
+                    log_event(logger, "supervisor.elected", "this process supervises the Brain (lease acquired)",
+                              holder=lease.holder, commit=rt.short_commit, instance=rt.instance)  # fmt: skip
+                self.leader, self.standby = True, None
                 lease.start_heartbeat()
             self.last_tick_at = self._clock.now()
             result = await self._tick()
             self.last_result = result
+            await self._record_tick(result)
             return result
+
+    # ------------------------------------------------------------------ running in the cloud
+    def begin_stop(self) -> None:
+        """No new tick from now on (the process is shutting down)."""
+        self.stopping = True
+
+    async def drain(self, timeout: float) -> bool:
+        """Stop taking ticks and wait up to ``timeout`` seconds for the one running to finish; ``True`` when
+        none is running any more."""
+        self.begin_stop()
+        try:  # the tick lock is free once the running tick (if any) is done; no new tick takes it
+            await asyncio.wait_for(self._tick_lock.acquire(), max(0.0, timeout) or 0.001)
+        except TimeoutError:
+            return False
+        self._tick_lock.release()
+        return True
+
+    async def _record_tick(self, result: str) -> None:
+        """The leader's heartbeat, in the database: any instance (the one serving a request during a deploy, the
+        dashboard) can tell when the supervisor last ticked and what it did."""
+        now = self._clock.now()
+        lease = self._brain.trading.lease
+        rt = runtime.current()
+        await self._brain.store.set_state(
+            RUNTIME_KEY,
+            {
+                "holder": lease.holder if lease is not None else None,
+                "instance": rt.instance,
+                "commit": rt.short_commit,
+                "last_tick_at": now.isoformat(),
+                "last_result": result[:300],
+                "recovered": self._recovered,
+                "waiting": self.waiting,
+            },
+            now,
+        )
+        worked = not result.startswith(("idle", "paused"))
+        if worked or self._last_tick_log is None or now - self._last_tick_log >= TICK_LOG_EVERY:
+            self._last_tick_log = now
+            log_event(logger, "supervisor.tick", f"supervisor tick: {result}"[:400], result=result[:300],
+                      recovered=self._recovered)  # fmt: skip
+
+    async def _note_standby(self, holder: str) -> None:
+        """Processes standing by (another instance during a deploy, a second replica): shown in the status so
+        a person can see there is exactly one leader."""
+        now = self._clock.now()
+        seen = await self._brain.store.get_state(STANDBY_KEY) or {}
+        seen = {
+            h: v for h, v in seen.items() if now - datetime.fromisoformat(v["last_seen"]) < STANDBY_WINDOW
+        }
+        seen[holder] = {"last_seen": now.isoformat(), "commit": runtime.current().short_commit}
+        await self._brain.store.set_state(STANDBY_KEY, seen, now)
 
     async def _tick(self) -> str:
         state = await self._state()

@@ -53,6 +53,7 @@ STALLED = timedelta(minutes=5)
 DB_TIMEOUT = 5.0
 ALPACA_TIMEOUT = 15.0
 ALPACA_EVERY = timedelta(seconds=60)
+ALPACA_EVERY_CLOSED = timedelta(minutes=5)
 RECONCILE_STALE = timedelta(minutes=15)
 GATE_FRESH = timedelta(minutes=3)  # a failing check older than this no longer blocks (it is re-checked)
 # Parts whose failure stops new Brain orders at the last gate (a failed reconciliation stops them too, read
@@ -89,12 +90,12 @@ class HealthMonitor:
                 started_at=c.started_at.isoformat(),
             )
         }
-        parts["database"] = await self._database()
+        parts["database"] = await self.database_part()
         db_ok = parts["database"]["status"] == "ok"
         parts["supervisor"] = await self._supervisor(now) if db_ok else part("n/a", "database unavailable")
         parts["scheduler"] = self._scheduler(now)
-        parts["alpaca"] = await self._alpaca_part(now)
-        cycles = await self._cycles(now) if db_ok else {}
+        parts["alpaca"] = await self.alpaca_part(now)
+        cycles = await self.cycles_part(now) if db_ok else {}
         parts["market_data"] = cycles.get("market_data") or part("n/a", "database unavailable")
         parts["reconciliation"] = self._reconciliation(now)
         parts["last_cycle"] = cycles.get("last_cycle") or part("n/a", "database unavailable")
@@ -111,7 +112,7 @@ class HealthMonitor:
         self.last = report
         return report
 
-    async def _database(self) -> dict[str, Any]:
+    async def database_part(self) -> dict[str, Any]:
         started = time.perf_counter()
         try:
             async with self._c.db.session() as s:
@@ -170,12 +171,13 @@ class HealthMonitor:
             return part("warn", f"the Brain's job failed: {brain.last_error}"[:300], failing=failing)
         return part("ok", f"{len(poller.jobs)} background jobs running")
 
-    async def _alpaca_part(self, now: datetime) -> dict[str, Any]:
+    async def alpaca_part(self, now: datetime) -> dict[str, Any]:
         broker = self._c.broker
         if not broker.configured():
             status = "fail" if self._c.settings.deployment == "cloud" else "n/a"
             return part(status, "Alpaca paper keys are not set")
-        if self._alpaca is not None and now - self._alpaca[0] < ALPACA_EVERY:
+        every = ALPACA_EVERY if is_market_open(now) else ALPACA_EVERY_CLOSED  # closed: no need to ask often
+        if self._alpaca is not None and now - self._alpaca[0] < every:
             return self._alpaca[1]
         try:
             account = await asyncio.wait_for(broker.account(), ALPACA_TIMEOUT)
@@ -203,7 +205,7 @@ class HealthMonitor:
             )
         return part("ok", f"reconciled {_ago(now - last)} ago", last_at=last.isoformat())
 
-    async def _cycles(self, now: datetime) -> dict[str, dict[str, Any]]:
+    async def cycles_part(self, now: datetime) -> dict[str, dict[str, Any]]:
         s = self._c.settings
         async with self._c.db.session() as session:
             rows = (

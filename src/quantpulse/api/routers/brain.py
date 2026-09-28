@@ -177,6 +177,16 @@ async def pause_supervisor(body: SupervisorIn, c: Container = ContainerDep) -> d
     return await c.brain.supervisor.set_paused(body.paused)
 
 
+@router.get(
+    "/cloud-status",
+    summary="Is QuantPulse running, is the Brain supervising, and may it trade on its own now (and why not)",
+)
+async def cloud_status(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.services.cloud import cloud_status as status
+
+    return await status(c)
+
+
 @router.get("/execution", summary="Who owns the account, the Brain kill switch, what would stop Brain orders")
 async def execution(c: Container = ContainerDep) -> dict[str, Any]:
     return await c.brain.execution_status()

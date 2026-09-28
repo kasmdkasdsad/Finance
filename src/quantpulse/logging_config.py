@@ -84,23 +84,52 @@ class RedactingFilter(logging.Filter):
             record.exc_text = self.redactor(record.exc_text)
         if record.stack_info:
             record.stack_info = self.redactor(record.stack_info)
+        fields = getattr(record, "fields", None)
+        if isinstance(fields, dict):
+            record.fields = {k: self.redactor(v) if isinstance(v, str) else v for k, v in fields.items()}
         return True
 
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "ts": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
         }
-        for key in ("request_id", "method", "path", "status", "duration_ms"):
+        for key in ("request_id", "method", "path", "status", "duration_ms", "event"):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
+        fields = getattr(record, "fields", None)
+        if isinstance(fields, dict):
+            payload["data"] = fields
         if record.exc_info or record.exc_text:
             payload["exc"] = record.exc_text or self.formatException(record.exc_info)  # type: ignore[arg-type]
         return json.dumps(payload, default=str)
+
+
+class TextFormatter(logging.Formatter):
+    """Human-readable lines; a structured event also shows its name and fields."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        line = super().format(record)
+        event, fields = getattr(record, "event", None), getattr(record, "fields", None)
+        if event:
+            extra = " ".join(f"{k}={v}" for k, v in (fields or {}).items())
+            line = f"{line} [{event}{' ' + extra if extra else ''}]"
+        return line
+
+
+def log_event(
+    log: logging.Logger, event: str, message: str, *, level: int = logging.INFO, **fields: Any
+) -> None:
+    """A structured log line: ``event`` names what happened (``supervisor.elected``, ``order.submitted``, …)
+    and ``fields`` carry the details — JSON keys with ``QP_LOG_JSON=true`` (Render's log search), ``k=v`` in text.
+    Every value passes through the same secret masking as the message."""
+    log.log(
+        level, message, extra={"event": event, "fields": {k: v for k, v in fields.items() if v is not None}}
+    )
 
 
 def settings_secrets(settings: Any) -> list[str]:
@@ -127,9 +156,7 @@ def configure_logging(
     log_dir: str | Path | None = None,
 ) -> None:
     formatter: logging.Formatter = (
-        JsonFormatter()
-        if json_logs
-        else logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+        JsonFormatter() if json_logs else TextFormatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     )
     redacting = RedactingFilter(Redactor(secrets))
     handler: logging.Handler = logging.StreamHandler(sys.stdout)

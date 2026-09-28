@@ -23,7 +23,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import socket
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -31,6 +30,7 @@ from typing import Any
 from sqlalchemy import case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from quantpulse.core import runtime
 from quantpulse.core.clock import Clock
 from quantpulse.db.models import ServiceLeaseRow
 from quantpulse.db.session import Database
@@ -41,8 +41,9 @@ DEFAULT_TTL = timedelta(seconds=180)
 
 
 def holder_id() -> str:
-    """This process: host, pid and a random suffix (a restarted process is a new holder)."""
-    return f"{socket.gethostname()[:60]}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    """This process: the instance (Render's instance id, or the host name), pid and a random suffix (a
+    restarted process is a new holder)."""
+    return f"{runtime.current().instance}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 
 class Lease:

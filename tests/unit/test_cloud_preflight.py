@@ -125,9 +125,35 @@ def test_a_strong_api_token_is_required(token):
     assert_no_secret("\n".join(report.lines()))
 
 
-@pytest.mark.parametrize("hashed", [None, "plain-password", "pbkdf2_sha256:1000:c2FsdHNhbHQ:" + "A" * 43])
-def test_a_dashboard_password_hash_is_required(hashed):
+@pytest.mark.parametrize("hashed", ["plain-password", "pbkdf2_sha256:1000:c2FsdHNhbHQ:" + "A" * 43])
+def test_a_dashboard_password_hash_given_to_the_api_must_be_valid(hashed):
     assert "dashboard_password" in failed(preflight.run(cloud(dashboard_password_hash=hashed), ENV))
+
+
+def test_the_api_service_does_not_need_the_dashboard_password():
+    """On Render the dashboard is its own service and refuses to open without a password (tests/frontend)."""
+    assert preflight.run(cloud(dashboard_password_hash=None), ENV).ok
+
+
+# --------------------------------------------------------------------------- ownership
+@pytest.mark.parametrize("mode", ["research_only", "dry_run", "paper_recommendation"])
+def test_the_cloud_runs_the_brain_as_the_account_owner(mode):
+    assert failed(preflight.run(cloud(brain_mode=mode), ENV)) == {"brain_mode"}
+
+
+def test_one_scheduler_the_brain_supervisor():
+    assert failed(preflight.run(cloud(trading_scheduler_enabled=True), ENV)) == {"one_scheduler"}
+
+
+def test_a_credential_given_twice_with_different_values_is_ambiguous():
+    same = preflight.run(cloud(), {**ENV, "APCA_API_KEY_ID": KEY})
+    assert same.ok
+    different = preflight.run(
+        cloud(), {**ENV, "QP_ALPACA_API_KEY_ID": KEY, "APCA_API_KEY_ID": "PKsomething-else-0001"}
+    )
+    assert failed(different) == {"unambiguous_credentials"}
+    assert_no_secret("\n".join(different.lines()))
+    assert "PKsomething-else-0001" not in "\n".join(different.lines())
 
 
 def test_postgres_is_required_in_the_cloud():

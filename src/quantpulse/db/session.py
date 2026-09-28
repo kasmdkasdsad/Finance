@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -19,8 +21,47 @@ def _ensure_sqlite_dir(url: str) -> None:
                 Path(raw).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
-def create_engine(url: str, echo: bool = False) -> AsyncEngine:
+@dataclass(frozen=True, slots=True)
+class PoolSettings:
+    """Connection pool and timeouts for PostgreSQL (SQLite ignores them)."""
+
+    size: int = 5
+    max_overflow: int = 5
+    connect_timeout: float = 10.0
+    command_timeout: float = 120.0
+    recycle_seconds: int = 1800
+
+
+def postgres_args(url: str, pool: PoolSettings) -> tuple[str, dict[str, Any]]:
+    """The URL asyncpg accepts and the engine arguments: a small pool (a managed database allows few
+    connections), pre-ping and recycling (the network can drop idle connections), connect and statement
+    timeouts (a stalled database fails a call instead of hanging it), and ``sslmode=…`` — which asyncpg does not
+    understand in a URL — turned into its ``ssl`` argument."""
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    connect: dict[str, Any] = {
+        "timeout": pool.connect_timeout,
+        "command_timeout": pool.command_timeout,
+        "server_settings": {"application_name": "quantpulse"},
+    }
+    sslmode = query.pop("sslmode", None) or query.pop("ssl", None)
+    if sslmode and sslmode != "disable":
+        connect["ssl"] = "require" if sslmode in ("require", "prefer", "allow") else sslmode
+    clean = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    return clean, {
+        "pool_size": pool.size,
+        "max_overflow": pool.max_overflow,
+        "pool_timeout": 30,
+        "pool_recycle": pool.recycle_seconds,
+        "connect_args": connect,
+    }
+
+
+def create_engine(url: str, echo: bool = False, pool: PoolSettings | None = None) -> AsyncEngine:
     _ensure_sqlite_dir(url)
+    if url.startswith("postgresql+asyncpg"):
+        url, extra = postgres_args(url, pool or PoolSettings())
+        return create_async_engine(url, echo=echo, pool_pre_ping=True, **extra)
     engine = create_async_engine(url, echo=echo, pool_pre_ping=True)
     if url.startswith("sqlite"):
 
@@ -40,9 +81,9 @@ def create_engine(url: str, echo: bool = False) -> AsyncEngine:
 class Database:
     """Owns the engine and hands out transactional sessions."""
 
-    def __init__(self, url: str, echo: bool = False) -> None:
+    def __init__(self, url: str, echo: bool = False, pool: PoolSettings | None = None) -> None:
         self.url = url
-        self.engine = create_engine(url, echo=echo)
+        self.engine = create_engine(url, echo=echo, pool=pool)
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 
     @asynccontextmanager

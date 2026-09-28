@@ -6,6 +6,7 @@ data gateway's archive fallback expects — or ``None`` when nothing is stored.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
@@ -52,6 +53,7 @@ from quantpulse.db.models import (
     YieldCurvePointRow,
 )
 from quantpulse.domain.sectors import FF12_NAMES
+from quantpulse.logging_config import log_event
 from quantpulse.schemas.fundamentals import (
     AnalystEstimates,
     CompanyFundamentals,
@@ -62,6 +64,16 @@ from quantpulse.schemas.market import Bar, PriceHistory, Quote
 from quantpulse.schemas.options import OptionChain, OptionContract, YieldCurve, YieldPoint
 from quantpulse.schemas.reference import CompanyEvents, CompanyProfile, FrameFact
 from quantpulse.schemas.sports import Game, PowerRating
+
+_events_log = logging.getLogger("quantpulse.events")
+# trading events logged as warnings: something did not go as planned, or a safeguard fired
+WARN_EVENTS = frozenset(
+    {
+        "order_rejected", "order_failed", "order_unknown", "order_blocked_at_submit", "reconciliation_failed",
+        "foreign_orders_detected", "kill_switch_activated", "brain_kill_switch_activated",
+        "daily_loss_limit_reached", "alert",
+    }
+)  # fmt: skip
 
 
 def _insert(session: AsyncSession, table: Any) -> Any:
@@ -1182,6 +1194,9 @@ async def add_trading_event(
         details=dict(details or {}),
     )
     session.add(row)
+    # the audit trail also goes to the log (orders, fills, rejections, reconciliation, kill switches, ...)
+    log_event(_events_log, f"trading.{kind}", message[:500], level=logging.WARNING if kind in WARN_EVENTS else logging.INFO,
+              symbol=symbol, client_order_id=client_order_id, cycle_id=cycle_id)  # fmt: skip
     return row
 
 

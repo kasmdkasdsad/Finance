@@ -97,3 +97,68 @@ def run_hash_password() -> None:
         print(hash_password(first))
     except PasswordHashError as exc:
         raise SystemExit(f"not hashed: {exc}") from None
+
+
+def run_cloud_check() -> None:
+    """Check a running deployment from anywhere (exit 0: healthy with one live supervisor, 1: not).
+
+    Reads the API address and token from QP_CLOUD_URL and QP_API_TOKEN (never from the command line, so the
+    token does not land in the shell history) and prints no secret."""
+    import json
+    import os
+    import sys
+    import time
+    import urllib.error
+    import urllib.request
+
+    parser = argparse.ArgumentParser(
+        description="Verify the cloud deployment: health, one supervisor, trading"
+    )
+    parser.add_argument("--commit", help="also require this commit to be the one running (after a deploy)")
+    parser.add_argument("--wait", type=float, default=0, help="keep checking for up to this many seconds")
+    args = parser.parse_args()
+    base = os.environ.get("QP_CLOUD_URL", "").rstrip("/")
+    token = os.environ.get("QP_API_TOKEN", "")
+    if not base or not token:
+        raise SystemExit("set QP_CLOUD_URL (e.g. https://quantpulse-api.onrender.com) and QP_API_TOKEN first")
+    deadline = time.monotonic() + max(0.0, args.wait)
+    while True:
+        problems: list[str] = []
+        try:
+            req = urllib.request.Request(f"{base}/api/v1/brain/cloud-status", headers={"X-API-Key": token})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                st = json.load(r)
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            st, problems = None, [f"the API did not answer: {type(exc).__name__}"]
+        if st is not None:
+            sv, sup = st["service"], st["supervisor"]
+            if args.commit and not (sv.get("commit") or "").startswith(args.commit):
+                problems.append(f"running commit {sv.get('short_commit')}, expected {args.commit[:7]}")
+            if st["database"]["status"] != "ok":
+                problems.append(f"database: {st['database']['detail']}")
+            if not st["alpaca"]["paper_endpoint_verified"]:
+                problems.append("the Alpaca paper endpoint is not verified")
+            if not (sup.get("leader") or {}).get("live"):
+                problems.append("no live supervisor lease")
+            age = sup.get("last_tick_age_seconds")
+            if age is None or age > 300:
+                problems.append(f"the supervisor last ticked {age} s ago")
+            ae = st["autonomous_execution"]
+            print(f"QuantPulse {sv['version']} @ {sv.get('short_commit') or '?'} on {sv.get('instance')}, up "
+                  f"{sv['uptime_seconds']} s")  # fmt: skip
+            print(f"  supervisor leader: {(sup.get('leader') or {}).get('holder')} (live "
+                  f"{(sup.get('leader') or {}).get('live')}), standing by: {len(sup.get('standby_processes') or {})}, "
+                  f"last tick {age} s ago: {sup.get('last_result')}")  # fmt: skip
+            print(f"  Alpaca: paper endpoint verified {st['alpaca']['paper_endpoint_verified']}, "
+                  f"{st['alpaca']['connectivity']['detail']}")  # fmt: skip
+            print(f"  market {'OPEN' if st['market']['open'] else 'closed'}; autonomous paper execution "
+                  f"{'PERMITTED' if ae['permitted'] else 'not permitted'}")  # fmt: skip
+            for reason in ae["reasons"]:
+                print(f"    - {reason}")
+        if not problems or time.monotonic() >= deadline:
+            break
+        time.sleep(15)
+    for p in problems:
+        print(f"PROBLEM: {p}")
+    print("OK" if not problems else "NOT OK")
+    sys.exit(0 if not problems else 1)

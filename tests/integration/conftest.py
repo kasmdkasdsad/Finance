@@ -25,6 +25,7 @@ def make_settings(tmp_path, **overrides) -> Settings:
         sec_user_agent="QuantPulse Tests tests@example.com",
         log_level="WARNING",
         model_sync_wait_seconds=600,  # deterministic: tests never get "still training" unless they ask
+        shutdown_drain_seconds=5,  # a test that leaves a cycle running does not wait a deploy's full drain
     )
     base.update(overrides)
     return Settings(**base)

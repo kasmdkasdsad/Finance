@@ -4,6 +4,7 @@ slow cycle answers 202 with its progress instead of blocking a request."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -12,6 +13,7 @@ from quantpulse.core.clock import Clock
 from quantpulse.core.errors import DomainError, NotFoundError
 from quantpulse.core.jobs import Job, JobPending, JobRegistry
 from quantpulse.db.session import Database
+from quantpulse.logging_config import log_event
 from quantpulse.providers.alpaca_trading import AlpacaPaperBroker
 from quantpulse.services.market import MarketService
 from quantpulse.services.model import ModelService
@@ -69,6 +71,7 @@ LIMITATIONS = (
 )
 
 JOB_KEY = "brain-cycle"
+_events_log = logging.getLogger("quantpulse.events")
 LEARN_KEY = "brain-learn"
 
 
@@ -196,6 +199,7 @@ class BrainService:
             result = await self.orchestrator.run(trigger=trigger, kind=kind, symbols=symbols)
             detail = await self.store.cycle(result.cycle_id)
             assert detail is not None
+            _log_cycle(detail)
             return detail
 
         job = self._jobs.start("brain", JOB_KEY, f"Brain cycle ({kind}, {trigger})", work)
@@ -368,3 +372,31 @@ class BrainService:
                 + (f"next due {preds['next_due']}" if preds["next_due"] else "nothing open")
             ),
         }
+
+
+def _log_cycle(detail: dict[str, Any]) -> None:
+    """A Brain cycle, its trade decisions and any data-quality halt as structured log lines."""
+    summary = detail.get("summary") or {}
+    halts = summary.get("entry_halts") or []
+    failed = detail.get("status") == "failed"
+    log_event(_events_log, "brain.cycle", f"Brain cycle #{detail['id']} {detail.get('status')} ({detail.get('kind')})",
+              level=logging.WARNING if failed else logging.INFO, cycle_id=detail["id"], kind=detail.get("kind"),
+              trigger=str(detail.get("trigger"))[:96], status=detail.get("status"),
+              duration_ms=detail.get("duration_ms"), trades_proposed=summary.get("trades_proposed"),
+              risk_approved=summary.get("risk_approved"), orders_sent=summary.get("orders_sent"),
+              entry_halts=",".join(map(str, halts)) or None, error=detail.get("error"))  # fmt: skip
+    if "data_quality" in halts:
+        veto = ((detail.get("data_quality") or {}).get("market") or {}).get(
+            "veto"
+        ) or "market data not usable"
+        log_event(_events_log, "brain.data_quality_halt", f"new positions halted by market data: {veto}"[:400],
+                  level=logging.WARNING, cycle_id=detail["id"])  # fmt: skip
+    for d in detail.get("decisions") or []:
+        if not d.get("quantity"):
+            continue
+        ex = d.get("execution") or {}
+        why = ex.get("reason") or "; ".join(((d.get("rationale") or {}).get("reasons") or [])[:2])
+        event = "brain.risk_rejection" if d.get("risk_approved") is False else "brain.decision"
+        log_event(_events_log, event, f"{d.get('action')} {d.get('subject')}: {d.get('status')}"[:200],
+                  cycle_id=detail["id"], decision_id=d.get("id"), symbol=d.get("subject"), action=d.get("action"),
+                  status=d.get("status"), quantity=d.get("quantity"), sent=ex.get("sent"), reason=str(why)[:300])  # fmt: skip
