@@ -102,6 +102,15 @@ async def test_a_closed_and_graded_trade_is_traceable_from_the_idea_to_the_lesso
         graded = [p for p in await api.container.brain.store.predictions() if p.status == "evaluated"]
         assert graded and all("market_event" in p.context for p in graded)
 
+        behaviour = (await api.get(f"{API}/behavior", params={"days": 365})).json()
+        assert len(behaviour["checked"]) == 9 and behaviour["headline"]
+        for f in behaviour["findings"]:
+            assert f["severity"] in ("info", "warning", "alert") and f["finding"] and f["sample"] >= 0
+        assert any(
+            f["code"] == "concentration" or f["code"] == "consensus_instability"
+            for f in behaviour["findings"]
+        )
+
         report = (await api.get(f"{API}/traces")).json()
         assert report["with_gaps"] == 0 and report["trades"] >= 2
         mine = next(t for t in report["trades_detail"] if t["decision_id"] == buy["id"])

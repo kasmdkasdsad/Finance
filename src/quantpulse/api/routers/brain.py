@@ -222,6 +222,17 @@ async def trades(limit: int = Query(50, ge=1, le=500), c: Container = ContainerD
 
 
 @router.get(
+    "/behavior",
+    summary="Pathological behaviour: round trips, turnover, concentration, correlation, repeated losses, ignored "
+    "ideas, herding, consensus flips, behaviour after a losing streak (findings only; nothing is changed)",
+)
+async def behavior(days: int = Query(30, ge=1, le=365), c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.behavior import monitor
+
+    return await monitor(c.brain.db, c.settings, c.clock.now(), days)
+
+
+@router.get(
     "/learning-report",
     summary="What the graded record says: agents vs the consensus, calibration, regimes, consensus patterns, "
     "data mistakes, failure modes, strategies by regime — each with its sample, unproven until it is enough",
