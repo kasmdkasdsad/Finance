@@ -126,6 +126,7 @@ class BrainStatusOut(StrictModel):
     open_predictions: int
     learning: str
     language_models: str
+    limitations: list[str] = []
 
 
 class BrainMemoryOut(StrictModel):

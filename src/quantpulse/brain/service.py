@@ -36,10 +36,26 @@ from .perception import Perception
 from .reflection import consensus_calibration
 from .registry import AgentRegistry
 from .sessions import SessionKeeper
+from .shadow import StrategyShadow
 from .store import BrainStore
 from .supervisor import Supervisor
 from .theses import ThesisBook
 from .types import BrainMode
+
+# Shown on the Brain page and in /brain/status: what the Brain cannot (yet) do or know.
+LIMITATIONS = (
+    "Alpaca PAPER only: simulated money. There is no live mode.",
+    "Track records start empty: every agent is unproven until enough of its calls are graded (weeks).",
+    "No news provider: no news event is ever produced or invented.",
+    "No historical macro dataset: macro context is today's regime, VIX and breadth only.",
+    "The strategy lab backtests today's liquid universe: its results carry survivorship bias.",
+    "Paper-book and strategy-shadow fills are modelled (spread, slippage, fees); the Brain's own are Alpaca's "
+    "paper fills.",
+    "With the free IEX feed many quotes are stale by design: the data checks can block trading "
+    "(real-time SIP is the fix, and your decision).",
+    "Stops and thesis checks run at each cycle, not as resting stop orders: a gap can fill beyond the stop.",
+    "Agent performance and the 60-session evaluation are not established until enough observations exist.",
+)
 
 JOB_KEY = "brain-cycle"
 LEARN_KEY = "brain-learn"
@@ -118,6 +134,7 @@ class BrainService:
         self.improvements = ImprovementEngine(
             db, settings.brain_min_reliability_observations, settings.brain_min_confidence
         )
+        self.shadow = StrategyShadow(settings, clock, db, trading)  # the replaced strategy, for comparison
         self.sessions = SessionKeeper(
             settings,
             clock,
@@ -126,6 +143,7 @@ class BrainService:
             data,
             MarketPrices(market, clock) if market is not None else None,
             market.feed_status if market is not None else None,
+            self.shadow,
         )
         self.supervisor = Supervisor(settings, clock, self, self.bus)
 
@@ -308,6 +326,7 @@ class BrainService:
             },
             "running": bool(job is not None and job.task is not None and not job.task.done()),
             "language_models": self._models_line(),
+            "limitations": list(LIMITATIONS),
             "last_cycle": recent[0] if recent else None,
             "open_predictions": preds["open"],
             "learning": (

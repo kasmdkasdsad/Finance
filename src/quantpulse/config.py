@@ -473,6 +473,11 @@ class Settings(BaseSettings):
             "book; research_only: analysis and memory only."
         ),
     )
+    brain_strategy_shadow: bool = Field(
+        default=True,
+        description="While the Brain owns the account, run the strategy it replaced against a hypothetical "
+        "portfolio of its own (same risk limits, modelled fills; never an order) for the comparison.",
+    )
     brain_kill_switch: bool = Field(
         default=False,
         description="Refuse every new Brain-originated order (the dashboard has a runtime Brain kill switch too). "

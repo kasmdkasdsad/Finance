@@ -196,6 +196,12 @@ class Supervisor:
         if session is BrainSession.OPEN and is_market_open(now):
             if owns and due("reconcile", RECONCILE_EVERY):
                 await run("reconcile", self._brain.trading.reconcile("brain periodic"))
+            if (
+                owns
+                and self._s.brain_strategy_shadow
+                and due("strategy_shadow", timedelta(minutes=self._s.trading_rebalance_interval_minutes))
+            ):  # the replaced strategy against its own hypothetical portfolio (never an order)
+                await run("strategy_shadow", self._brain.shadow.step())
             if due("monitor", timedelta(minutes=self._s.brain_monitor_minutes)):
                 await run("monitor", self._monitor())
             if due("cycle", timedelta(minutes=self._s.brain_cycle_minutes)):

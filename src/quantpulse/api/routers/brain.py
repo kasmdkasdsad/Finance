@@ -245,6 +245,44 @@ async def data_report(days: int = Query(20, ge=1, le=365), c: Container = Contai
     return await report(c.brain.db, c.settings, now - timedelta(days=days), now)
 
 
+@router.get(
+    "/evaluation", summary="The 60-session evaluation: the Brain vs the benchmark vs the replaced strategy"
+)
+async def evaluation(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.scorecard import evaluation as report
+
+    return await report(c.brain.db, c.settings)
+
+
+@router.get(
+    "/scorecard",
+    summary="Learning measured separately: accuracy, calibration, decisions, luck, execution, risk",
+)
+async def scorecard(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.scorecard import scorecard as card
+
+    return await card(c.brain.db, c.settings)
+
+
+@router.get(
+    "/execution-quality", summary="The Brain's real Alpaca paper fills: fill rate, slippage, time to fill"
+)
+async def execution_quality(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.scorecard import execution_quality as quality
+
+    return await quality(c.brain.db)
+
+
+@router.get("/shadow", summary="The replaced strategy's shadow portfolio (hypothetical; never an order)")
+async def shadow(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.shadow import equity_of
+
+    state = await c.brain.shadow.state()
+    if state is None:
+        return {"started": False, "note": "starts on the first session the Brain owns the account"}
+    return {"started": True, "equity": round(equity_of(state), 2), **state}
+
+
 @router.get("/kill-switch", response_model=KillSwitchOut, summary="The Brain kill switch")
 async def brain_kill_switch(c: Container = ContainerDep) -> KillSwitchOut:
     return await c.trading.brain_kill_switch()

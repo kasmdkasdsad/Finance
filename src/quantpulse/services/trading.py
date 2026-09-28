@@ -207,6 +207,19 @@ def brain_slot(moment: datetime, minutes: int) -> str:
     return f"{BRAIN_SLOT}-{local:%Y%m%d}T{floored // 60:02d}{floored % 60:02d}"
 
 
+@dataclass
+class ShadowPlan:
+    """What the strategy would do for a hypothetical portfolio (the Brain's comparison shadow)."""
+
+    plan: PortfolioPlan
+    candidates: dict[str, Candidate]
+    quotes: dict[str, LiveQuote]
+    quality: dict[str, QuoteQuality]
+    checks: dict[str, QuoteCheck]  # what the risk engine knows about each symbol's data
+    regime: str
+    market_open: bool
+
+
 @dataclass(frozen=True, slots=True)
 class BrainOrder:
     """A trade the Brain decided on. Only the trading service can send it, after the same reconciliation,
@@ -2174,6 +2187,54 @@ class TradingService:
             "plan": {"gross_target": None, "exits": {}, "skipped": skipped, "brain_cycle_id": brain_cycle_id},
             "notes": notes,
         }
+
+    # ------------------------------------------------------------------ the strategy as a shadow
+    async def shadow_plan(
+        self,
+        holdings: Mapping[str, Holding],
+        equity: float,
+        *,
+        memory: Mapping[str, PositionMemory] | None = None,
+        last_traded: Mapping[str, tuple[datetime, str]] | None = None,
+    ) -> ShadowPlan:
+        """The strategy's plan for ``holdings`` and ``equity`` that are not the account's: the same data,
+        regime, signals and portfolio construction as a real cycle. It reads market data only — no
+        reconciliation, no order, no cycle or position record — so the Brain can run the strategy it
+        replaced as a comparison shadow while it owns the account."""
+        s = self._s
+        is_open, _ = await self._market()
+        inputs = await self._data.load(list(holdings))
+        regime = self._regime(inputs)
+        table = self._score(inputs, regime.beta_tilt, {})
+        leaders = list(table["score"].sort_values(ascending=False).index[: 2 * s.trading_max_positions])
+        await self._data.enrich(
+            inputs, list(dict.fromkeys([*leaders, *[h for h in holdings if h in table.index]]))
+        )
+        if inputs.implied_vol:
+            table = self._score(inputs, regime.beta_tilt, inputs.implied_vol)
+        candidates = self._candidates(inputs, table)
+        plan = build_plan(
+            candidates,
+            dict(holdings),
+            equity,
+            self.strategy,
+            regime_exposure=s.trading_regime_exposure.get(regime.label, 1.0),
+            entry_penalty=s.trading_regime_entry_penalty.get(regime.label, 0.0),
+            risk_off=regime.label == "risk_off",
+            memory=dict(memory or {}),
+            last_traded=dict(last_traded or {}),
+            working=set(),
+            now=self._clock.now(),
+        )
+        return ShadowPlan(
+            plan=plan,
+            candidates=candidates,
+            quotes=dict(inputs.quotes),
+            quality=dict(inputs.quality),
+            checks=self._quote_checks(inputs, table),
+            regime=regime.label,
+            market_open=is_open,
+        )
 
     # ------------------------------------------------------------------ cycle helpers
     def _regime(self, inputs: TradingInputs) -> regime_mod.MarketRegime:

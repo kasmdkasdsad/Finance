@@ -50,6 +50,7 @@ class SessionKeeper:
         data: TradingDataLoader,
         prices: MarketPrices | None,
         feeds: Any = None,  # () -> list of vendor feed states (the market service's feed_status)
+        shadow: Any = None,  # the strategy shadow (marked at the close)
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -58,6 +59,7 @@ class SessionKeeper:
         self._data = data
         self._prices = prices
         self._feeds = feeds
+        self._shadow = shadow
 
     async def _row(self, day: date) -> BrainSessionRow:
         async with self._db.session() as s:
@@ -222,10 +224,20 @@ class SessionKeeper:
                 halts[code] = halts.get(code, 0) + 1
         bench_close = bench_ret = None
         note = None
+        shadow_state = await self._shadow.state() if self._shadow is not None else None
+        held = list((shadow_state or {}).get("positions") or {})
+        all_closes = (
+            await self._prices.closes([self._s.benchmark_symbol, *held], day - timedelta(days=10))
+            if self._prices is not None
+            else {}
+        )
+        shadow = (
+            await self._shadow.mark({s: c[day] for s, c in all_closes.items() if day in c})
+            if shadow_state is not None
+            else None
+        )
         if self._prices is not None:
-            closes = (await self._prices.closes([self._s.benchmark_symbol], day - timedelta(days=10))).get(
-                self._s.benchmark_symbol
-            ) or {}
+            closes = all_closes.get(self._s.benchmark_symbol) or {}
             days = sorted(d for d in closes if d <= day)
             if days and days[-1] == day and len(days) >= 2:
                 bench_close = closes[day]
@@ -259,6 +271,7 @@ class SessionKeeper:
                     for p in positions
                 },
                 "note": note,
+                "strategy_shadow": shadow,
             },
         }
         await self._save(day, **fields)

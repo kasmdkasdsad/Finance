@@ -722,6 +722,92 @@ def _data_report() -> None:
     st.markdown(_md(f"*Decision.* {sip['decision']}"))
 
 
+def _evaluation() -> None:
+    st.markdown(
+        "**60-session evaluation** — the Brain's trading days on the Alpaca paper account against the benchmark "
+        "and against the strategy it replaced (run as a shadow on its own hypothetical portfolio). A report for "
+        "your review, not a target: nothing in the Brain optimises for it."
+    )
+    ev = guarded(lambda: api().get(f"{BASE}/evaluation"), "evaluation")
+    if ev is None:
+        return
+    (st.success if ev["sessions"] >= ev["target_sessions"] else st.info)(
+        _md(ev["status"]), icon=":material/fact_check:"
+    )
+    rows = []
+    for name, key in (
+        ("Brain", "brain"),
+        ("Benchmark", "benchmark"),
+        ("Previous strategy (shadow)", "previous_strategy"),
+    ):
+        m = ev.get(key) or {}
+        rows.append(
+            {
+                "": name,
+                "sessions": m.get("sessions", 0),
+                "return": pct(m.get("total_return"), 2),
+                "volatility": pct(m.get("volatility"), 1),
+                "Sharpe": num(m.get("sharpe")),
+                "Sortino": num(m.get("sortino")),
+                "max drawdown": pct(m.get("max_drawdown"), 2),
+                "excess (annual)": pct(m.get("excess_return_annual"), 2),
+                "information ratio": num(m.get("information_ratio")),
+                "beta": num(m.get("beta")),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows).astype(str), hide_index=True, use_container_width=True)
+    st.caption(
+        _md(
+            f"Turnover {num(ev.get('turnover'))}× (Brain) · {num((ev.get('previous_strategy') or {}).get('turnover'))}× "
+            f"(previous strategy). {(ev.get('previous_strategy') or {}).get('note', '')}"
+        )
+    )
+    if ev.get("regime_performance"):
+        st.markdown("**By regime** (mean daily excess return)")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"regime": k, "days": v["days"], "mean excess": pct(v["mean_excess"], 3)}
+                    for k, v in ev["regime_performance"].items()
+                ]
+            ).astype(str),
+            hide_index=True,
+            use_container_width=True,
+        )
+    if ev.get("sector_exposure"):
+        st.caption(
+            _md("Sector exposure: " + ", ".join(f"{k} {pct(v, 0)}" for k, v in ev["sector_exposure"].items()))
+        )
+    card = ev["scorecard"]
+    st.markdown(
+        "**Learning, measured separately** (each with its sample size; *unproven* until it is large enough)"
+    )
+    acc, dec, ex = card["prediction_accuracy"], card["decision_quality"], card["execution_quality"]
+    c = st.columns(4)
+    c[0].metric("Prediction accuracy", pct(acc.get("hit_rate"), 0), acc["status"], delta_color="off")
+    c[1].metric("Sound decisions", pct(dec.get("sound_decisions"), 0), dec["status"], delta_color="off")
+    c[2].metric(
+        "Luck share", pct(card["luck"].get("share"), 0), f"{card['luck']['judged']} judged", delta_color="off"
+    )
+    c[3].metric(
+        "Fill slippage",
+        f"{ex['slippage_bps_mean']:+.1f}bp" if ex.get("slippage_bps_mean") is not None else "—",
+        f"{ex['filled']} of {ex['sent']} filled",
+        delta_color="off",
+    )
+    rel, risk, agents = card["benchmark_relative"], card["risk_outcome"], card["agent_reliability"]
+    st.caption(
+        _md(
+            f"Decision mix: {dec['mix']}. Closed positions {rel['closed_positions']}: beat the benchmark "
+            f"{pct(rel.get('beat_benchmark'), 0)}, win rate {pct(rel.get('win_rate'), 0)} ({rel['status']}). "
+            f"Stopped out {risk['stopped_out']}; halts {risk['halts'] or 'none'}. Agents with a record: "
+            f"{agents['agents_with_a_record']} ({agents['verdicts'] or 'none yet'})."
+        )
+    )
+    for c_ in ev.get("caveats") or []:
+        st.caption(_md(f"• {c_}"))
+
+
 def _sessions() -> None:
     data = guarded(lambda: api().get(f"{BASE}/sessions", limit=60), "sessions")
     rows = (data or {}).get("sessions") or []
@@ -1402,6 +1488,10 @@ def render() -> None:
         _execution_panel(ex)
     _layers_banner(bool(status.get("owns_account")))
     _status(status, ex)
+    if status.get("limitations"):
+        with st.expander("Known limitations"):
+            for item in status["limitations"]:
+                st.markdown(_md(f"- {item}"))
     _run_controls()
     cycles = guarded(lambda: api().get(f"{BASE}/cycles", limit=50), "cycle history") or []
     if not cycles:
@@ -1439,6 +1529,7 @@ def render() -> None:
             "Positions & theses",
             "Audit trail",
             "Market data & SIP",
+            "Evaluation",
             "Paper book",
             "Memory",
             "History",
@@ -1469,8 +1560,10 @@ def render() -> None:
     with tabs[11]:
         _data_report()
     with tabs[12]:
-        _book()
+        _evaluation()
     with tabs[13]:
-        _memory()
+        _book()
     with tabs[14]:
+        _memory()
+    with tabs[15]:
         _history(cycles)

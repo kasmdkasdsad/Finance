@@ -1104,9 +1104,12 @@ kill switch stops new Brain orders at once. The Brain itself has no broker acces
 agents and one optional model-backed agent; working memory; opportunity detection; consensus with visible
 disagreement and an adversarial debate; proposed actions with a risk preview; grading of predictions
 against real prices, reflection and measured track records; a supervisor that runs by session and by
-event; the Brain's own paper book; a strategy lab; self-improvement proposals; a provider-agnostic
-language-model layer (no provider is built in); persistence of every cycle; and the **Brain** page in
-the UI (under *Alpaca Paper Trading*). What is not built is listed under
+event; ownership of the Alpaca paper account with execution through the trading service, the Brain kill
+switch and automatic entry halts; position theses; pre-market checks and daily closes; a per-trade audit
+trail; the market-data/SIP report; the Brain's own paper book (when it does not own the account); the
+replaced strategy as a comparison shadow; the scorecard and the 60-session evaluation; a strategy lab;
+self-improvement proposals; a provider-agnostic language-model layer (no provider is built in);
+persistence of every cycle; and the **Brain** page in the UI (under *Alpaca Paper Trading*). What is not built is listed under
 [Known limitations](#known-limitations).
 
 ### One cycle
@@ -1161,6 +1164,30 @@ the UI (under *Alpaca Paper Trading*). What is not built is listed under
    * short term: the latest market and portfolio state;
    * working: this cycle's investigation;
    * long term: regime changes and proposed trades.
+
+### Evaluation: the scorecard and 60 sessions
+
+* **Execution quality** (`GET /brain/execution-quality`) — from the Brain's real Alpaca paper orders: sent,
+  filled, partly filled, canceled or expired, rejected, unknown; the fill rate; the time to fill; and each
+  fill's slippage against the price the decision assumed (positive: worse), by order type.
+* **Scorecard** (`GET /brain/scorecard`) — learning measured separately, never blended: prediction accuracy
+  (graded consensus calls against the benchmark, with a 95% interval), calibration (hit rate by
+  confidence), decision quality (earned / unlucky / lucky / process failure), luck (outcomes that disagreed
+  with the decision's quality), execution quality, risk outcomes (positions stopped out, halts, the deepest
+  drawdown), benchmark-relative outcomes (closed positions against the benchmark since entry, win rate) and
+  agent reliability (verdicts). Each carries its sample size and is *unproven* until it reaches
+  `QP_BRAIN_MIN_RELIABILITY_OBSERVATIONS`; nothing changes a weight on a tiny sample.
+* **The replaced strategy as a shadow** (`GET /brain/shadow`, `QP_BRAIN_STRATEGY_SHADOW=true`) — while the
+  Brain owns the account, the supervisor runs the strategy's own plan (`TradingService.shadow_plan`: the
+  same data, regime, signals and portfolio construction; read-only, no order, no trading record) on the
+  strategy's schedule against a hypothetical portfolio that starts from the account's equity in cash. Every
+  trade passes the same `RiskBook` limits and is filled like the paper book; it is marked at each close.
+* **The 60-session evaluation** (`GET /brain/evaluation`, the page's *Evaluation* tab) — the Brain's trading
+  days (`brain_sessions`) against the benchmark and against the shadow: total return, volatility, Sharpe,
+  Sortino, maximum drawdown, excess return, tracking error, information ratio, beta, turnover, regime
+  performance (daily excess return by the day's regime), sector exposure, and the scorecard. Until 60
+  sessions it says *in progress — too few to judge*; at 60 it asks for the architecture to be reviewed with
+  the results. It is a report for a person: nothing in the Brain optimises for it.
 
 ### Market data report and SIP
 
@@ -1739,6 +1766,7 @@ recorded as `duplicate_prevented`).
 | `GET /brain/positions?closed=` · `POST /brain/positions/{symbol}/adopt` | The account's positions with their theses, checks and performance (open, recently closed, unexpected) · adopt a position the Brain did not open |
 | `GET /brain/sessions?limit=` | Trading days of the Brain-owned account: the pre-market check and the close |
 | `GET /brain/trades?limit=` · `GET /brain/decisions/{id}/audit` | Recent trade decisions · one decision's full audit trail |
+| `GET /brain/evaluation` · `/scorecard` · `/execution-quality` · `/shadow` | The 60-session evaluation · learning measured separately · real fill quality · the replaced strategy's shadow |
 | `GET /brain/data-report?days=` | How often market data stopped the Brain, and the SIP report |
 | `GET /brain/execution` | Who owns the account, both kill switches, what would stop Brain orders (manual and scheduled), the last cycle's entry halts and orders sent |
 | `GET /brain/kill-switch` · `POST /brain/kill-switch {"active": true, "reason": "…", "cancel_open_orders": true}` | The Brain kill switch: stop new Brain orders at once (or allow them again) |
@@ -1943,7 +1971,12 @@ tests/                   unit · providers · integration · frontend · fixture
   * Stops and thesis checks run at each cycle (every 30 minutes by default, or on a monitored price move),
     not as resting stop orders at Alpaca, so a gap can fill well beyond the stop.
   * In the modes where the strategy owns the account, the paper book's fills are modelled (spread,
-    slippage, fees); real fills can differ, especially in thin names or fast markets.
+    slippage, fees); real fills can differ, especially in thin names or fast markets. The replaced
+    strategy's shadow (the evaluation's comparison) is modelled the same way, while the Brain's own fills
+    are Alpaca's paper fills — the comparison says so.
+  * The 60-session evaluation needs 60 recorded trading days (about three months) before it asks for a
+    review, and even then it is a short record. It is a report for a person, never a target.
+  * No historical macro dataset: the macro context is today's regime, VIX and breadth only.
   * Track records start empty. Every agent is *unproven* (weight 1.0) until its calls are graded, which
     takes weeks; thresholds such as `QP_BRAIN_MIN_CONFIDENCE` are starting values until calibration
     confirms or changes them.

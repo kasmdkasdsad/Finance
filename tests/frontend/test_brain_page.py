@@ -131,6 +131,8 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
         "Decision." in m.value for m in at.markdown
     )
     assert any("**Trading days**" in m.value for m in at.markdown)
+    assert any(e.label == "Known limitations" for e in at.expander)
+    assert any("60-session evaluation" in m.value for m in at.markdown)
     assert any("Positions and their theses" in m.value for m in at.markdown)
     assert any(b.label == "STOP BRAIN ORDERS" for b in at.button)  # always one click away
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
