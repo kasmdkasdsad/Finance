@@ -1,0 +1,145 @@
+# QuantPulse in the cloud: one server, Docker Compose, everything restarts by itself after a crash or a reboot.
+#
+#   db         PostgreSQL 16: the Brain's whole history, on the "pgdata" volume (never inside a container)
+#   api        the QuantPulse API + Brain supervisor + background jobs (QP_DEPLOYMENT=cloud: it refuses to start
+#              unless `quantpulse-preflight` passes: Alpaca PAPER only, secured, PostgreSQL, risk limits intact)
+#   dashboard  the Streamlit dashboard with its password login; it alone talks to the api
+#   backup     a nightly pg_dump into ./backups (14 days kept)
+#   caddy      only with `--profile public`: HTTPS for the dashboard on your own domain name
+#
+# Nothing listens on the public internet by default: the api and the dashboard are bound to 127.0.0.1 and
+# reached through Tailscale (recommended) or the caddy profile. The api is never exposed at all.
+#
+# Secrets live in deploy/.env on the server only (chmod 600, ignored by git and by the Docker build).
+# Use the `qp` helper next to this file: ./qp setup | preflight | start | status | logs | stop-trading | ...
+
+name: quantpulse
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: quantpulse
+      POSTGRES_USER: quantpulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env (./qp setup does it)}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantpulse -d quantpulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    shm_size: 256mb
+    restart: unless-stopped
+    logging: *logging
+
+  api:
+    build:
+      context: ..
+    image: quantpulse:current
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      QP_DEPLOYMENT: cloud
+      QP_ENVIRONMENT: production
+      QP_ALPACA_PAPER: "true"  # paper only; the preflight also refuses anything that names a live endpoint
+      QP_DATABASE_URL: postgresql+asyncpg://quantpulse:${POSTGRES_PASSWORD}@db:5432/quantpulse
+      QP_LOG_DIR: /app/logs
+      QP_LOG_JSON: "false"
+      QP_POLLING_ENABLED: "true"
+      QP_CORS_ORIGINS: http://localhost:8501
+    command: ["uvicorn", "--factory", "quantpulse.api.app:app_factory", "--host", "0.0.0.0", "--port", "8000",
+              "--timeout-graceful-shutdown", "30", "--no-server-header"]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - logs:/app/logs
+      - data:/app/data
+    ports:
+      - "127.0.0.1:8000:8000"  # this server only (for ./qp status); never public
+    stop_grace_period: 45s  # a clean stop hands the Brain lease over at once
+    restart: unless-stopped
+    logging: *logging
+
+  dashboard:
+    image: quantpulse:current
+    depends_on:
+      api:
+        condition: service_healthy
+    # only what the dashboard needs: no Alpaca key, no database password
+    environment:
+      QP_DEPLOYMENT: cloud
+      QP_API_URL: http://api:8000
+      QP_API_TOKEN: ${QP_API_TOKEN:?set QP_API_TOKEN in deploy/.env (./qp setup does it)}
+      QP_DASHBOARD_PASSWORD_HASH: ${QP_DASHBOARD_PASSWORD_HASH:?set QP_DASHBOARD_PASSWORD_HASH in deploy/.env}
+      STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION: "true"
+      STREAMLIT_CLIENT_SHOW_ERROR_DETAILS: "false"
+      STREAMLIT_CLIENT_TOOLBAR_MODE: viewer
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      STREAMLIT_SERVER_FILE_WATCHER_TYPE: none
+    command: ["streamlit", "run", "frontend/app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    ports:
+      - "127.0.0.1:8501:8501"  # reached through Tailscale (`tailscale serve`) or the caddy profile
+    restart: unless-stopped
+    logging: *logging
+
+  backup:
+    image: postgres:16-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: quantpulse
+      PGDATABASE: quantpulse
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          f=/backups/quantpulse-$$(date -u +%Y%m%d-%H%M%S).dump
+          if pg_dump -Fc -f "$$f.part" && mv "$$f.part" "$$f"; then echo "backup written: $$f"; else echo "backup FAILED"; rm -f "$$f.part"; fi
+          find /backups -name 'quantpulse-*.dump' -mtime +14 -delete
+          sleep 86400
+        done
+    restart: unless-stopped
+    logging: *logging
+
+  caddy:
+    profiles: ["public"]
+    image: caddy:2-alpine
+    depends_on:
+      - dashboard
+    environment:
+      QP_PUBLIC_HOSTNAME: ${QP_PUBLIC_HOSTNAME:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  pgdata:
+  logs:
+  data:
+  caddy_data:
+  caddy_config:

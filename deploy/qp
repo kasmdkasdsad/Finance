@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# qp — run QuantPulse on this server (Docker Compose). Every command prints what it does; none prints a secret.
+#
+#   ./qp setup                 first time: make deploy/.env (generated secrets, your Alpaca PAPER keys, a
+#                              dashboard password) and build the image
+#   ./qp preflight             check the configuration without starting anything (paper only, secured, ...)
+#   ./qp import-sqlite FILE    copy the PC's history (data/quantpulse.db) into the empty cloud database
+#   ./qp start [--public]      build, preflight, start everything (--public: HTTPS on QP_PUBLIC_HOSTNAME)
+#   ./qp status                containers and the health of every part
+#   ./qp logs [SERVICE]        follow the logs (api, dashboard, db, backup, caddy; default api)
+#   ./qp restart [SERVICE]     restart (default: api and dashboard); the Brain recovers before any order
+#   ./qp stop-trading [REASON] Brain kill switch ON: no new Brain orders, working Brain orders canceled
+#   ./qp start-trading         Brain kill switch OFF (asks first)
+#   ./qp update                back up, pull the latest code from GitHub, rebuild, restart
+#   ./qp rollback [COMMIT]     back to the previous deployed version (or COMMIT)
+#   ./qp backup                a database backup now (./backups; nightly ones are automatic)
+#   ./qp restore FILE          replace the database with a backup (asks first)
+#   ./qp password              change the dashboard password
+#   ./qp tailscale             publish the dashboard on your private Tailscale network (HTTPS)
+#   ./qp down                  stop everything (the Brain stops; restart with ./qp start)
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+cd "$HERE"
+ENV_FILE="$HERE/.env"
+HISTORY="$HERE/.deploy-history"
+dc() { docker compose -f "$HERE/compose.yaml" "$@"; }
+say() { printf '\033[1m%s\033[0m\n' "$*"; }
+die() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+need_env() { [[ -f "$ENV_FILE" ]] || die "deploy/.env is missing: run ./qp setup first"; }
+
+# Set NAME=VALUE in deploy/.env; the value travels in the environment, never on a command line.
+set_var() {
+  QP_NAME="$1" QP_VALUE="$2" QP_FILE="$ENV_FILE" python3 - <<'PY'
+import os, re
+name, value, path = os.environ["QP_NAME"], os.environ["QP_VALUE"], os.environ["QP_FILE"]
+text = open(path, encoding="utf-8").read()
+line = f"{name}={value}"
+if re.search(rf"^{re.escape(name)}=.*$", text, flags=re.M):
+    text = re.sub(rf"^{re.escape(name)}=.*$", lambda m: line, text, count=1, flags=re.M)
+else:
+    text = text.rstrip("\n") + "\n" + line + "\n"
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+get_var() { grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2- || true; }
+
+# Call the API from inside its own container (the token never leaves the server or shows up anywhere).
+api_call() { # METHOD PATH [JSON]
+  dc exec -T -e QP_M="$1" -e QP_P="$2" -e QP_B="${3:-}" api python - <<'PY'
+import json, os, sys, urllib.request
+req = urllib.request.Request("http://127.0.0.1:8000/api/v1" + os.environ["QP_P"], method=os.environ["QP_M"],
+                             data=os.environ["QP_B"].encode() or None,
+                             headers={"X-API-Key": os.environ.get("QP_API_TOKEN", ""), "Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=60) as r:
+        print(r.read().decode())
+except urllib.error.HTTPError as e:
+    print(json.dumps({"http_error": e.code, "detail": e.read().decode()[:500]})); sys.exit(1)
+PY
+}
+
+hash_password() {
+  local pw pw2
+  read -r -s -p "Dashboard password (at least 12 characters): " pw; echo >&2
+  read -r -s -p "Again: " pw2; echo >&2
+  [[ "$pw" == "$pw2" ]] || die "the two passwords differ"
+  printf '%s\n' "$pw" | dc run --rm --no-deps -T api quantpulse-hash-password
+}
+
+wait_healthy() {
+  say "waiting for the API to become healthy ..."
+  for _ in $(seq 1 60); do
+    if dc exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" >/dev/null 2>&1; then
+      say "API is up."; return 0
+    fi
+    sleep 5
+  done
+  dc logs --tail=60 api
+  die "the API did not come up: see the log above (a failed preflight lists its FAIL lines)"
+}
+
+record_deploy() {
+  git -C "$HERE/.." rev-parse HEAD >> "$HISTORY"
+  local branch; branch="$(git -C "$HERE/.." rev-parse --abbrev-ref HEAD)"
+  [[ "$branch" == "HEAD" ]] || echo "$branch" > "$HERE/.deploy-branch"  # what `update` follows
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  setup)
+    command -v docker >/dev/null || die "Docker is not installed: run deploy/bootstrap.sh first"
+    if [[ ! -f "$ENV_FILE" ]]; then
+      cp "$HERE/cloud.env.example" "$ENV_FILE"
+      say "created deploy/.env"
+    fi
+    chmod 600 "$ENV_FILE"
+    [[ -n "$(get_var POSTGRES_PASSWORD)" ]] || { set_var POSTGRES_PASSWORD "$(openssl rand -hex 24)"; say "generated the database password"; }
+    [[ -n "$(get_var QP_API_TOKEN)" ]] || { set_var QP_API_TOKEN "$(openssl rand -hex 32)"; say "generated the API token"; }
+    if [[ -z "$(get_var QP_ALPACA_API_KEY_ID)" ]]; then
+      read -r -s -p "Alpaca PAPER key id (starts with PK; not shown): " key; echo
+      [[ "$key" == PK* ]] || die "that is not a paper key id (paper key ids start with PK)"
+      read -r -s -p "Alpaca PAPER secret key (not shown): " secret; echo
+      set_var QP_ALPACA_API_KEY_ID "$key"; set_var QP_ALPACA_API_SECRET_KEY "$secret"
+      unset key secret
+      say "saved the Alpaca paper keys"
+    fi
+    say "building the image (a few minutes the first time) ..."
+    dc build api
+    if [[ -z "$(get_var QP_DASHBOARD_PASSWORD_HASH)" ]]; then
+      hashed="$(hash_password)"; set_var QP_DASHBOARD_PASSWORD_HASH "$hashed"; unset hashed
+      say "saved the dashboard password hash"
+    fi
+    say "setup done. Next: ./qp preflight, then (optional) ./qp import-sqlite, then ./qp start"
+    ;;
+  preflight)
+    need_env
+    dc run --rm --no-deps -T api quantpulse-preflight
+    ;;
+  import-sqlite)
+    need_env
+    src="${1:-}"; [[ -f "$src" ]] || die "usage: ./qp import-sqlite /path/to/quantpulse.db (stop QuantPulse on the PC first)"
+    say "stopping the API (if running) and starting the database ..."
+    dc stop api dashboard >/dev/null 2>&1 || true
+    dc up -d db
+    mkdir -p "$HERE/import" && cp "$src" "$HERE/import/quantpulse.db" && chmod -R a+rwX "$HERE/import"
+    for ext in -wal -shm; do
+      if [[ -f "$src$ext" ]]; then cp "$src$ext" "$HERE/import/quantpulse.db$ext"; fi
+    done
+    # shellcheck disable=SC2016  # $QP_DATABASE_URL expands inside the container (the password stays there)
+    dc run --rm --no-deps -T -v "$HERE/import:/import" api \
+      sh -c 'quantpulse-transfer --source sqlite+aiosqlite:////import/quantpulse.db --target "$QP_DATABASE_URL"'
+    rm -rf "$HERE/import"
+    say "history imported. Start with ./qp start"
+    ;;
+  start)
+    need_env
+    profile=()
+    [[ "${1:-}" == "--public" ]] && { [[ -n "$(get_var QP_PUBLIC_HOSTNAME)" ]] || die "set QP_PUBLIC_HOSTNAME in deploy/.env first"; profile=(--profile public); }
+    dc build api
+    dc run --rm --no-deps -T api quantpulse-preflight || die "preflight failed: nothing was started"
+    dc "${profile[@]}" up -d
+    record_deploy
+    wait_healthy
+    "$0" status
+    ;;
+  status)
+    need_env
+    dc ps
+    dc exec -T api python - <<'PY'
+import json, os, urllib.request
+req = urllib.request.Request("http://127.0.0.1:8000/api/v1/system/health?fresh=true",
+                             headers={"X-API-Key": os.environ.get("QP_API_TOKEN", "")})
+r = json.load(urllib.request.urlopen(req, timeout=60))
+print()
+print("HEALTH: %s   (checked %s UTC)" % (r["status"].upper(), r["checked_at"][:19]))
+for name, p in r["parts"].items():
+    print("  %8s  %-15s %s" % (p["status"], name, p["detail"]))
+for b in r.get("order_blockers") or []:
+    print("  NEW BRAIN ORDERS HELD: " + b)
+PY
+    ;;
+  logs)
+    need_env
+    dc logs -f --tail=200 "${1:-api}"
+    ;;
+  restart)
+    need_env
+    if [[ $# -gt 0 ]]; then dc restart "$@"; else dc restart api dashboard; fi
+    wait_healthy
+    ;;
+  stop-trading)
+    need_env
+    reason="${*:-stopped from the server (./qp stop-trading)}"
+    body="$(QP_R="$reason" python3 -c 'import json, os; print(json.dumps({"active": True, "reason": os.environ["QP_R"], "cancel_open_orders": True}))')"
+    out="$(api_call POST /brain/kill-switch "$body")" || { echo "$out" >&2; die "the Brain kill switch could not be set"; }
+    say "Brain kill switch ON: no new Brain orders. Working Brain orders are canceled (retried every minute if Alpaca is unreachable)."
+    ;;
+  start-trading)
+    need_env
+    read -r -p "Allow the Brain to send paper orders again? Type YES: " ok
+    [[ "$ok" == "YES" ]] || die "nothing changed"
+    out="$(api_call POST /brain/kill-switch '{"active": false}')" || { echo "$out" >&2; die "the Brain kill switch could not be released"; }
+    say "Brain kill switch OFF."
+    ;;
+  backup)
+    need_env
+    # shellcheck disable=SC2016  # expands inside the backup container
+    dc exec -T backup sh -c 'f=/backups/quantpulse-manual-$(date -u +%Y%m%d-%H%M%S).dump; pg_dump -Fc -f "$f" && echo "backup written: deploy/backups/${f#/backups/}"'
+    ;;
+  restore)
+    need_env
+    file="${1:-}"; [[ -f "$file" ]] || die "usage: ./qp restore deploy/backups/quantpulse-....dump"
+    read -r -p "This REPLACES the whole database with $file. Type RESTORE: " ok
+    [[ "$ok" == "RESTORE" ]] || die "nothing changed"
+    "$0" backup
+    dc stop api dashboard
+    name="$(basename "$file")"; cp "$file" "$HERE/backups/$name" 2>/dev/null || true
+    dc exec -T backup pg_restore --clean --if-exists --no-owner -d quantpulse "/backups/$name"
+    dc up -d
+    wait_healthy
+    ;;
+  update)
+    need_env
+    "$0" backup
+    before="$(git -C "$HERE/.." rev-parse HEAD)"
+    if [[ "$(git -C "$HERE/.." rev-parse --abbrev-ref HEAD)" == "HEAD" ]]; then  # after a rollback
+      [[ -f "$HERE/.deploy-branch" ]] || die "not on a branch: git -C /opt/quantpulse checkout <branch> first"
+      git -C "$HERE/.." checkout "$(cat "$HERE/.deploy-branch")"
+    fi
+    git -C "$HERE/.." pull --ff-only
+    [[ "$(git -C "$HERE/.." rev-parse HEAD)" != "$before" ]] || say "already up to date; rebuilding anyway"
+    exec "$HERE/qp" start  # the freshly pulled script
+    ;;
+  rollback)
+    need_env
+    target="${1:-}"
+    if [[ -z "$target" ]]; then
+      [[ -f "$HISTORY" ]] || die "no deploy history yet"
+      current="$(git -C "$HERE/.." rev-parse HEAD)"
+      target="$(grep -v "^$current$" "$HISTORY" | tail -1)"
+      [[ -n "$target" ]] || die "no earlier deployment recorded"
+    fi
+    "$0" backup
+    head_then="$(git -C "$HERE/.." ls-tree --name-only "$target" src/quantpulse/db/migrations/versions/ | grep -oE '/[0-9]{4}_' | tr -d '/_' | sort | tail -1)"
+    say "rolling back to $target (database schema $head_then) ..."
+    # the schema goes back first, with the current code (it knows how to undo its own migrations), while the
+    # API is stopped; the Brain then recovers on the older version before it sends anything
+    dc stop api dashboard
+    dc run --rm --no-deps -T api quantpulse-migrate "$head_then" --downgrade || die "the schema could not be rolled back; the backup above is safe (./qp start resumes the current version)"
+    git -C "$HERE/.." checkout --detach "$target"
+    exec "$HERE/qp" start  # the older version's script
+    ;;
+  password)
+    need_env
+    hashed="$(hash_password)"; set_var QP_DASHBOARD_PASSWORD_HASH "$hashed"; unset hashed
+    dc up -d dashboard
+    say "dashboard password changed"
+    ;;
+  tailscale)
+    command -v tailscale >/dev/null || die "install Tailscale first: curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up"
+    sudo tailscale serve --bg --https=443 http://127.0.0.1:8501
+    say "Dashboard on your tailnet: https://$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
+    ;;
+  down)
+    need_env
+    dc --profile public stop
+    say "stopped. Start again with ./qp start"
+    ;;
+  help|*)
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac

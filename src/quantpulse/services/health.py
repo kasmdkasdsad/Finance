@@ -332,6 +332,11 @@ class HealthMonitor:
         if parts["database"]["status"] == "ok":
             await self._fail_closed_on_anomalies()
             await self._unexpected_positions()
+            if c.broker.configured():
+                try:  # a kill switch turned on during an Alpaca outage still owes its cancellations
+                    await c.trading.retry_pending_cancels()
+                except Exception:
+                    logger.warning("retrying the kill switch's cancellations failed", exc_info=True)
         await self._transitions(parts)
         await c.alerts.heartbeat(report["status"] != "fail")
         return f"health {report['status']}"

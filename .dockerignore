@@ -9,8 +9,7 @@ tests
 *.db
 .env
 .env.*
-deploy/.env
-deploy/*.env
+deploy
 backups
 logs
 *.dump

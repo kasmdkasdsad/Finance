@@ -58,6 +58,9 @@ SUBMIT_FAILED = "submit_failed"
 UNRESOLVED = frozenset({PENDING_SUBMIT, SUBMIT_UNKNOWN})
 FINAL = TERMINAL_STATUSES | {SUBMIT_FAILED}
 UNKNOWN_GRACE = timedelta(minutes=2)
+FOREIGN_RECENT = timedelta(
+    hours=2
+)  # a QuantPulse order this recent that we never placed: someone else is trading
 DUPLICATE_NOTE = "an order with this client order id was already sent: not resending"
 RECONCILE_LOOKBACK = timedelta(days=7)
 EVENT_FOR_STATUS = {
@@ -155,6 +158,9 @@ class ReconcileReport:
     resolved_unknown: int = 0
     open_orders: int = 0
     changes: list[str] = field(default_factory=list)
+    # QuantPulse orders (by client id) this database never placed that are still working or recent: another
+    # installation is trading the same account (a PC left running next to the cloud, or a restored backup)
+    foreign: list[str] = field(default_factory=list)
 
 
 def _apply(row: BrokerOrderRow, o: BrokerOrder, now: datetime) -> list[tuple[str, str]]:
@@ -472,6 +478,12 @@ class OrderManager:
                 s.add(row)
                 report.added += 1
                 report.changes.append(f"{cid}: added from Alpaca ({strategy}, {o.status})")
+                placed = o.submitted_at or o.created_at
+                if is_ours(cid) and (
+                    o.status not in TERMINAL_STATUSES
+                    or (placed is not None and now - placed < FOREIGN_RECENT)
+                ):
+                    report.foreign.append(cid)
         return report
 
     # ------------------------------------------------------------------ housekeeping

@@ -125,7 +125,7 @@ def test_a_strong_api_token_is_required(token):
     assert_no_secret("\n".join(report.lines()))
 
 
-@pytest.mark.parametrize("hashed", [None, "plain-password", "pbkdf2_sha256$1000$c2FsdHNhbHQ$" + "A" * 43])
+@pytest.mark.parametrize("hashed", [None, "plain-password", "pbkdf2_sha256:1000:c2FsdHNhbHQ:" + "A" * 43])
 def test_a_dashboard_password_hash_is_required(hashed):
     assert "dashboard_password" in failed(preflight.run(cloud(dashboard_password_hash=hashed), ENV))
 
@@ -217,7 +217,8 @@ def test_hash_password_command_reads_stdin_and_prints_only_the_hash(tmp_path):
 # --------------------------------------------------------------------------- passwords
 def test_password_hashes():
     hashed = hash_password("correct horse battery staple")
-    assert hashed.startswith(f"pbkdf2_sha256${ITERATIONS}$") and "correct" not in hashed
+    assert hashed.startswith(f"pbkdf2_sha256:{ITERATIONS}:") and "correct" not in hashed
+    assert "$" not in hashed and all(ch.isalnum() or ch in "-_:" for ch in hashed)  # safe unquoted in .env
     assert verify_password("correct horse battery staple", hashed)
     assert not verify_password("correct horse battery stapl", hashed)
     assert hash_password("correct horse battery staple") != hashed  # a new salt each time

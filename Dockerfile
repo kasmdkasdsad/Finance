@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# One image for the API and the dashboard. No secret is ever baked in: .env files, deploy/ and data/ are excluded
+# by .dockerignore, and every credential arrives at run time from the environment (deploy/.env on the server).
 FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -16,7 +18,7 @@ COPY frontend ./frontend
 COPY .streamlit ./.streamlit
 
 RUN pip install ".[frontend]" -c constraints.txt \
-    && mkdir -p /app/data \
+    && mkdir -p /app/data /app/logs \
     && chown -R quantpulse:quantpulse /app
 
 USER quantpulse

@@ -46,12 +46,13 @@ synthetic data with a visible status badge.
 10. [Trading sandbox (paper trading)](#trading-sandbox-paper-trading)
 11. [Alpaca paper trading (automated strategy)](#alpaca-paper-trading-automated-strategy)
 12. [The Brain (multi-agent analysis)](#the-brain-multi-agent-analysis)
-13. [Vehicle module reference data](#vehicle-module-reference-data)
-14. [Database and migrations](#database-and-migrations)
-15. [Testing and quality gates](#testing-and-quality-gates)
-16. [Project layout](#project-layout)
-17. [Security and operations](#security-and-operations)
-18. [Known limitations](#known-limitations)
+13. [24/7 in the cloud](#247-in-the-cloud)
+14. [Vehicle module reference data](#vehicle-module-reference-data)
+15. [Database and migrations](#database-and-migrations)
+16. [Testing and quality gates](#testing-and-quality-gates)
+17. [Project layout](#project-layout)
+18. [Security and operations](#security-and-operations)
+19. [Known limitations](#known-limitations)
 
 ---
 
@@ -2007,6 +2008,34 @@ QP_API_TOKEN=...                          # recommended once orders are enabled
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
 `QP_API_TOKEN`.
 
+## 24/7 in the cloud
+
+QuantPulse can run on a small Linux server so the Brain keeps supervising the Alpaca **paper** account with
+the PC turned off. **The step-by-step guide for Windows and iPhone is [`deploy/README.md`](deploy/README.md)**
+(recommended server: Hetzner CX23, about €6 a month; Tailscale, ntfy and healthchecks.io are free).
+
+* **What runs:** Docker Compose on one server (`deploy/compose.yaml`) — PostgreSQL (all history, on a volume),
+  the API with the Brain supervisor and background jobs, the dashboard (password login), a nightly backup, and
+  optionally Caddy for HTTPS on your own domain. Everything restarts by itself after a crash or reboot.
+  `deploy/qp` does setup, preflight, start, status, logs, restart, stop-trading, update, rollback, backup and
+  restore; `quantpulse-transfer` (via `qp import-sqlite`) moves the PC's whole history into PostgreSQL.
+* **Paper only, enforced:** `QP_DEPLOYMENT=cloud` makes the API refuse to start unless `quantpulse-preflight`
+  passes — `QP_ALPACA_PAPER=true` set explicitly, no variable naming Alpaca's live or broker API, the SDK client
+  verified on the paper endpoint, a paper (`PK`) key, Alpaca's own data URL, a 32+ character `QP_API_TOKEN`,
+  a dashboard password hash, PostgreSQL, and every protected risk control at or stricter than the shipped limit.
+* **One supervisor:** a database lease (`service_leases`) lets exactly one process supervise the Brain and send
+  orders; it is checked again at the last pre-submit gate. QuantPulse orders on the account that this database
+  never placed (a second installation, e.g. the PC left running) turn the kill switch on.
+* **Fail closed:** after a start, no cycle and no order until startup recovery (reconciliation, positions,
+  working orders, the safety-critical audit checks) passes; while the database or Alpaca fails, or after a
+  failed reconciliation, new Brain orders are held; repeated rejected/failed/unknown Brain orders turn the Brain
+  kill switch on. A kill switch always takes effect, even while Alpaca is unreachable (its cancellations are
+  retried every minute).
+* **Monitoring:** `GET /api/v1/system/health` (API, database, supervisor, scheduler, Alpaca, market data,
+  reconciliation, last cycle, kill switches) and alerts on changes to ntfy, a webhook and a heartbeat
+  (`QP_ALERT_NTFY_URL`, `QP_ALERT_WEBHOOK_URL`, `QP_HEARTBEAT_URL`). The dashboard's **Remote** page shows it
+  all on a phone, with one-tap STOP BRAIN TRADING.
+
 ## Vehicle module reference data
 
 The packaged profile (`src/quantpulse/data/elantra_2025_limited.json`) was verified when it was built:
@@ -2026,8 +2055,12 @@ The packaged profile (`src/quantpulse/data/elantra_2025_limited.json`) was verif
 
 ## Database and migrations
 
-SQLite by default, via async SQLAlchemy 2 and `aiosqlite`, with WAL, foreign keys and a busy timeout.
-Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are rejected.
+SQLite by default, via async SQLAlchemy 2 and `aiosqlite`, with WAL, foreign keys and a busy timeout;
+PostgreSQL (`postgresql+asyncpg://…`, required in the cloud) with the same migrations — the suite runs on both
+(`QP_TEST_POSTGRES_URL`), and on PostgreSQL migrations take an advisory lock so two instances never migrate at
+once. `quantpulse-transfer --source <sqlite url> --target <postgres url>` copies every table into an empty
+database and verifies the row counts. Timestamps are stored as UTC and returned timezone-aware. Naive datetimes
+are rejected.
 
 | Revision | Tables |
 |---|---|
@@ -2046,6 +2079,13 @@ Timestamps are stored as UTC and returned timezone-aware. Naive datetimes are re
 | `0013_brain_strategy_lab` | `brain_strategies` (versioned specs, status, validation and paper results), `brain_strategy_runs` |
 | `0015_brain_paper_book` | `brain_book_positions`, `brain_book_trades` (simulated fills), `brain_book_equity` (marks) |
 | `0014_brain_prediction_quality` | `brain_predictions.expected_return`; `brain_agent_performance`: independent observations, Wilson interval, p- and q-values, verdict, mean excess (raw and in risk units) |
+| `0016_brain_theses` | `brain_theses` (position theses for the account the Brain owns) |
+| `0017_brain_sessions` | `brain_sessions` (one row per trading day: pre-market check and close) |
+| `0018_brain_executions` | `brain_executions` (the execution ledger, one row per order) and the near-close review |
+| `0019_brain_opportunity_outcomes` | ideas considered — taken or not, and why not — graded later |
+| `0020_brain_reviews` | the automatic daily and weekly reviews |
+| `0021_widen_for_postgres` | `brain_cycles.trigger` 96 and `reference_blobs.key` 160 characters (PostgreSQL enforces lengths) |
+| `0022_service_leases` | `service_leases` (the single-supervisor lease) |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)
@@ -2096,13 +2136,14 @@ src/quantpulse/
   domain/                vehicle · sports · screener · paper_broker · trading_agent · features · alpha_model · research · regime · universe (point-in-time S&P 500) · sectors (SIC → FF12) · earnings · fundamental_factors · trading_signals · trading_regime · trading_portfolio · trading_performance
   providers/             yahoo · polygon · alpaca · treasury · sec_edgar · sp500 (Wikipedia) · fmp · eia · fueleconomy · espn · odds_api · synthetic · alpaca_trading (paper broker)
   schemas/               Pydantic v2 request/response/ingestion models
-  db/                    models · repositories · session · migrate · migrations/versions/0001-0013
-  services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · forecast · model · reference · facts · stocks · predictions · backfill · notifications · trading · trading_data · trading_risk · order_manager · container
+  db/                    models · repositories · session · migrate · transfer (SQLite → PostgreSQL) · migrations/versions/0001-0022
+  services/              market · rates · options · fundamentals · valuation · portfolio · vehicle · sports · picks · sandbox · forecast · model · reference · facts · stocks · predictions · backfill · notifications · trading · trading_data · trading_risk · order_manager · lease (one supervisor) · preflight (cloud) · health · alerts · container
   brain/                 multi-agent analysis: types · perception · indicators · agents/* · registry · consensus · decisions · memory · learning (prediction records) · store · orchestrator · service
   workers/poller.py      market-hours-aware refresh, scheduled email, sandbox scheduler, prediction ledger, model warm-up, paper-trading cycles and reconciliation
   api/                   app factory · middleware · error handlers · routers/*
   data/                  packaged vehicle profile · S&P 500 constituents and change-history snapshot
-frontend/                Streamlit app (app.py, api_client.py, components.py, charts.py, views/*)
+frontend/                Streamlit app (app.py, auth.py (login), api_client.py, components.py, charts.py, views/* incl. remote (the phone page))
+deploy/                  the 24/7 cloud: compose.yaml · qp (helper) · bootstrap.sh · cloud.env.example · Caddyfile · README.md (Windows / iPhone guide)
 launcher/                Windows desktop launcher: quantpulse_launcher.py (start · stop · status) · *.bat · install-shortcuts.ps1 · make_icon.py
 assets/                  QuantPulse icons (.ico for the desktop shortcuts, .png for the browser tab)
 tests/                   unit · providers · integration · frontend · fixtures (real captured payloads) · fakes (Alpaca paper API, market data)
@@ -2124,7 +2165,12 @@ tests/                   unit · providers · integration · frontend · fixture
   errors return a generic 500 with a `request_id` for log correlation.
 * **Logging.** Human-readable by default. Set `QP_LOG_JSON=true` for JSON lines that include the
   request ID, method, path, status and duration.
-* **Container.** Runs as a non-root user with an HTTP health check. Data lives in a named volume.
+* **Container.** Runs as a non-root user with an HTTP health check. Data lives in a named volume. No secret is
+  in the image: `.env` files, `deploy/` and `data/` are excluded from the build context.
+* **Cloud mode** (`QP_DEPLOYMENT=cloud`, see [24/7 in the cloud](#247-in-the-cloud)): the preflight must pass
+  before anything starts; every API request needs the token, with no exemption for this machine; the dashboard
+  requires a PBKDF2-hashed password with a lock-out, and cannot be pointed at another API; every log line masks
+  the configured secrets and anything credential-shaped (URL passwords, `api_key=`, Alpaca key headers).
 
 ---
 

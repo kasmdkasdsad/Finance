@@ -215,3 +215,68 @@ async def test_the_schedule_and_positions_are_recovered_after_a_restart(tmp_path
         await api.container.brain.supervisor.tick()
         pos = (await api.get(f"{API}/positions")).json()
         assert pos["unexpected"] == ["MIDC"] and held <= {p["symbol"] for p in pos["open"]}
+
+
+# --------------------------------------------------------------------------- another installation
+async def test_another_installation_trading_the_same_account_stops_the_brain(tmp_path, monkeypatch):
+    """The PC left running next to the cloud: two databases, so no shared lease — the cloud notices QuantPulse
+    orders it never placed and turns its Brain kill switch on before sending anything."""
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    fake, feed = shared(clock)
+    fake.default_mode = "accept"  # the PC's orders are still working
+    async for pc in brain_client(tmp_path / "pc", clock, fake=fake, feed=feed, **OWNS, **ENABLED):
+        assert "cycle" in await pc.container.brain.supervisor.tick()
+        assert brain_orders(fake)
+        async for cloud in brain_client(tmp_path / "cloud", clock, fake=fake, feed=feed, **OWNS, **ENABLED):
+            sent = order_posts(fake)
+            await cloud.container.brain.supervisor.tick()  # startup recovery reconciles first
+            kill = (await cloud.get(f"{API}/kill-switch")).json()
+            assert kill["active"] and "placed by another installation" in kill["reason"], kill
+            events = [e["kind"] for e in (await cloud.get(f"{TRADING}/events")).json()]
+            assert "foreign_orders_detected" in events
+            clock.advance(31 * 60)
+            await cloud.container.brain.supervisor.tick()
+            assert order_posts(fake) == sent  # nothing from the cloud while the PC trades
+
+
+async def test_old_finished_orders_of_a_retired_installation_are_adopted_quietly(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    fake, feed = shared(clock)
+    async for pc in brain_client(tmp_path / "pc", clock, fake=fake, feed=feed, **OWNS, **ENABLED):
+        assert "cycle" in await pc.container.brain.supervisor.tick()
+    assert brain_orders(fake) and all(o["status"] == "filled" for o in fake.orders.values())
+    clock.advance(3 * 3600)  # the PC was stopped hours ago; its history was not imported
+    async for cloud in brain_client(tmp_path / "cloud", clock, fake=fake, feed=feed, **OWNS, **ENABLED):
+        await cloud.container.brain.supervisor.tick()
+        assert not (await cloud.get(f"{API}/kill-switch")).json()["active"]
+
+
+async def test_the_kill_switch_works_during_an_alpaca_outage_and_cancels_once_it_answers(
+    tmp_path, monkeypatch
+):
+    """Stopping from the phone must never fail because Alpaca is unreachable: the switch holds at once, and the
+    working Brain orders are canceled as soon as Alpaca answers again (the health job retries every minute)."""
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    fake, feed = shared(clock)
+    fake.default_mode = "accept"
+    async for api in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED):
+        await api.container.brain.supervisor.tick()
+        assert any(o["status"] == "accepted" for o in fake.orders.values())
+        fake.outage = True
+        body = {"active": True, "reason": "from my phone", "cancel_open_orders": True}
+        r = await api.post(f"{API}/kill-switch", json=body)
+        assert r.status_code == 200 and r.json()["active"]
+        assert any(o["status"] == "accepted" for o in fake.orders.values())  # not reachable yet
+        await api.container.health.run()
+        assert any(o["status"] == "accepted" for o in fake.orders.values())
+        fake.outage = False
+        clock.advance(61)
+        await api.container.health.run()
+        assert all(o["status"] == "canceled" for o in fake.orders.values())
+        assert (await api.get(f"{API}/kill-switch")).json()["active"]  # still on: a person releases it
+        assert await api.container.trading.retry_pending_cancels() is None  # nothing owed any more
+        events = (await api.get(f"{TRADING}/events")).json()
+        assert any("once Alpaca answered again" in e["message"] for e in events)

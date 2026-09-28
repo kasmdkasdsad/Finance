@@ -114,6 +114,7 @@ from quantpulse.services.order_manager import (
     BRAIN_SLOT,
     STRATEGY,
     OrderManager,
+    ReconcileReport,
     Submission,
     client_order_id,
     is_brain,
@@ -338,17 +339,15 @@ class TradingService:
             raise DomainError(
                 "the Brain kill switch is set by QP_BRAIN_KILL_SWITCH=true: change the setting to release it"
             )
-        await self._put_state(
-            BRAIN_KILL_KEY, {"active": active, "reason": reason, "changed_at": now.isoformat()}
-        )
-        canceled = 0
+        state = {"active": active, "reason": reason, "changed_at": now.isoformat()}
+        await self._put_state(BRAIN_KILL_KEY, state)  # first: the switch holds whatever happens next
+        canceled, failed = 0, None
         if active and cancel_open_orders and self.broker.configured() and self._s.alpaca_trading_enabled:
-            for o in [o for o in await self.broker.open_orders() if is_brain(o.client_order_id)]:
-                try:
-                    await self.broker.cancel(o.id)
-                    canceled += 1
-                except BrokerError as exc:
-                    logger.warning("Brain kill switch could not cancel %s: %s", o.client_order_id, exc)
+            canceled, failed = await self._cancel_working(is_brain)
+            if (
+                failed is not None
+            ):  # Alpaca unreachable: the switch is on; the cancels are retried every minute
+                await self._put_state(BRAIN_KILL_KEY, {**state, "cancel_pending": True})
         await self._event(
             "brain_kill_switch_activated" if active else "brain_kill_switch_released",
             (
@@ -356,10 +355,49 @@ class TradingService:
                 if active
                 else "Brain kill switch released: Brain orders may be sent again"
             )
-            + (f"; canceled {canceled} open Brain order(s)" if canceled else ""),
-            details={"reason": reason, "canceled": canceled},
+            + (f"; canceled {canceled} open Brain order(s)" if canceled else "")
+            + (f"; working Brain orders not canceled yet ({failed}): retried every minute" if failed else ""),
+            details={"reason": reason, "canceled": canceled, "cancel_failed": failed},
         )
         return await self.brain_kill_switch()
+
+    async def _cancel_working(self, whose: Callable[[str], bool]) -> tuple[int, str | None]:
+        """Cancel the working orders ``whose`` client id selects: (canceled, the first failure or None)."""
+        try:
+            working = [o for o in await self.broker.open_orders() if whose(o.client_order_id)]
+        except BrokerError as exc:
+            logger.warning("could not list working orders to cancel: %s", exc)
+            return 0, str(exc)[:200]
+        canceled, failed = 0, None
+        for o in working:
+            try:
+                await self.broker.cancel(o.id)
+                canceled += 1
+            except BrokerError as exc:
+                logger.warning("could not cancel %s: %s", o.client_order_id, exc)
+                failed = failed or str(exc)[:200]
+        return canceled, failed
+
+    async def retry_pending_cancels(self) -> str | None:
+        """A kill switch turned on while Alpaca could not be reached still owes its cancellations: try again
+        (the health job calls this every minute). ``None`` when nothing is owed."""
+        done: list[str] = []
+        for key, whose, label in ((BRAIN_KILL_KEY, is_brain, "Brain"), (KILL_KEY, is_ours, "QuantPulse")):
+            st = await self._state(key)
+            if not (st.get("active") and st.get("cancel_pending")):
+                continue
+            canceled, failed = await self._cancel_working(whose)
+            if failed is None:
+                await self._put_state(key, {k: v for k, v in st.items() if k != "cancel_pending"})
+                await self._event(
+                    "orders_canceled",
+                    f"Kill switch: canceled {canceled} working {label} order(s) once Alpaca answered again",
+                    details={"count": canceled},
+                )
+                done.append(f"{label}: {canceled} canceled")
+            else:
+                done.append(f"{label}: still failing ({failed})")
+        return "; ".join(done) or None
 
     def _require_broker(self) -> None:
         if not self.broker.configured():
@@ -969,16 +1007,15 @@ class TradingService:
             raise DomainError(
                 "the kill switch is set by QP_TRADING_KILL_SWITCH=true: change the setting to release it"
             )
-        await self._put_state(KILL_KEY, {"active": active, "reason": reason, "changed_at": now.isoformat()})
-        canceled = 0
+        state = {"active": active, "reason": reason, "changed_at": now.isoformat()}
+        await self._put_state(KILL_KEY, state)  # first: the switch holds whatever happens next
+        canceled, failed = 0, None
         if active and cancel_open_orders and self.broker.configured() and self._s.alpaca_trading_enabled:
-            open_orders = [o for o in await self.broker.open_orders() if is_ours(o.client_order_id)]
-            for o in open_orders:
-                try:
-                    await self.broker.cancel(o.id)
-                    canceled += 1
-                except BrokerError as exc:
-                    logger.warning("kill switch could not cancel %s: %s", o.client_order_id, exc)
+            canceled, failed = await self._cancel_working(is_ours)
+            if (
+                failed is not None
+            ):  # Alpaca unreachable: the switch is on; the cancels are retried every minute
+                await self._put_state(KILL_KEY, {**state, "cancel_pending": True})
         await self._event(
             "kill_switch_activated" if active else "kill_switch_released",
             (
@@ -986,8 +1023,9 @@ class TradingService:
                 if active
                 else "Kill switch released"
             )
-            + (f"; canceled {canceled} open order(s)" if canceled else ""),
-            details={"reason": reason, "canceled": canceled},
+            + (f"; canceled {canceled} open order(s)" if canceled else "")
+            + (f"; working orders not canceled yet ({failed}): retried every minute" if failed else ""),
+            details={"reason": reason, "canceled": canceled, "cancel_failed": failed},
         )
         return await self.kill_switch()
 
@@ -1549,6 +1587,7 @@ class TradingService:
             if trigger == "startup":
                 await self._close_interrupted()
             report = await self.orders.reconcile()
+            await self._guard_foreign(report)
             account, positions = await asyncio.gather(self.broker.account(), self.broker.positions())
             await self._baseline(account)
             await self._forget_closed({p.symbol for p in positions})
@@ -1578,6 +1617,27 @@ class TradingService:
             unknown_resolved=report.resolved_unknown,
             changes=report.changes,
         )
+
+    async def _guard_foreign(self, report: ReconcileReport) -> None:
+        """QuantPulse orders on the account that this database never placed mean another installation is
+        trading it (the PC left running next to the cloud, or an older backup restored): the database lease
+        cannot see a second database, so stop at once — the Brain kill switch when the Brain owns the account,
+        the trading kill switch otherwise. A person releases it after stopping the other installation."""
+        if not report.foreign:
+            return
+        shown = ", ".join(report.foreign[:3])
+        reason = (
+            f"automatic: {len(report.foreign)} QuantPulse order(s) on this Alpaca account were placed by another "
+            f"installation ({shown}): stop the other one (the PC?) before releasing"
+        )[:300]
+        await self._event(
+            "foreign_orders_detected", reason, details={"client_order_ids": report.foreign[:50]}
+        )
+        if self._s.brain_owns_account:
+            if not (await self.brain_kill_switch()).active:
+                await self.set_brain_kill_switch(True, reason, cancel_open_orders=False)
+        elif not (await self.kill_switch()).active:
+            await self.set_kill_switch(True, reason, cancel_open_orders=False)
 
     async def _close_interrupted(self) -> None:
         """Cycles still marked running when the process starts were cut short by a restart. Their orders
@@ -1778,7 +1838,7 @@ class TradingService:
 
         # 1. Alpaca is authoritative: reconcile and read the account
         progress(0.01, "reconciling with Alpaca")
-        await self.orders.reconcile()
+        await self._guard_foreign(await self.orders.reconcile())
         self._reconciled()
         account, positions, open_orders = await self._snapshot()
         await self._baseline(account)
@@ -2095,7 +2155,7 @@ class TradingService:
 
         # 1. Alpaca is authoritative: reconcile and read the account
         progress(0.05, "reconciling with Alpaca")
-        await self.orders.reconcile()
+        await self._guard_foreign(await self.orders.reconcile())
         now = self._reconciled()
         account, positions, open_orders = await self._snapshot()
         await self._baseline(account)

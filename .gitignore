@@ -21,6 +21,8 @@ data/*.db-*
 deploy/.env
 deploy/*.env
 !deploy/*.env.example
+deploy/.deploy-*
+deploy/import/
 backups/
 *.dump
 *.sql.gz
