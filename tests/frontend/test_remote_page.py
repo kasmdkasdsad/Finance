@@ -3,15 +3,23 @@
 import httpx
 
 from tests.frontend.test_brain_page import _texts, brain_server  # noqa: F401  (the module's fixture)
-from tests.frontend.test_pages import assert_clean, page
+from tests.frontend.test_pages import page
 
 
 def test_the_remote_page_shows_health_the_brain_and_the_account(brain_server):  # noqa: F811
     url, _fake = brain_server
     at = page("remote", url).run()
-    assert_clean(at)
+    assert not at.exception, [e.value for e in at.exception]
+    # the only error shown is the light itself: this test server's trading switches are off (a dry run)
+    assert [(e.icon, e.value) for e in at.error] == [
+        ("🔴", "STOPPED OR BROKEN — trading is switched off (QP_ALPACA_TRADING_ENABLED / QP_TRADING_DRY_RUN)")
+    ]
     text = _texts(at)
-    assert "Brain supervisor" in text and "Equity" in text and "Day P&L" in text
+    assert (
+        "Brain supervisor" in text and "Equity" in text and "Today's P&L" in text and "Buying power" in text
+    )
+    lights = [*(w.icon for w in at.warning), *(s.icon for s in at.success), *(e.icon for e in at.error)]
+    assert any(i in ("🟢", "🟡", "🔴") for i in lights)  # the one line to read first
     assert any(b.label == "STOP BRAIN TRADING" for b in at.button)
     assert "Cycle #" in text  # the last cycle, its agents and consensus
     # CLOUD and TRADING from /brain/cloud-status

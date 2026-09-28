@@ -28,12 +28,14 @@ from quantpulse.db import migrate
 from quantpulse.db.models import BrainCycleRow, BrainDecisionRow, BrokerOrderRow, TradingEventRow
 from quantpulse.providers.alpaca_trading import PAPER_URL, BrokerError
 from quantpulse.services import preflight
+from quantpulse.services.order_manager import WORKING_STATUSES
 
 if TYPE_CHECKING:
     from quantpulse.services.container import Container
 
 HEARTBEAT_STALE = timedelta(minutes=5)
 FILLED = ("filled", "partially_filled")
+WORKING = tuple(WORKING_STATUSES | {"pending_new", "partially_filled"})
 LEADER_FIELDS = (
     "holder",
     "live",
@@ -67,7 +69,8 @@ async def cloud_status(c: Container) -> dict[str, Any]:
         verified = endpoint == PAPER_URL
     except BrokerError as exc:
         endpoint, verified = f"not verified: {type(exc).__name__}", False
-    alpaca = {
+    connectivity = await health.alpaca_part(now)
+    alpaca: dict[str, Any] = {
         "paper_endpoint_verified": verified,
         "endpoint": endpoint,
         "paper_setting": s.alpaca_paper,
@@ -75,7 +78,7 @@ async def cloud_status(c: Container) -> dict[str, Any]:
         # there is no live path at all; this says the running configuration is verified as paper
         "account": "PAPER" if verified and s.alpaca_paper and key.startswith("PK") else "NOT VERIFIED",
         "live_trading_possible": False,
-        "connectivity": await health.alpaca_part(now),
+        "connectivity": connectivity,
     }
 
     # --- the supervisor (its heartbeat is in the database: true from any instance) ---------------
@@ -162,7 +165,24 @@ async def cloud_status(c: Container) -> dict[str, Any]:
     if md.get("status") == "warn":
         entry_reasons.append(f"market data: {md.get('detail')}")
     reasons = list(dict.fromkeys(reasons))
+    summary = _summary(
+        s,
+        database_ok=db_ok,
+        alpaca_ok=connectivity.get("status") in ("ok", "n/a"),
+        paper_verified=alpaca["account"] == "PAPER",
+        supervisor=supervisor,
+        reconciliation_failed=bool(
+            c.trading.reconcile_error is not None or recon.get("last_failed_after_success")
+        ),
+        kill_switches=[k for k in (brain_kill, trading_kill) if k is not None and k.active],
+        market_open=bool(market["open"]),
+        reasons=reasons,
+        entry_reasons=entry_reasons,
+        # just started and not ticked yet: the first tick is due within a minute
+        starting=last_tick is None and now - c.started_at < HEARTBEAT_STALE,
+    )
     return {
+        "summary": summary,
         "checked_at": now.isoformat(),
         "service": {
             "status": "ok",
@@ -182,6 +202,7 @@ async def cloud_status(c: Container) -> dict[str, Any]:
         "today": activity.get("today"),
         "latest_decision": activity.get("latest_decision"),
         "latest_rejection": activity.get("latest_rejection"),
+        "latest_trade": activity.get("latest_trade"),
         "autonomous_execution": {
             "permitted": not reasons,
             "reasons": reasons,
@@ -245,6 +266,17 @@ async def _activity(c: Container, now: datetime) -> dict[str, Any]:
         last_cycle = (
             await session.scalars(select(BrainCycleRow).order_by(BrainCycleRow.id.desc()).limit(1))
         ).first()
+        last_fill = (
+            await session.scalars(
+                select(BrokerOrderRow)
+                .where(BrokerOrderRow.status.in_(FILLED))
+                .order_by(BrokerOrderRow.updated_at.desc())
+                .limit(1)
+            )
+        ).first()
+        working = await session.scalar(
+            select(func.count()).select_from(BrokerOrderRow).where(BrokerOrderRow.status.in_(WORKING))
+        )
     latest = decisions[0] if decisions else None
     rejected = next(
         (d for d in decisions if d.risk_approved is False or not (d.execution or {}).get("sent", False)), None
@@ -256,6 +288,18 @@ async def _activity(c: Container, now: datetime) -> dict[str, Any]:
             "brain_orders": int(brain_orders or 0),
             "fills": int(fills or 0),
             "last_cycle_id": last_cycle.id if last_cycle else None,
+            "open_orders": int(working or 0),  # as last reconciled with Alpaca
+        },
+        "latest_trade": None
+        if last_fill is None
+        else {
+            "symbol": last_fill.symbol,
+            "side": last_fill.side,
+            "status": last_fill.status,
+            "filled_qty": last_fill.filled_quantity,
+            "price": last_fill.average_fill_price,
+            "at": (last_fill.filled_at or last_fill.updated_at).isoformat(),
+            "by": last_fill.strategy,
         },
         "latest_decision": _decision(latest),
         "latest_rejection": _decision(rejected, why=True),
@@ -283,3 +327,67 @@ def _decision(d: BrainDecisionRow | None, *, why: bool = False) -> dict[str, Any
     if why or not ex.get("sent"):
         out["reason"] = str(reason)[:300]
     return out
+
+
+def _summary(
+    s: Any,
+    *,
+    database_ok: bool,
+    alpaca_ok: bool,
+    paper_verified: bool,
+    supervisor: dict[str, Any],
+    reconciliation_failed: bool,
+    kill_switches: list[Any],
+    market_open: bool,
+    reasons: list[str],
+    entry_reasons: list[str],
+    starting: bool,
+) -> dict[str, Any]:
+    """One light for the phone. RED: something is broken or the Brain is stopped (a person should look);
+    YELLOW: healthy but not trading on its own right now for a reason that should pass (starting up, a data
+    warning); GREEN: trading on its own is permitted — or healthy and waiting for the market to open. The
+    reasons are the gates' own words; nothing here decides anything."""
+    red: list[str] = []
+    if not database_ok:
+        red.append("the database is not answering")
+    if not alpaca_ok:
+        red.append("the Alpaca paper API is not answering")
+    if not paper_verified:
+        red.append("the Alpaca PAPER account is not verified")
+    if kill_switches:
+        red.append("a kill switch is ON: " + "; ".join(k.reason or k.source for k in kill_switches)[:160])
+    if reconciliation_failed:
+        red.append("the last reconciliation with Alpaca failed")
+    if not s.brain_supervisor_enabled:
+        red.append("the Brain supervisor is disabled (QP_BRAIN_SUPERVISOR_ENABLED=false)")
+    elif database_ok:
+        age = supervisor.get("last_tick_age_seconds")
+        if supervisor.get("paused"):
+            red.append("the Brain supervisor is paused (dashboard/API)")
+        if (supervisor.get("role") == "none" and not starting) or (
+            age is not None and age > HEARTBEAT_STALE.total_seconds()
+        ):
+            red.append("no supervisor is running the Brain")
+        if supervisor.get("waiting"):
+            red.append(f"startup recovery has not passed: {supervisor['waiting']}"[:200])
+    if not s.brain_owns_account:
+        red.append(f"QP_BRAIN_MODE={s.brain_mode}: the Brain does not trade the paper account")
+    elif not s.alpaca_trading_enabled or s.trading_dry_run:
+        red.append("trading is switched off (QP_ALPACA_TRADING_ENABLED / QP_TRADING_DRY_RUN)")
+    open_reasons = [r for r in reasons if "market is closed" not in r]
+    if red:
+        light, headline = "red", "STOPPED OR BROKEN — " + red[0]
+    elif open_reasons:
+        light, headline = "yellow", "Healthy, not trading on its own right now — " + open_reasons[0]
+    elif not market_open:
+        light, headline = "green", "Healthy — the market is closed; the Brain trades when it opens"
+    elif entry_reasons:
+        light, headline = "yellow", "Trading on its own; new positions held back — " + entry_reasons[0]
+    else:
+        light, headline = "green", "Healthy — the Brain may trade the PAPER account on its own"
+    return {
+        "light": light,
+        "emoji": {"green": "🟢", "yellow": "🟡", "red": "🔴"}[light],
+        "headline": headline[:300],
+        "problems": red,
+    }

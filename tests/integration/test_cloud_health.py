@@ -293,9 +293,8 @@ async def test_a_standby_reports_a_leader_that_holds_the_lease_but_stopped_ticki
         await b.container.brain.supervisor.tick()
         assert (await b.container.health.check())["parts"]["supervisor"]["status"] == "standby"
         clock.advance(6 * 60)
-        await (
-            a.container.lease.acquire()
-        )  # A still renews its lease (its heartbeat task runs) but never ticks
+        # A still renews its lease (its heartbeat task runs) but never ticks
+        await a.container.lease.acquire()
         await b.container.brain.supervisor.tick()
         part = (await b.container.health.check())["parts"]["supervisor"]
         assert part["status"] == "fail" and "has not ticked" in part["detail"]

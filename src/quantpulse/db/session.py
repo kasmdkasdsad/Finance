@@ -22,6 +22,9 @@ def _ensure_sqlite_dir(url: str) -> None:
                 Path(raw).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
+SSL_MODES = ("disable", "allow", "prefer", "require", "verify-ca", "verify-full")
+
+
 @dataclass(frozen=True, slots=True)
 class PoolSettings:
     """Connection pool and timeouts for PostgreSQL (SQLite ignores them)."""
@@ -46,8 +49,10 @@ def postgres_args(url: str, pool: PoolSettings) -> tuple[str, dict[str, Any]]:
         "server_settings": {"application_name": "quantpulse"},
     }
     sslmode = query.pop("sslmode", None) or query.pop("ssl", None)
-    if sslmode and sslmode != "disable":
-        connect["ssl"] = "require" if sslmode in ("require", "prefer", "allow") else sslmode
+    if sslmode:  # libpq's modes, which asyncpg accepts as they are; anything else is a mistake: refuse it
+        if sslmode not in SSL_MODES:
+            raise ValueError(f"unknown sslmode {sslmode!r} in the database URL (expected one of {SSL_MODES})")
+        connect["ssl"] = sslmode
     clean = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
     return clean, {
         "pool_size": pool.size,

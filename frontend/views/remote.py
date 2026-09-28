@@ -100,10 +100,12 @@ def _brain(sup: dict[str, Any]) -> None:
 
 def _account(acct: dict[str, Any] | None, positions: dict[str, Any] | None, orders: list[Any] | None) -> None:
     if acct:
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         c1.metric("Equity", money(acct.get("equity"), 0), pct(acct.get("day_pl_pct"), 2, signed=True))
-        c2.metric("Day P&L", money(acct.get("day_pl"), 0))
-        c3.metric("Total P&L", money(acct.get("total_pl"), 0), pct(acct.get("total_pl_pct"), 2, signed=True))
+        c2.metric("Buying power", money(acct.get("buying_power"), 0))
+        c3, c4 = st.columns(2)
+        c3.metric("Today's P&L", money(acct.get("day_pl"), 0))
+        c4.metric("Total P&L", money(acct.get("total_pl"), 0), pct(acct.get("total_pl_pct"), 2, signed=True))
     rows = (positions or {}).get("open") or []
     if rows:
         st.dataframe(
@@ -191,6 +193,16 @@ def _ago(seconds: int | None) -> str:
     )
 
 
+def _light(cs: dict[str, Any]) -> None:
+    """The one line to read first: 🟢 trading on its own (or healthy, market closed), 🟡 healthy but not trading
+    right now, 🔴 stopped or broken — and why."""
+    sm = cs.get("summary") or {}
+    text = _md(f"{sm.get('emoji', '')} {sm.get('headline', '—')}")
+    {"green": st.success, "yellow": st.warning}.get(sm.get("light", ""), st.error)(text)
+    for problem in (sm.get("problems") or [])[1:4]:
+        st.caption(_md(f"🔴 also: {problem}"))
+
+
 def _cloud(cs: dict[str, Any]) -> None:
     """CLOUD and TRADING at a glance, from /brain/cloud-status (the existing gates, read-only)."""
     sv, sup, db = cs["service"], cs["supervisor"], cs["database"]
@@ -226,7 +238,8 @@ def _cloud(cs: dict[str, Any]) -> None:
     t2.metric(
         "Market", "open" if market["open"] else "closed", market["new_york_time"] + " NY", delta_color="off"
     )
-    t3.metric("Orders / fills today", f"{today.get('orders', 0)} / {today.get('fills', 0)}")
+    t3.metric("Orders / fills today", f"{today.get('orders', 0)} / {today.get('fills', 0)}",
+              f"{today.get('open_orders', 0)} open", delta_color="off")  # fmt: skip
     bk = (sw.get("brain_kill_switch") or {}).get("active")
     st.caption(
         _md(
@@ -235,6 +248,11 @@ def _cloud(cs: dict[str, Any]) -> None:
             f"data: {(cs.get('data') or {}).get('detail', '—')}"
         )
     )
+    lt = cs.get("latest_trade")
+    if lt:
+        price = f" @ {money(lt['price'], 2)}" if lt.get("price") else ""
+        st.caption(_md(f"Latest trade: **{lt['side']} {lt['filled_qty']:g} {lt['symbol']}**{price} "
+                       f"({lt['status']}, {_when(lt.get('at'))}, by {lt.get('by')})"))  # fmt: skip
     for key, label in (("latest_decision", "Latest decision"), ("latest_rejection", "Latest rejection")):
         d = cs.get(key)
         if d:
@@ -244,13 +262,15 @@ def _cloud(cs: dict[str, Any]) -> None:
 def render() -> None:
     st.title("QuantPulse · Remote", anchor=False)
     st.badge("ALPACA PAPER · simulated money", icon=":material/science:", color="orange")
+    cs = guarded(lambda: api().get(f"{BASE}/cloud-status"), "cloud status")
+    if cs:
+        _light(cs)
     report = guarded(lambda: api().get("/system/health"), "health")
     if report:
         _health(report)
     ex = guarded(lambda: api().get(f"{BASE}/execution"), "Brain execution")
     if ex:
         _kill_switch(ex)
-    cs = guarded(lambda: api().get(f"{BASE}/cloud-status"), "cloud status")
     if cs:
         _cloud(cs)
     sup = guarded(lambda: api().get(f"{BASE}/supervisor"), "supervisor")

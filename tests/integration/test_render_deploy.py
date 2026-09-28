@@ -262,8 +262,10 @@ async def test_the_cloud_status_says_exactly_why_the_brain_may_not_trade(
             assert order_posts(fake) == 0, forced.text[:300]
         else:  # no supervisor: nothing runs by itself (a person may still start a cycle)
             assert order_posts(fake) == 0
-        ae = (await api.get(STATUS)).json()["autonomous_execution"]
+        st = (await api.get(STATUS)).json()
+        ae = st["autonomous_execution"]
         assert not ae["permitted"] and any(reason in r for r in ae["reasons"]), ae
+        assert st["summary"]["light"] == "red" and st["summary"]["headline"].startswith("STOPPED OR BROKEN")
     finally:
         await gen.stop()
 
@@ -276,6 +278,7 @@ async def test_the_cloud_status_when_everything_allows_trading(tmp_path, monkeyp
     try:
         before = (await api.get(STATUS)).json()
         assert not before["autonomous_execution"]["permitted"]  # no supervisor tick yet: not yet
+        assert before["summary"]["light"] == "yellow"  # healthy, starting: it should pass by itself
         assert any("has not ticked" in r for r in before["autonomous_execution"]["reasons"])
         await api.container.brain.supervisor.tick()
         st = (await api.get(STATUS)).json()
@@ -292,6 +295,13 @@ async def test_the_cloud_status_when_everything_allows_trading(tmp_path, monkeyp
         assert sup["leader"]["clock"] == "process"  # tests drive a fake clock; production uses the database's
         assert sup["leader"]["heartbeat_age_seconds"] == 0 and sup["leader"]["expires_in_seconds"] > 0
         assert st["today"]["brain_orders"] >= 1 and st["latest_decision"]["sent"]
+        assert (
+            st["summary"]["light"] == "green"
+            and st["summary"]["emoji"] == "🟢"
+            and not st["summary"]["problems"]
+        )
+        assert st["latest_trade"]["symbol"] and st["latest_trade"]["by"] == "brain"
+        assert st["today"]["open_orders"] == 0  # everything filled at the fake
         assert st["switches"]["brain_mode"] == "paper_execution" and not st["switches"]["dry_run"]
     finally:
         await gen.stop()

@@ -63,9 +63,8 @@ async def test_decision_order_timeout_retry_never_sends_twice(tmp_path, monkeypa
         cids = unique(fake)
         assert cids
         rows = await orders(api.container)
-        assert all(
-            rows[c].status == "filled" and rows[c].alpaca_order_id for c in cids
-        )  # adopted, not unknown
+        # adopted, not left unknown
+        assert all(rows[c].status == "filled" and rows[c].alpaca_order_id for c in cids)
         fake.default_mode = "fill"
         attempts = len(fake.bodies)
         await api.post(f"{API}/run")  # a retry of the same slot (a double click, a re-run after the timeout)
