@@ -36,21 +36,48 @@ async def test_every_trade_has_an_audit_trail_from_the_idea_to_the_fill(tmp_path
         trail = (await api.get(f"{API}/decisions/{first}/audit")).json()
         assert [s["stage"] for s in trail["stages"]] == list(STAGES)
         st = {s["stage"]: s for s in trail["stages"]}
-        for name in ("data", "agents", "opinions", "consensus", "portfolio_decision", "risk_check", "order",
-                     "alpaca_response", "fill"):  # fmt: skip
+        for name in ("data", "agents", "opinions", "evidence", "disagreement", "consensus", "portfolio_fit",
+                     "portfolio_decision", "risk_check", "order", "alpaca_response", "execution", "fill"):  # fmt: skip
             assert st[name]["status"] == "done", (name, st[name])
+        assert trail["gaps"] == [] and trail["sent"]
         assert st["order"]["detail"]["client_order_id"] == done[-1]["client_order_id"]
         assert any(e["kind"] == "order_filled" for e in st["alpaca_response"]["detail"]["events"])
         assert st["risk_check"]["detail"][
             "at_execution"
         ]  # the checks at the moment of sending, not only the preview
         assert st["portfolio_decision"]["detail"]["entry"]["thesis"]
-        assert st["outcome"]["status"] == "none" and "not graded yet" in st["outcome"]["summary"]
-        assert st["learning"]["status"] == "none"
+        assert st["evidence"]["detail"]["supporting"] and st["disagreement"]["detail"]["sources"]
+        assert st["execution"]["detail"]["ledger"]["client_order_id"] == done[-1]["client_order_id"]
+        # later stages are pending, not missing: the fill is reconciled next cycle, the call graded at its horizon
+        for name in (
+            "position",
+            "pnl",
+            "benchmark_relative",
+            "prediction_grade",
+            "decision_quality",
+            "lesson",
+        ):
+            assert st[name]["status"] == "pending", (name, st[name])
+        assert "open until their horizon" in st["prediction_grade"]["summary"]
         clock.advance(31 * 60)
         await run_cycle(api)  # the fill is now a position with its thesis
-        st = {s["stage"]: s for s in (await api.get(f"{API}/decisions/{first}/audit")).json()["stages"]}
+        trail = (await api.get(f"{API}/decisions/{first}/audit")).json()
+        st = {s["stage"]: s for s in trail["stages"]}
         assert st["position"]["status"] == "done" and st["position"]["detail"]["thesis"]
+        assert st["pnl"]["status"] == "done" and st["pnl"]["detail"]["kind"] == "unrealised"
+        rel = st["benchmark_relative"]
+        assert (
+            rel["status"] == "done" and rel["detail"]["final"] is False and "so far (open)" in rel["summary"]
+        )
+        assert trail["gaps"] == [] and set(trail["pending"]) == {
+            "prediction_grade",
+            "decision_quality",
+            "lesson",
+        }
+        traces = (await api.get(f"{API}/traces")).json()
+        assert traces["trades"] >= 1 and traces["with_gaps"] == 0, [(t["action"], t["gaps"]) for t in traces["trades_detail"]]
+        assert traces["in_progress"] == traces["trades"]
+        assert "traceable" in traces["headline"]
         assert (await api.get(f"{API}/decisions/999999/audit")).status_code == 404
 
 

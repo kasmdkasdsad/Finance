@@ -790,15 +790,21 @@ def _positions() -> None:
         )
 
 
-STAGE_ICON = {"done": "✅", "none": "—", "n/a": "·"}
+STAGE_ICON = {"done": "✅", "pending": "⏳", "missing": "❌", "none": "—", "n/a": "·"}
 
 
 def _audit() -> None:
     st.markdown(
         "**Audit trail** — one decision followed from the idea to what it taught: opportunity → data → agents → "
-        "opinions → consensus → debate → portfolio decision → risk check → order → Alpaca response → fill → "
-        "position → outcome → learning. Everything shown was recorded at the time."
+        "evidence → disagreement → consensus → debate → portfolio fit → decision → risk check → order → Alpaca "
+        "→ execution → fill → position → P&L → benchmark-relative outcome → prediction grade → decision quality "
+        "→ lesson. Everything shown was recorded at the time: ⏳ comes later, ❌ is a gap in the record."
     )
+    traces = guarded(lambda: api().get(f"{BASE}/traces", limit=200), "traceability") or {}
+    if traces:
+        (st.error if traces.get("with_gaps") else st.caption)(_md(f"Traceability: {traces['headline']}."))
+        if traces.get("gaps_by_stage"):
+            st.caption(_md(f"Missing links by stage: {traces['gaps_by_stage']}"))
     trades = guarded(lambda: api().get(f"{BASE}/trades", limit=100), "trades") or []
     if not trades:
         st.caption("No trade decisions yet.")

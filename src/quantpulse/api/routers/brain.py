@@ -222,8 +222,20 @@ async def trades(limit: int = Query(50, ge=1, le=500), c: Container = ContainerD
 
 
 @router.get(
+    "/traces",
+    summary="Is every sent Brain order traceable end to end? Gaps (missing links) and stages still to come",
+)
+async def traces(limit: int = Query(200, ge=1, le=1000), c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.audit import completeness
+
+    await c.brain.ledger.refresh()
+    return await completeness(c.brain.db, limit)
+
+
+@router.get(
     "/decisions/{decision_id}/audit",
-    summary="One decision's full trail: opportunity → data → agents → … → fill → position → outcome → learning",
+    summary="One decision's full trail: opportunity → evidence → consensus → fit → risk → execution → fill → "
+    "P&L → benchmark-relative outcome → prediction grade → decision quality → lesson",
 )
 async def audit(decision_id: int = Path(..., ge=1), c: Container = ContainerDep) -> dict[str, Any]:
     from quantpulse.brain.audit import trail

@@ -19,7 +19,9 @@ luck, risk or timing:
   ``after_next_close`` — the part that remained;
 * ``data_ok`` — whether it was made on usable data (fresh, live, or a closed market's last close).
 
-When a consensus prediction is graded, the decision made on it in the same cycle gets its outcome too.
+When a consensus prediction is graded, the decision made on it in the same cycle gets its outcome too — and
+so do decisions later that day whose consensus repeated the same view (a claim is recorded once a day, so
+those cycles have no prediction of their own; without this their decisions would never be graded).
 """
 
 from __future__ import annotations
@@ -28,14 +30,14 @@ import asyncio
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Protocol
 
 from sqlalchemy import select
 
 from quantpulse.core.clock import Clock
 from quantpulse.core.market_calendar import NEW_YORK, regular_close
-from quantpulse.db.models import BrainDecisionRow, BrainPredictionRow
+from quantpulse.db.models import BrainConsensusRow, BrainDecisionRow, BrainPredictionRow
 from quantpulse.db.session import Database
 from quantpulse.schemas.common import DataStatus
 from quantpulse.services.market import MarketService
@@ -247,17 +249,41 @@ async def _decision_outcomes(db: Database, prediction_ids: Sequence[int], now: d
             )
         ).all()
         for p in preds:
-            decisions = (
+            decisions = list(
+                (
+                    await s.scalars(
+                        select(BrainDecisionRow).where(
+                            BrainDecisionRow.cycle_id == p.cycle_id,
+                            BrainDecisionRow.subject == p.subject,
+                            BrainDecisionRow.evaluated_at.is_(None),
+                        )
+                    )
+                ).all()
+            )
+            # a view is recorded as a claim once a day: later cycles that day repeating it (same direction)
+            # made their decisions on the same call, so they are graded on it too
+            day = p.made_at.astimezone(NEW_YORK).date()
+            end = datetime.combine(day + timedelta(days=1), time(0, 0), NEW_YORK)
+            stance = "bullish" if p.direction > 0 else "bearish"
+            repeats = (
                 await s.scalars(
-                    select(BrainDecisionRow).where(
-                        BrainDecisionRow.cycle_id == p.cycle_id,
+                    select(BrainDecisionRow)
+                    .join(BrainConsensusRow, BrainConsensusRow.id == BrainDecisionRow.consensus_id)
+                    .where(
                         BrainDecisionRow.subject == p.subject,
+                        BrainDecisionRow.cycle_id != p.cycle_id,
                         BrainDecisionRow.evaluated_at.is_(None),
+                        BrainDecisionRow.created_at > p.made_at,
+                        BrainDecisionRow.created_at < end,
+                        BrainConsensusRow.stance == stance,
+                        BrainConsensusRow.unknown.is_(False),
                     )
                 )
             ).all()
+            decisions += list(repeats)
             for d in decisions:
                 d.outcome = {
+                    "covered_by_cycle": p.cycle_id if d.cycle_id != p.cycle_id else None,
                     "prediction_id": p.id,
                     "horizon_days": p.horizon_days,
                     "due_date": p.due_date.isoformat(),
