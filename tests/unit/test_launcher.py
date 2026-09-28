@@ -198,6 +198,9 @@ def test_a_missing_project_or_virtual_environment_is_explained(tmp_path):
         ql.check_installation(tmp_path)
 
 
+@pytest.mark.skipif(
+    not ql.venv_python(ROOT).exists(), reason="needs the project's .venv (CI installs elsewhere)"
+)
 def test_the_real_project_passes_the_installation_check():
     assert ql.check_installation(ROOT) == ql.venv_python(ROOT)
 
