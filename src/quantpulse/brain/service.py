@@ -36,6 +36,7 @@ from .orchestrator import Orchestrator
 from .perception import Perception
 from .reflection import consensus_calibration
 from .registry import AgentRegistry
+from .reviews import Reviewer
 from .sessions import SessionKeeper
 from .shadow import StrategyShadow
 from .store import BrainStore
@@ -153,6 +154,8 @@ class BrainService:
         self.improvements = ImprovementEngine(
             db, settings.brain_min_reliability_observations, settings.brain_min_confidence
         )
+        # daily and weekly reviews of its own results (lessons; proposals only, never a change)
+        self.reviewer = Reviewer(db, settings, clock, self.memory, self.improvements)
         self.shadow = StrategyShadow(settings, clock, db, trading)  # the replaced strategy, for comparison
         self.sessions = SessionKeeper(
             settings,

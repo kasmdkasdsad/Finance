@@ -1225,3 +1225,22 @@ class BrainOpportunityOutcomeRow(Base):
     verdict: Mapped[str | None] = mapped_column(String(16), nullable=True)
     evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainReviewRow(Base):
+    """An automatic review of the Brain's own results — daily after the close, weekly after the week's last
+    session: what happened, what it means, the lessons (structured, deterministic) and the proposals it led
+    to. Append-only: a review is never rewritten, a new one is added."""
+
+    __tablename__ = "brain_reviews"
+    __table_args__ = (Index("ix_brain_reviews_kind_period", "kind", "period_end"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(12))  # daily | weekly
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    headline: Mapped[str] = mapped_column(Text)
+    body: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    lessons: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    proposals: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())

@@ -222,6 +222,28 @@ async def trades(limit: int = Query(50, ge=1, le=500), c: Container = ContainerD
 
 
 @router.get(
+    "/reviews", summary="The Brain's automatic daily and weekly reviews of its own results (newest first)"
+)
+async def reviews(
+    kind: str | None = Query(None, pattern="^(daily|weekly)$"),
+    limit: int = Query(30, ge=1, le=500),
+    c: Container = ContainerDep,
+) -> list[dict[str, Any]]:
+    return await c.brain.reviewer.reviews(kind, limit)
+
+
+@router.post(
+    "/reviews/{kind}",
+    dependencies=ControlAuth,
+    summary="Write a review now (daily: today; weekly: this week so far). Lessons and proposals only",
+)
+async def run_review(
+    kind: str = Path(..., pattern="^(daily|weekly)$"), c: Container = ContainerDep
+) -> dict[str, Any]:
+    return await (c.brain.reviewer.daily() if kind == "daily" else c.brain.reviewer.weekly())
+
+
+@router.get(
     "/behavior",
     summary="Pathological behaviour: round trips, turnover, concentration, correlation, repeated losses, ignored "
     "ideas, herding, consensus flips, behaviour after a losing streak (findings only; nothing is changed)",
@@ -502,7 +524,9 @@ async def lab_compare(
 # ---------------------------------------------------------------------------------------------- improvement
 @router.get("/improvements", summary="Improvement proposals (problem, evidence, change, validation plan)")
 async def improvements(
-    status: str | None = Query(None, pattern="^(proposed|testing|validated|rejected|applied)$"),
+    status: str | None = Query(
+        None, pattern="^(proposed|testing|validated|rejected|applied|protected_review)$"
+    ),
     c: Container = ContainerDep,
 ) -> list[dict[str, Any]]:
     return await c.brain.improvements.proposals(status)

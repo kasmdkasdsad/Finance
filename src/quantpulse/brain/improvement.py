@@ -12,7 +12,8 @@ through
 because every version keeps its own track record). Risk controls are never a subject of proposals, and
 this is enforced, not only intended: a proposal that names a protected control (:data:`PROTECTED`: loss,
 position and order limits, the kill switches, the data-quality requirements, the paper-only settings, the
-execution safety switches) is withheld before it is stored (:func:`withheld`).
+execution safety switches) is never a suggestion — it is recorded with the status ``protected_review`` and
+the control it touches (:func:`withheld`), for a person to look at, and nothing ever applies it.
 
 What it looks for:
 
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import itertools
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -94,7 +96,11 @@ PROTECTED = (
     "QP_BRAIN_KILL_SWITCH",
     "QP_BRAIN_MODE",
 )
-STATUSES = ("proposed", "testing", "validated", "rejected", "applied")
+STATUSES = ("proposed", "testing", "validated", "rejected", "applied", "protected_review")
+PROTECTED_NOTE = (
+    "touches a protected control ({control}): recorded for a person's review only. The Brain never changes a "
+    "protected control, and nothing in a proposal is applied automatically."
+)
 EXECUTION_MIN_FILLS = 10  # graded fills before execution is judged at all
 POOR_SHARE = 0.3  # … and the share of poor fills that calls for a review
 QUICK_SESSIONS = 2
@@ -152,6 +158,12 @@ class ImprovementEngine:
             *await self._data_sources(now),
             *await self._assumptions(),
         ]
+        return await self.submit(found, now)
+
+    async def submit(self, found: Sequence[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+        """Store proposals (from :meth:`review` or from the automatic reviews): an open proposal about the same
+        thing is refreshed instead of duplicated, and one that touches a protected control is recorded as
+        ``protected_review``, never as a suggestion. Returns what was written or refreshed."""
         out: list[dict[str, Any]] = []
         async with self._db.session() as s:
             open_rows = {
@@ -159,24 +171,30 @@ class ImprovementEngine:
                 for r in (
                     await s.scalars(
                         select(BrainImprovementRow).where(
-                            BrainImprovementRow.status.in_(("proposed", "testing"))
+                            BrainImprovementRow.status.in_(("proposed", "testing", "protected_review"))
                         )
                     )
                 ).all()
             }
             for f in found:
-                if withheld(f) is not None:  # never stored, never shown as a suggestion
-                    continue
+                control = withheld(f)
+                if control is not None:  # a protected control: recorded for a person, never a suggestion
+                    f = {
+                        **f,
+                        "evidence": {**f["evidence"], "protected_control": control},
+                        "proposal": {**f["proposal"], "protected": PROTECTED_NOTE.format(control=control)},
+                    }
+                status = "protected_review" if control is not None else "proposed"
                 key = (f["kind"], f["target"], f["title"])
                 row = open_rows.get(key)
                 if row is None:
                     row = BrainImprovementRow(
-                        status="proposed", test_result={}, created_at=now, **f, updated_at=now
+                        status=status, test_result={}, created_at=now, **f, updated_at=now
                     )
                     s.add(row)
                 else:
                     row.evidence, row.proposal, row.updated_at = f["evidence"], f["proposal"], now
-                out.append(f)
+                out.append({**f, "status": row.status})
         return out
 
     async def proposals(self, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:

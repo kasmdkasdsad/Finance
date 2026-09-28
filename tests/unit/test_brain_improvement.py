@@ -110,7 +110,9 @@ def test_a_proposal_that_names_a_protected_control_is_withheld():
     )
 
 
-async def test_withheld_proposals_are_never_stored(database, monkeypatch):
+async def test_a_proposal_touching_a_protected_control_is_recorded_for_review_never_suggested(
+    database, monkeypatch
+):
     from quantpulse.brain.improvement import _p
 
     engine = ImprovementEngine(database, 30, 0.45)
@@ -121,5 +123,11 @@ async def test_withheld_proposals_are_never_stored(database, monkeypatch):
         ]
 
     monkeypatch.setattr(engine, "_assumptions", unsafe)
-    assert await engine.review(NOW) == []
-    assert await engine.proposals() == []
+    [written] = await engine.review(NOW)
+    assert written["status"] == "protected_review"
+    assert written["evidence"]["protected_control"] == "QP_TRADING_REQUIRE_LIVE_DATA"
+    assert await engine.proposals("proposed") == []  # never offered as a suggestion
+    [kept] = await engine.proposals("protected_review")
+    assert "never changes a protected control" in kept["proposal"]["protected"]
+    await engine.review(NOW)  # reviewed again: updated in place, not duplicated
+    assert len(await engine.proposals()) == 1

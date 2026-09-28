@@ -324,7 +324,15 @@ async def test_a_simulated_trading_day(tmp_path, monkeypatch):
         assert any("near_close" in d for _, d, _ in log)
         # after the close: nothing is sent any more
         done = await tick_at(ny(16, 45), False)
-        assert {"session_close", "learn", "trade_lessons", "review", "improve"} <= set(done.split(", "))
+        assert {
+            "session_close",
+            "learn",
+            "trade_lessons",
+            "review",
+            "improve",
+            "daily_review",
+            "weekly_review",
+        } <= set(done.split(", "))  # fmt: skip  (a Friday: the week's last session)
         assert order_posts(fake) == opened
         await tick_at(ny(17, 30), False)
         assert order_posts(fake) == opened
@@ -358,3 +366,14 @@ async def test_a_simulated_trading_day(tmp_path, monkeypatch):
         positions = (await api.get(f"{API}/positions")).json()
         assert {p["symbol"] for p in positions["open"]} == set(fake.positions)
         assert posts(fake) == [ORDERS] * opened  # the only writes were paper orders
+        # the day and the week reviewed by the Brain itself: lessons with their sample, proposals only
+        weekly, daily = (await api.get(f"{API}/reviews")).json()
+        assert daily["kind"] == "daily" and weekly["kind"] == "weekly"
+        assert daily["body"]["day"]["orders_sent"] == len(cids) and daily["body"]["trades"]
+        assert daily["body"]["decisions"]["cycles_traded"] >= 1 and daily["body"]["ideas"]["considered"] > 0
+        assert all(
+            {"topic", "lesson", "sample", "strength"} <= set(x) for x in daily["lessons"] + weekly["lessons"]
+        )
+        assert weekly["body"]["performance"]["sessions"] == 1 and "note" in weekly["body"]["performance"]
+        assert "learning_snapshot" in weekly["body"] and weekly["lessons"]
+        assert all(p["status"] in ("proposed", "protected_review") for p in weekly["proposals"])

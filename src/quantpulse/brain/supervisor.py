@@ -11,9 +11,11 @@ market open        a *full* cycle every ``QP_BRAIN_CYCLE_MINUTES``; a quote *mon
                    ``QP_BRAIN_MONITOR_MINUTES`` (holdings and the last focus: large moves and stale quotes
                    become events); the trading service's audit trail is read for orders and risk limits;
                    event wake-ups run focused cycles, at most ``QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR``
-after hours        once a day (from 16:40): a learning pass (grade the day's matured predictions, reflect,
-                   update track records), a *portfolio* review of the holdings, the strategy lab's
-                   paper (shadow) portfolios, and a self-improvement review (proposals only)
+after hours        once a day (from 16:40): a learning pass (grade the day's matured predictions and
+                   ideas, reflect, update track records), trade lessons, a *portfolio* review of the
+                   holdings, the strategy lab's paper (shadow) portfolios, a self-improvement review
+                   (proposals only), the **daily review** — and after the week's last session the
+                   **weekly review** (lessons; proposals only, never a change)
 weekend, holiday   once a day: a learning pass; a *deep* research cycle; the strategy lab proposes
                    untried templates and validates up to two (it never promotes: that is a person's call)
 =================  =========================================================================================
@@ -57,6 +59,7 @@ from quantpulse.core.market_calendar import NEW_YORK, is_market_open, regular_cl
 
 from .context import brain_session
 from .events import Event, EventBus, EventType, TradingEventBridge
+from .reviews import last_session_of_week
 from .types import BrainSession
 
 if TYPE_CHECKING:
@@ -244,6 +247,9 @@ class Supervisor:
                 await run("review", self._cycle("portfolio", (), "after-hours review"))
                 await run("lab_paper", self._brain.lab.paper_update())
                 await run("improve", self._improve())
+                await run("daily_review", self._brain.reviewer.daily(local.date()))
+                if last_session_of_week(local.date()):  # the week's last session: the weekly review too
+                    await run("weekly_review", self._brain.reviewer.weekly(local.date()))
                 last["after_hours"] = now.isoformat()
         else:  # weekend or holiday
             if due("offday_learn", daily_from=time(9, 0)):
