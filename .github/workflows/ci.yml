@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Render deploys the branch it follows only after these checks pass (render.yaml: autoDeployTrigger: checksPass)
+    branches: [main, "claude/**"]
   pull_request:
 
 permissions:
@@ -40,6 +41,45 @@ jobs:
           QP_DATABASE_URL=sqlite+aiosqlite:///./ci.db quantpulse-migrate base --downgrade
       - name: Tests
         run: pytest -q
+
+  postgres:
+    # The cloud runs on PostgreSQL: migrations up and down, schema drift, and every cloud / deployment test
+    # (single supervisor, restarts, deploy overlap, crash recovery, kill switch, health, history transfer).
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      QP_ENABLE_LIVE_DATA: "false"
+      QP_TEST_POSTGRES_URL: postgresql+asyncpg://postgres@localhost:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[frontend,dev]" -c constraints.txt
+      - name: Migrations on PostgreSQL (up, down, up)
+        run: |
+          psql -h localhost -U postgres -c "CREATE DATABASE ci_migrate"
+          QP_DATABASE_URL=postgresql://postgres@localhost:5432/ci_migrate quantpulse-migrate
+          QP_DATABASE_URL=postgresql://postgres@localhost:5432/ci_migrate quantpulse-migrate base --downgrade
+          QP_DATABASE_URL=postgresql://postgres@localhost:5432/ci_migrate quantpulse-migrate
+      - name: Cloud and deployment tests on PostgreSQL
+        run: >-
+          pytest -q tests/integration/test_cloud_operations.py tests/integration/test_cloud_health.py
+          tests/integration/test_cloud_security.py tests/integration/test_cloud_database.py
+          tests/integration/test_render_deploy.py tests/integration/test_migrations.py
+          tests/integration/test_brain_execution.py tests/integration/test_brain_supervisor.py
+          tests/unit/test_lease.py
 
   docker:
     runs-on: ubuntu-latest

@@ -105,9 +105,13 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         ],
     )
     app.add_middleware(GZipMiddleware, minimum_size=2048)
+    # In the cloud only the dashboard's server calls the API (no browser does): the local-development origins go.
+    origins = settings.cors_origins
+    if settings.deployment == "cloud":
+        origins = [o for o in origins if "localhost" not in o and "127.0.0.1" not in o]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
+        allow_origins=origins,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["*"],
     )
