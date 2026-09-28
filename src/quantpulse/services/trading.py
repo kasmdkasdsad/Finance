@@ -1925,7 +1925,7 @@ class TradingService:
             f"brain-{brain_cycle_id}", trigger, False, progress, owner="brain", scheduled=scheduled, work=work
         )
 
-    def _verify_paper(self) -> str:
+    def verify_paper(self) -> str:
         """Fail closed unless the SDK client points at Alpaca's paper API (checked before every Brain cycle)."""
         if not self._s.alpaca_paper:  # the setting refuses false; kept as a guard
             raise NotPaperTrading("QP_ALPACA_PAPER is not true: refusing to trade")
@@ -1961,7 +1961,7 @@ class TradingService:
             notes.append("Not sent to Alpaca because: " + "; ".join(blockers))
 
         # 0. paper only, fail closed
-        endpoint = self._verify_paper()
+        endpoint = self.verify_paper()
         notes.append(f"endpoint verified: {endpoint}")
 
         # 1. Alpaca is authoritative: reconcile and read the account

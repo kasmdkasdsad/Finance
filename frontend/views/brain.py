@@ -646,6 +646,125 @@ def _positions() -> None:
         )
 
 
+STAGE_ICON = {"done": "✅", "none": "—", "n/a": "·"}
+
+
+def _audit() -> None:
+    st.markdown(
+        "**Audit trail** — one decision followed from the idea to what it taught: opportunity → data → agents → "
+        "opinions → consensus → debate → portfolio decision → risk check → order → Alpaca response → fill → "
+        "position → outcome → learning. Everything shown was recorded at the time."
+    )
+    trades = guarded(lambda: api().get(f"{BASE}/trades", limit=100), "trades") or []
+    if not trades:
+        st.caption("No trade decisions yet.")
+        return
+    labels = {
+        t["decision_id"]: f"#{t['decision_id']} · {t['at'][:16].replace('T', ' ')} · {t['action']} "
+        f"{t['quantity']:g} {t['subject']} · {'sent' if t['sent'] else 'not sent'} ({t['status']})"
+        for t in trades
+    }
+    chosen = st.selectbox("Decision", list(labels), format_func=labels.__getitem__, key="audit_decision")
+    trail = guarded(lambda: api().get(f"{BASE}/decisions/{chosen}/audit"), "audit trail")
+    if trail is None:
+        return
+    for stage in trail["stages"]:
+        icon = STAGE_ICON.get(stage["status"], "·")
+        with st.expander(
+            _md(f"{icon} {stage['stage'].replace('_', ' ').upper()} — {stage['summary'][:160]}")
+        ):
+            st.json(stage["detail"], expanded=False)
+
+
+def _data_report() -> None:
+    st.markdown(
+        "**Market data and SIP** — how often market data stopped the Brain, what it stopped, and what real-time "
+        "SIP data would and would not change. The quote-age and spread limits are never loosened to trade "
+        "more; buying data is your decision."
+    )
+    days = st.select_slider("Window (days)", [5, 10, 20, 60, 120], value=20, key="data_days")
+    rep = guarded(lambda: api().get(f"{BASE}/data-report", days=days), "data report")
+    if rep is None:
+        return
+    how = rep["how_often"]
+    (st.error if how.get("data_blocked_cycles") else st.info)(
+        _md(rep["headline"]), icon=":material/monitoring:"
+    )
+    c = st.columns(4)
+    c[0].metric("Cycles in session", how["cycles_in_session"])
+    c[1].metric(
+        "Data-blocked cycles", how["data_blocked_cycles"], pct(how.get("share"), 0), delta_color="off"
+    )
+    q = rep["quote_age"]
+    c[2].metric("Stale IEX quotes", q["iex_quiet"], f"of {q['focus_quotes']} focus quotes", delta_color="off")
+    c[3].metric(
+        "IEX last trade (median)",
+        f"{q['iex_trade_age_median_s']:,.0f}s" if q.get("iex_trade_age_median_s") is not None else "—",
+        f"limit {q['limit_s']:,.0f}s",
+        delta_color="off",
+    )
+    f = rep["functions_affected"]
+    rows = [{"what": "cycles with new positions halted", "count": f["new_positions_halted_cycles"]}]
+    rows += [{"what": k, "count": v} for k, v in f["trade_decisions_stopped"].items()]
+    rows += [{"what": "opportunities stopped at the data stage", "count": f["opportunities_stopped_at_data"]}]
+    rows += [{"what": f"agent {a}: opinions on non-executable data", "count": n}
+             for a, n in f["agents_on_non_executable_data"].items()]  # fmt: skip
+    st.dataframe(pd.DataFrame(rows).astype(str), hide_index=True, use_container_width=True)
+    if how.get("by_day"):
+        st.bar_chart(pd.DataFrame(how["by_day"]).set_index("day")[["cycles", "data_blocked"]])
+    sip = rep["sip"]
+    st.markdown(_md(f"**SIP report** (configured feed: `{sip['configured_feed']}`)"))
+    st.markdown(_md(f"*Current limitation.* {sip['limitation']}"))
+    st.markdown(_md("*What SIP would solve:*\n" + "\n".join(f"- {x}" for x in sip["would_solve"])))
+    st.markdown(_md("*What it would not solve:*\n" + "\n".join(f"- {x}" for x in sip["would_not_solve"])))
+    st.markdown(_md(f"*Expected benefit.* {sip['expected_benefit']}"))
+    st.markdown(_md(f"*Cost.* {sip['cost']}"))
+    st.markdown(_md(f"*Decision.* {sip['decision']}"))
+
+
+def _sessions() -> None:
+    data = guarded(lambda: api().get(f"{BASE}/sessions", limit=60), "sessions")
+    rows = (data or {}).get("sessions") or []
+    st.markdown(
+        "**Trading days** (Brain-owned account): the pre-market check (paper endpoint, account, reconciliation, "
+        "calendar, market data, overnight changes) and the close (equity, the day's return against the "
+        "benchmark, orders, halts)."
+    )
+    if not rows:
+        st.caption("No trading day recorded yet (recorded while the Brain owns the account).")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "day": r["day"],
+                    "owner": r["owner"],
+                    "return": pct(r.get("day_return"), 2),
+                    "benchmark": pct(r.get("benchmark_return"), 2),
+                    "excess": pct(r.get("excess_return"), 2),
+                    "exposure": pct(r.get("exposure"), 0),
+                    "positions": r.get("positions"),
+                    "orders": f"{r['orders_sent']} sent / {r['orders_filled']} filled",
+                    "cycles": r["cycles"],
+                    "data-blocked": r["data_blocked_cycles"],
+                    "pre-market": "ok"
+                    if (r.get("premarket") or {}).get("ok")
+                    else ("—" if not r.get("premarket") else "problems"),
+                }
+                for r in rows
+            ]
+        ).astype(str),
+        hide_index=True,
+        use_container_width=True,
+    )
+    pre = rows[0].get("premarket") or {}
+    if pre.get("checks"):
+        st.markdown(_md(f"**Latest pre-market check** ({rows[0]['day']})"))
+        for c in pre["checks"]:
+            mark = "✅" if c["ok"] else "❌" if c["ok"] is False else "ℹ️"
+            st.caption(_md(f"{mark} {c['name']}: {c['detail']}"))
+
+
 def _book() -> None:
     st.markdown(
         "**The Brain's paper book** — a hypothetical portfolio the Brain manages. Every trade the risk engine "
@@ -1127,6 +1246,7 @@ def _operations() -> None:
         st.caption(
             _md("Last runs: " + ", ".join(f"{k} {v[:16].replace('T', ' ')}" for k, v in sup["last"].items()))
         )
+    _sessions()
     _models()
     kind = st.selectbox(
         "Events",
@@ -1317,6 +1437,8 @@ def render() -> None:
             "Improvements",
             "Supervisor & events",
             "Positions & theses",
+            "Audit trail",
+            "Market data & SIP",
             "Paper book",
             "Memory",
             "History",
@@ -1343,8 +1465,12 @@ def render() -> None:
     with tabs[9]:
         _positions()
     with tabs[10]:
-        _book()
+        _audit()
     with tabs[11]:
-        _memory()
+        _data_report()
     with tabs[12]:
+        _book()
+    with tabs[13]:
+        _memory()
+    with tabs[14]:
         _history(cycles)

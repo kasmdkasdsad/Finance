@@ -209,6 +209,42 @@ async def adopt(
     return await c.brain.theses.adopt(symbol)
 
 
+@router.get("/sessions", summary="Trading days of the Alpaca paper account: pre-market checks and closes")
+async def sessions(limit: int = Query(60, ge=1, le=500), c: Container = ContainerDep) -> dict[str, Any]:
+    return {"sessions": await c.brain.sessions.sessions(limit)}
+
+
+@router.get("/trades", summary="Recent trade decisions and how far each got (newest first)")
+async def trades(limit: int = Query(50, ge=1, le=500), c: Container = ContainerDep) -> list[dict[str, Any]]:
+    from quantpulse.brain.audit import trades as recent
+
+    return await recent(c.brain.db, limit)
+
+
+@router.get(
+    "/decisions/{decision_id}/audit",
+    summary="One decision's full trail: opportunity → data → agents → … → fill → position → outcome → learning",
+)
+async def audit(decision_id: int = Path(..., ge=1), c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.audit import trail
+    from quantpulse.core.errors import NotFoundError
+
+    found = await trail(c.brain.db, decision_id)
+    if found is None:
+        raise NotFoundError(f"decision {decision_id} not found")
+    return found
+
+
+@router.get("/data-report", summary="How often market data stopped the Brain, and what SIP data would change")
+async def data_report(days: int = Query(20, ge=1, le=365), c: Container = ContainerDep) -> dict[str, Any]:
+    from datetime import timedelta
+
+    from quantpulse.brain.data_report import data_report as report
+
+    now = c.clock.now()
+    return await report(c.brain.db, c.settings, now - timedelta(days=days), now)
+
+
 @router.get("/kill-switch", response_model=KillSwitchOut, summary="The Brain kill switch")
 async def brain_kill_switch(c: Container = ContainerDep) -> KillSwitchOut:
     return await c.trading.brain_kill_switch()

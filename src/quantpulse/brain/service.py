@@ -35,6 +35,7 @@ from .orchestrator import Orchestrator
 from .perception import Perception
 from .reflection import consensus_calibration
 from .registry import AgentRegistry
+from .sessions import SessionKeeper
 from .store import BrainStore
 from .supervisor import Supervisor
 from .theses import ThesisBook
@@ -116,6 +117,15 @@ class BrainService:
         self.lab = StrategyLab(settings, clock, db, market, data, self.store)
         self.improvements = ImprovementEngine(
             db, settings.brain_min_reliability_observations, settings.brain_min_confidence
+        )
+        self.sessions = SessionKeeper(
+            settings,
+            clock,
+            db,
+            trading,
+            data,
+            MarketPrices(market, clock) if market is not None else None,
+            market.feed_status if market is not None else None,
         )
         self.supervisor = Supervisor(settings, clock, self, self.bus)
 

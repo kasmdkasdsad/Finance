@@ -126,6 +126,12 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert "Language models: not in use" in text
     assert any("The Brain's paper book" in m.value for m in at.markdown)  # its own, hypothetical portfolio
     assert any("owned by the Brain" in e.label for e in at.expander)
+    assert any("**Audit trail**" in m.value for m in at.markdown)
+    assert any("SIP report" in m.value for m in at.markdown) and any(
+        "Decision." in m.value for m in at.markdown
+    )
+    assert any("**Trading days**" in m.value for m in at.markdown)
+    assert any("Positions and their theses" in m.value for m in at.markdown)
     assert any(b.label == "STOP BRAIN ORDERS" for b in at.button)  # always one click away
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
     assert "AgentCompleted" in set(events["event"])

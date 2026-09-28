@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 PREMARKET_FROM = time(8, 30)
 AFTER_HOURS_FROM = time(16, 40)
 STATE_KEY = "supervisor"
+RECONCILE_EVERY = timedelta(minutes=5)
 
 SYMBOL_EVENTS = {
     EventType.PRICE_MOVE_DETECTED,
@@ -191,7 +192,10 @@ class Supervisor:
         if trading_events:
             await self._bus.publish(trading_events)
 
+        owns = self._s.brain_owns_account and self._brain.trading.broker.configured()
         if session is BrainSession.OPEN and is_market_open(now):
+            if owns and due("reconcile", RECONCILE_EVERY):
+                await run("reconcile", self._brain.trading.reconcile("brain periodic"))
             if due("monitor", timedelta(minutes=self._s.brain_monitor_minutes)):
                 await run("monitor", self._monitor())
             if due("cycle", timedelta(minutes=self._s.brain_cycle_minutes)):
@@ -200,10 +204,14 @@ class Supervisor:
             await self._drain(run)
         elif session is BrainSession.PRE_MARKET:
             if due("premarket", daily_from=PREMARKET_FROM):
+                if owns:  # verify the account, reconcile, calendar, data, overnight changes
+                    await run("premarket_check", self._brain.sessions.premarket())
                 await run("premarket_learn", self._brain.learn(wait=None))
                 await run("premarket", self._cycle("full", (), "pre-market preparation"))
         elif session is BrainSession.AFTER_HOURS:
             if due("after_hours", daily_from=AFTER_HOURS_FROM):
+                if owns:  # reconcile and record the day (what the 60-session evaluation reads)
+                    await run("session_close", self._brain.sessions.close())
                 await run("learn", self._brain.learn(wait=None))
                 await run("review", self._cycle("portfolio", (), "after-hours review"))
                 await run("lab_paper", self._brain.lab.paper_update())

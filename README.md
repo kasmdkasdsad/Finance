@@ -1162,6 +1162,19 @@ the UI (under *Alpaca Paper Trading*). What is not built is listed under
    * working: this cycle's investigation;
    * long term: regime changes and proposed trades.
 
+### Market data report and SIP
+
+`GET /brain/data-report?days=20` (the page's *Market data & SIP* tab) counts, over a window, how often market
+data stopped the Brain and what it stopped: in-session cycles with new positions halted (**TRADING
+BLOCKED — DATA QUALITY INSUFFICIENT**) per day, trade decisions blocked by a data veto or refused by the risk
+engine for quote age or spread, opportunities stopped at the data stage, the agents that worked on data that
+was not executable, quote statuses and the IEX last-trade age (median and 90th percentile), and spreads that
+could not be measured or were wide on IEX's own book. Its **SIP report** states the current limitation, what
+real-time SIP would and would not solve, the expected benefit (a count of what would have passed the data
+checks — never a claim about returns), the cost (a paid Alpaca market-data subscription; see Alpaca's
+pricing page — QuantPulse has not verified the price and never buys it) and the decision, which is yours:
+with the subscription, set `QP_ALPACA_STOCK_FEED=sip`. The quote-age and spread limits stay as they are.
+
 ### What the market data really is
 
 Before any agent runs, every quote gets one precise status (`brain/data_health.py`), shown on the page and
@@ -1403,9 +1416,9 @@ market session and by event, and never runs every agent all the time:
 
 | Session | What it does |
 |---|---|
-| Pre-market (from 08:30 New York) | Once a day: a learning pass for anything that matured overnight, then a full cycle to prepare the session. Nothing is executable while the market is closed |
-| Market open | A full cycle every `QP_BRAIN_CYCLE_MINUTES` (30). A quote monitor for holdings and the last focus every `QP_BRAIN_MONITOR_MINUTES` (5): a move of ≥ 3 daily σ or a stale quote becomes an event. It reads the trading service's audit trail for orders and risk limits (read only). Event wake-ups run focused cycles, at most `QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR` (4) |
-| After hours (from 16:40) | Once a day: a learning pass, then a portfolio review of the holdings |
+| Pre-market (from 08:30 New York) | Once a day. When the Brain owns the account, first the **pre-market check**: the SDK client points at the paper API, Alpaca's view of the account (blocked?), reconciliation of orders and positions, the calendar (Alpaca's clock, an early close), market data (the vendors' feeds, a live benchmark quote), overnight changes against the last close, and orders still open before the bell — kept with the day (`GET /brain/sessions`). Then a learning pass and a full cycle to prepare the session. Nothing is executable while the market is closed |
+| Market open | A full cycle every `QP_BRAIN_CYCLE_MINUTES` (30). A quote monitor for holdings and the last focus every `QP_BRAIN_MONITOR_MINUTES` (5): a move of ≥ 3 daily σ or a stale quote becomes an event. When the Brain owns the account, a reconciliation with Alpaca every 5 minutes. It reads the trading service's audit trail for orders, fills and risk limits. Event wake-ups run focused cycles, at most `QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR` (4) |
+| After hours (from 16:40) | Once a day. When the Brain owns the account, first the **close**: reconcile, then record the day — equity, the day's return and the benchmark's, exposure, positions, the Brain's orders sent and filled and their notional, cycles run and how many had new positions halted and why (`brain_sessions`, what the 60-session evaluation reads). Then a learning pass and a portfolio review of the holdings |
 | Weekends and holidays | Once a day: a learning pass, then a deep research cycle (twice the pre-screen and opportunity budget) |
 
 **Events** are recorded in `brain_events` and served by `GET /brain/events`:
@@ -1670,6 +1683,14 @@ horizon (behind the benchmark) — a broken thesis is closed as a protective exi
 signal (it goes even while entries are halted); **weakening** when the evidence has faded (no bullish
 consensus, past its horizon, behind the benchmark) — first in line to be replaced; otherwise **intact**.
 
+**Audit trail.** Every decision can be followed end to end (`GET /brain/decisions/{id}/audit`, the page's
+*Audit trail* tab; `GET /brain/trades` lists recent trade decisions): OPPORTUNITY → DATA (the symbol's quote
+diagnosis) → AGENTS → OPINIONS → CONSENSUS → DEBATE → PORTFOLIO DECISION (reasons, fit, the entry thesis)
+→ RISK CHECK (the preview *and* the checks at the moment of sending) → ORDER → ALPACA RESPONSE (the
+order's events) → FILL (price and slippage against the estimate) → POSITION (the thesis) → OUTCOME (graded
+predictions) → LEARNING (reflections and lessons). It is read from what was recorded at the time, never
+recomputed; a stage that did not happen says so.
+
 **Never twice.** Brain client order ids are `qp-brain-<slot>-<SYMBOL>-<b|s>`, the slot being New York time
 floored to `QP_BRAIN_CYCLE_MINUTES`: however many cycles or restarts happen in a slot, at most one buy and
 one sell per symbol can be sent in it (a repeat is refused by the order manager's write-ahead record and
@@ -1716,6 +1737,9 @@ recorded as `duplicate_prevented`).
 | `POST /brain/agents/{id}` `{"enabled": false}` | Switch an agent off or on |
 | `POST /brain/run?wait=` `{"symbols": ["NVDA"], "kind": "full"}` (`full`, `portfolio`, `event`, `deep`) | Run one cycle now (202 with progress if it takes longer than `wait`); in `paper_execution` its decisions go to the trading service (a manual cycle: no arming needed) |
 | `GET /brain/positions?closed=` · `POST /brain/positions/{symbol}/adopt` | The account's positions with their theses, checks and performance (open, recently closed, unexpected) · adopt a position the Brain did not open |
+| `GET /brain/sessions?limit=` | Trading days of the Brain-owned account: the pre-market check and the close |
+| `GET /brain/trades?limit=` · `GET /brain/decisions/{id}/audit` | Recent trade decisions · one decision's full audit trail |
+| `GET /brain/data-report?days=` | How often market data stopped the Brain, and the SIP report |
 | `GET /brain/execution` | Who owns the account, both kill switches, what would stop Brain orders (manual and scheduled), the last cycle's entry halts and orders sent |
 | `GET /brain/kill-switch` · `POST /brain/kill-switch {"active": true, "reason": "…", "cancel_open_orders": true}` | The Brain kill switch: stop new Brain orders at once (or allow them again) |
 | `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |

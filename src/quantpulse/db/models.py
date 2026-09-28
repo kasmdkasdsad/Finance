@@ -1095,3 +1095,30 @@ class BrainThesisRow(Base):
     exit_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     history: Mapped[list[Any]] = mapped_column(JSON, default=list)
+
+
+class BrainSessionRow(Base):
+    """One trading day of the Alpaca paper account: the pre-market check, the close (account, benchmark,
+    orders, halts, data blocks). What the 60-session evaluation is computed from."""
+
+    __tablename__ = "brain_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, unique=True)
+    owner: Mapped[str] = mapped_column(String(16))  # brain | strategy
+    equity_open: Mapped[float | None] = mapped_column(Float, nullable=True)  # Alpaca's last_equity
+    equity_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    day_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exposure: Mapped[float | None] = mapped_column(Float, nullable=True)
+    positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    orders_sent: Mapped[int] = mapped_column(Integer, default=0)
+    orders_filled: Mapped[int] = mapped_column(Integer, default=0)
+    traded_notional: Mapped[float] = mapped_column(Float, default=0.0)
+    cycles: Mapped[int] = mapped_column(Integer, default=0)
+    data_blocked_cycles: Mapped[int] = mapped_column(Integer, default=0)
+    halts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # entry-halt code -> cycles
+    premarket: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    close: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
