@@ -2010,9 +2010,14 @@ The `POST` endpoints follow the trading order endpoints' rule: from another mach
 
 ## 24/7 in the cloud
 
-QuantPulse can run on a small Linux server so the Brain keeps supervising the Alpaca **paper** account with
-the PC turned off. **The step-by-step guide for Windows and iPhone is [`deploy/README.md`](deploy/README.md)**
-(recommended server: Hetzner CX23, about €6 a month; Tailscale, ntfy and healthchecks.io are free).
+QuantPulse runs in the cloud so the Brain keeps supervising the Alpaca **paper** account with the PC turned off.
+
+* **Render (the primary deployment): [`RENDER.md`](RENDER.md)** — `render.yaml` defines everything: the API with the
+  Brain supervisor (always on, 1 CPU / 2 GB), a free dashboard for the phone, and a private PostgreSQL 16; about
+  $32.50 a month; every push to the branch deploys itself once GitHub CI passes. `GET /api/v1/brain/cloud-status`
+  and `quantpulse-cloud-check` say whether it is running, paper, alone, and allowed to trade — and why not.
+* A self-hosted server (Docker Compose, e.g. Hetzner CX23 at about €6 a month, reached through Tailscale):
+  [`deploy/README.md`](deploy/README.md).
 
 * **What runs:** Docker Compose on one server (`deploy/compose.yaml`) — PostgreSQL (all history, on a volume),
   the API with the Brain supervisor and background jobs, the dashboard (password login), a nightly backup, and
@@ -2143,7 +2148,8 @@ src/quantpulse/
   api/                   app factory · middleware · error handlers · routers/*
   data/                  packaged vehicle profile · S&P 500 constituents and change-history snapshot
 frontend/                Streamlit app (app.py, auth.py (login), api_client.py, components.py, charts.py, views/* incl. remote (the phone page))
-deploy/                  the 24/7 cloud: compose.yaml · qp (helper) · bootstrap.sh · cloud.env.example · Caddyfile · README.md (Windows / iPhone guide)
+render.yaml · RENDER.md  the 24/7 cloud on Render: the blueprint (API + Brain, dashboard, PostgreSQL) and its guide
+deploy/                  the self-hosted alternative: compose.yaml · qp (helper) · bootstrap.sh · cloud.env.example · Caddyfile · README.md
 launcher/                Windows desktop launcher: quantpulse_launcher.py (start · stop · status) · *.bat · install-shortcuts.ps1 · make_icon.py
 assets/                  QuantPulse icons (.ico for the desktop shortcuts, .png for the browser tab)
 tests/                   unit · providers · integration · frontend · fixtures (real captured payloads) · fakes (Alpaca paper API, market data)

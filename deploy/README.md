@@ -1,4 +1,7 @@
-# QuantPulse 24/7 in the cloud
+# QuantPulse 24/7 on your own server (Docker Compose)
+
+> **Deploying on Render instead?** That is the primary, simpler path: see [`../RENDER.md`](../RENDER.md). This
+> folder is the self-hosted alternative (a small VPS you manage yourself).
 
 **Set it up once, turn your PC off, and QuantPulse keeps running.** The Brain keeps supervising the Alpaca
 **paper** account in the cloud, and you can watch it (or stop it) from your iPhone.

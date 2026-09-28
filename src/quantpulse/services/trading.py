@@ -525,7 +525,10 @@ class TradingService:
             out.append(f"kill switch ON ({where}: {kill.reason or 'no reason given'})")
         if scheduled and not out and not await self.armed():
             out.append(
-                "scheduled cycles are not armed yet: run one paper cycle (POST /api/v1/trading/run) or the "
+                "scheduled Brain orders are not armed yet: the Brain's pre-trade execution audit arms them once "
+                "every check passes (QP_TRADING_SCHEDULER_REQUIRES_ARMING)"
+                if owner == "brain"
+                else "scheduled cycles are not armed yet: run one paper cycle (POST /api/v1/trading/run) or the "
                 "confirmed test order (POST /api/v1/trading/test-order) by hand first "
                 "(QP_TRADING_SCHEDULER_REQUIRES_ARMING)"
             )

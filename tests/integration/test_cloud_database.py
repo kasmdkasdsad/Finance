@@ -8,10 +8,11 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from quantpulse.core.clock import FakeClock
+from quantpulse.db import migrate
 from quantpulse.db.migrate import sync_url
 from quantpulse.db.transfer import TransferError, transfer
 from tests.fakes.alpaca_paper import FakeAlpacaPaper
-from tests.pg import database_url
+from tests.pg import POSTGRES, database_url
 
 from .conftest import NOW
 from .test_brain_cycle import brain_client, run_cycle, with_stock_model
@@ -62,3 +63,14 @@ async def test_the_brains_history_moves_to_the_cloud_database_intact(tmp_path, m
         assert [o["client_order_id"] for o in brain_orders(fake)] == sent
         assert again["summary"]["orders_sent"] == 0
         assert len((await api.get(f"{API}/cycles")).json()) == before["brain_cycles"] + 1  # ids keep counting
+
+
+@pytest.mark.skipif(not POSTGRES, reason="needs PostgreSQL (set QP_TEST_POSTGRES_URL)")
+def test_the_pc_copies_its_history_to_renders_plain_postgresql_url(tmp_path):
+    """Render's External Database URL is a plain postgresql://… (no driver): the transfer accepts it as is."""
+    source = f"sqlite+aiosqlite:///{tmp_path / 'pc.db'}"
+    migrate.upgrade(source)
+    target = database_url(tmp_path / "render-target.db").replace("postgresql+asyncpg://", "postgresql://")
+    out = transfer(source, target, progress=lambda _m: None)
+    assert out["tables"] > 0
+    assert migrate.current_revision(target) == migrate.head_revision()

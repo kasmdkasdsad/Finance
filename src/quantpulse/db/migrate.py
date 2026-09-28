@@ -19,7 +19,10 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 def sync_url(url: str) -> str:
     """Alembic runs synchronously; swap async drivers for their sync counterparts (psycopg for PostgreSQL,
     which reads ``sslmode`` natively and gets a connect timeout so a migration never hangs on the network)."""
-    url = url.replace("+aiosqlite", "").replace("+asyncpg", "+psycopg")
+    url = url.strip().replace("+aiosqlite", "").replace("+asyncpg", "+psycopg")
+    for prefix in ("postgres://", "postgresql://"):  # as Render and other hosts hand them out
+        if url.startswith(prefix):
+            url = "postgresql+psycopg://" + url[len(prefix) :]
     if not url.startswith("postgresql+psycopg"):
         return url
     parts = urlsplit(url)
