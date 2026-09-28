@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 
@@ -76,6 +77,18 @@ def create_engine(url: str, echo: bool = False, pool: PoolSettings | None = None
             cursor.close()
 
     return engine
+
+
+async def database_now(session: AsyncSession) -> datetime:
+    """The database server's current time (UTC, timezone-aware): one clock that every instance shares.
+
+    ``clock_timestamp()`` on PostgreSQL (the real time, not the transaction's start); ``now`` in SQLite (the
+    local file's clock, which is this machine's)."""
+    if session.get_bind().dialect.name == "postgresql":
+        value: datetime = (await session.execute(text("SELECT clock_timestamp()"))).scalar_one()
+        return value.astimezone(UTC)
+    raw: Any = (await session.execute(text("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')"))).scalar_one()
+    return datetime.fromisoformat(str(raw)).replace(tzinfo=UTC)
 
 
 class Database:

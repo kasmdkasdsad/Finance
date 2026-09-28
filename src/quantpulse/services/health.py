@@ -331,7 +331,9 @@ class HealthMonitor:
                       "info"),
                 force=True,
             )  # fmt: skip
-        if parts["database"]["status"] == "ok":
+        # actions (not checks) belong to the leader alone: a standby during a deploy repeats none of them
+        leader = parts["database"]["status"] == "ok" and (c.lease is None or await c.lease.held())
+        if leader:
             await self._fail_closed_on_anomalies()
             await self._unexpected_positions()
             if c.broker.configured():

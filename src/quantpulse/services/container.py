@@ -201,7 +201,14 @@ class Container:
             timeout=settings.http_timeout_seconds,
         )
         # at most one process supervises the Brain and sends orders (a database lease)
-        self.lease = Lease(self.db, self.clock, ttl=timedelta(seconds=settings.brain_lease_seconds))
+        # production: the database server's clock decides the lease (instances' own clocks may disagree);
+        # tests step a fake clock through expiries
+        self.lease = Lease(
+            self.db,
+            self.clock,
+            ttl=timedelta(seconds=settings.brain_lease_seconds),
+            db_time=isinstance(self.clock, SystemClock),
+        )
         self.trading = TradingService(
             settings,
             self.db,

@@ -34,6 +34,16 @@ if TYPE_CHECKING:
 
 HEARTBEAT_STALE = timedelta(minutes=5)
 FILLED = ("filled", "partially_filled")
+LEADER_FIELDS = (
+    "holder",
+    "live",
+    "acquired_at",
+    "heartbeat_at",
+    "heartbeat_age_seconds",
+    "expires_at",
+    "expires_in_seconds",
+    "clock",
+)
 
 
 async def cloud_status(c: Container) -> dict[str, Any]:
@@ -48,6 +58,7 @@ async def cloud_status(c: Container) -> dict[str, Any]:
         except Exception as exc:  # reported, not raised
             database["schema"] = f"unknown ({type(exc).__name__})"
         database["schema_head"] = migrate.head_revision()
+        database["schema_at_head"] = database["schema"] == database["schema_head"]
 
     # --- Alpaca: the paper endpoint (verified without a network call) and reachability ----------
     key = s.alpaca_api_key_id.get_secret_value() if s.alpaca_api_key_id is not None else ""
@@ -61,6 +72,9 @@ async def cloud_status(c: Container) -> dict[str, Any]:
         "endpoint": endpoint,
         "paper_setting": s.alpaca_paper,
         "paper_key": key.startswith("PK"),
+        # there is no live path at all; this says the running configuration is verified as paper
+        "account": "PAPER" if verified and s.alpaca_paper and key.startswith("PK") else "NOT VERIFIED",
+        "live_trading_possible": False,
         "connectivity": await health.alpaca_part(now),
     }
 
@@ -74,7 +88,8 @@ async def cloud_status(c: Container) -> dict[str, Any]:
         "paused": sup.get("paused"),
         "this_instance": rt.instance,
         "this_process_is_leader": bool(lease.get("mine")),
-        "leader": {k: lease.get(k) for k in ("holder", "live", "acquired_at", "heartbeat_at", "expires_at")},
+        "leader": {k: lease.get(k) for k in LEADER_FIELDS},
+        "role": "leader" if lease.get("mine") else "standby" if lease.get("live") else "none",
         "standby_processes": sup.get("standby_processes") or {},
         "last_tick_at": beat.get("last_tick_at"),
         "last_tick_age_seconds": round((now - last_tick).total_seconds()) if last_tick else None,

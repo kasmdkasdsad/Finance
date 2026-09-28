@@ -97,6 +97,8 @@ async def test_a_deploy_hands_the_brain_over_without_a_duplicate_or_a_gap(tmp_pa
         assert (await new.container.brain.supervisor.tick()).startswith("standby")
         status = (await new.get(STATUS)).json()  # served by the new instance, true about the old leader
         assert status["supervisor"]["leader"]["live"] and not status["supervisor"]["this_process_is_leader"]
+        assert status["supervisor"]["role"] == "standby"
+        assert status["supervisor"]["leader"]["holder"] == old.container.lease.holder
         assert (
             status["supervisor"]["last_result"]
             and new.container.lease.holder in status["supervisor"]["standby_processes"]
@@ -283,6 +285,12 @@ async def test_the_cloud_status_when_everything_allows_trading(tmp_path, monkeyp
             and st["alpaca"]["endpoint"] == "https://paper-api.alpaca.markets"
         )
         assert st["database"]["schema"] == st["database"]["schema_head"] == migrate.head_revision()
+        assert st["database"]["schema_at_head"] is True
+        assert st["alpaca"]["account"] == "PAPER" and st["alpaca"]["live_trading_possible"] is False
+        sup = st["supervisor"]
+        assert sup["role"] == "leader" and sup["leader"]["holder"] == api.container.lease.holder
+        assert sup["leader"]["clock"] == "process"  # tests drive a fake clock; production uses the database's
+        assert sup["leader"]["heartbeat_age_seconds"] == 0 and sup["leader"]["expires_in_seconds"] > 0
         assert st["today"]["brain_orders"] >= 1 and st["latest_decision"]["sent"]
         assert st["switches"]["brain_mode"] == "paper_execution" and not st["switches"]["dry_run"]
     finally:

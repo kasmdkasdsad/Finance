@@ -39,3 +39,91 @@ async def test_expiry_takeover_and_release(database):
     await b.release()
     assert await a.acquire()  # released: taken at once, no waiting for expiry
     assert (await a.info())["acquired_at"] != first
+
+
+# --------------------------------------------------------------------------- the database's clock (production)
+async def test_with_database_time_skewed_instance_clocks_cannot_split_the_brain(database):
+    """Instance B's own clock runs an hour ahead of A's. With process clocks B would think A's lease expired
+    long ago; with the database's clock (production) both agree: A holds it."""
+    a = Lease(database, FakeClock(NOW), ttl=timedelta(seconds=30), holder="a", db_time=True)
+    b = Lease(
+        database, FakeClock(NOW + timedelta(hours=1)), ttl=timedelta(seconds=30), holder="b", db_time=True
+    )
+    assert await a.acquire()
+    assert not await b.acquire() and not await b.held()
+    b._clock.advance(-7200)  # B's clock jumps backwards two hours (an NTP correction): still nothing changes
+    assert not await b.acquire() and await a.held()
+    info = await b.info()
+    assert info["holder"] == "a" and info["live"] and info["clock"] == "database"
+    assert 0 < info["expires_in_seconds"] <= 30
+
+
+async def test_with_database_time_a_lapsed_lease_is_taken_over_for_real(database):
+    a = Lease(database, FakeClock(NOW), ttl=timedelta(seconds=1), holder="a", db_time=True)
+    b = Lease(database, FakeClock(NOW), ttl=timedelta(seconds=1), holder="b", db_time=True)
+    assert await a.acquire() and not await b.acquire()
+    await asyncio.sleep(1.3)  # A stopped renewing (a crash): its lease lapses on the database's clock
+    assert await b.acquire() and not await a.held() and not await a.acquire()
+
+
+async def test_racing_instances_with_database_time_elect_exactly_one(database):
+    leases = [Lease(database, FakeClock(NOW + timedelta(minutes=i)), ttl=TTL, holder=f"p{i}", db_time=True)
+              for i in range(10)]  # fmt: skip
+    won = await asyncio.gather(*(le.acquire() for le in leases))
+    assert sum(won) == 1
+
+
+# --------------------------------------------------------------------------- the database failing
+async def test_a_database_failure_during_the_election_elects_nobody(database, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from quantpulse.db.session import Database
+
+    clock = FakeClock(NOW)
+    a, b = Lease(database, clock, ttl=TTL, holder="a"), Lease(database, clock, ttl=TTL, holder="b")
+    real = Database.session
+
+    def down(self):
+        raise OperationalError("UPDATE service_leases", {}, Exception("database unreachable"))
+
+    monkeypatch.setattr(Database, "session", down)
+    for lease in (a, b):
+        try:
+            await lease.acquire()
+            raise AssertionError("acquire must not succeed without the database")
+        except OperationalError:
+            pass
+    monkeypatch.setattr(Database, "session", real)
+    assert (await b.info())["holder"] is None  # nobody was elected by the failure
+    assert await a.acquire() and not await b.acquire()
+
+
+async def test_a_database_failure_during_renewal_lets_the_lease_lapse_and_the_old_leader_stops(
+    database, monkeypatch
+):
+    """The leader cannot renew (its database connection is gone) for longer than the lease: another instance
+    takes over; when the old leader's connection comes back it finds the lease taken and stands by."""
+    from sqlalchemy.exc import OperationalError
+
+    clock = FakeClock(NOW)
+    a, b = Lease(database, clock, ttl=TTL, holder="a"), Lease(database, clock, ttl=TTL, holder="b")
+    assert await a.acquire()
+    real_session = database.session
+    failing = {"on": True}
+
+    def flaky():
+        if failing["on"]:
+            raise OperationalError("UPDATE service_leases", {}, Exception("connection reset"))
+        return real_session()
+
+    monkeypatch.setattr(a._db, "session", flaky)  # only A's view of the database fails: a partition
+    a.start_heartbeat(interval=0.05)
+    await asyncio.sleep(0.2)  # renewals fail and are retried; the heartbeat survives them
+    assert a._heartbeat is not None and not a._heartbeat.done()
+    monkeypatch.setattr(a._db, "session", real_session)
+    monkeypatch.setattr(b._db, "session", real_session)
+    failing["on"] = False
+    clock.advance(TTL.total_seconds() + 1)  # A's last renewal is now older than the lease
+    a.stop_heartbeat()
+    assert await b.acquire()  # B takes over
+    assert not await a.acquire() and not await a.held()  # A, back, finds it taken: it stands by

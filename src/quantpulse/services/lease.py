@@ -15,6 +15,12 @@ A process that crashes simply stops renewing: its lease expires after ``ttl`` an
 over — never earlier. A restarted process is a new holder and waits like any other. Order ids are also
 deterministic per slot (the order manager's write-ahead record), so even across a takeover no order is sent
 twice.
+
+**Whose clock.** In production (``db_time``) every comparison and every timestamp uses the *database server's*
+clock (``clock_timestamp()`` on PostgreSQL), read in the same transaction as the update: two instances whose
+own clocks disagree — by seconds or by hours — still agree on who holds the lease, so a standby whose clock
+runs ahead can never think a live leader's lease has expired. Tests use the injected (fake) clock instead, to
+step through expiries deterministically.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from sqlalchemy.exc import IntegrityError
 from quantpulse.core import runtime
 from quantpulse.core.clock import Clock
 from quantpulse.db.models import ServiceLeaseRow
-from quantpulse.db.session import Database
+from quantpulse.db.session import Database, database_now
 
 logger = logging.getLogger(__name__)
 BRAIN_LEASE = "brain-supervisor"
@@ -54,20 +60,26 @@ class Lease:
         name: str = BRAIN_LEASE,
         ttl: timedelta = DEFAULT_TTL,
         holder: str | None = None,
+        *,
+        db_time: bool = False,
     ) -> None:
         self._db = db
         self._clock = clock
+        self._db_time = db_time
         self.name = name
         self.ttl = ttl
         self.holder = holder or holder_id()
         self._heartbeat: asyncio.Task[None] | None = None
         self.lost_at: datetime | None = None  # when this process last found the lease held by another
 
+    async def _now(self, session: Any) -> datetime:
+        return await database_now(session) if self._db_time else self._clock.now()
+
     async def acquire(self) -> bool:
         """Take (or renew) the lease; ``False`` while another live process holds it."""
-        now = self._clock.now()
-        until = now + self.ttl
         async with self._db.session() as s:
+            now = await self._now(s)
+            until = now + self.ttl
             result = await s.execute(
                 update(ServiceLeaseRow)
                 .where(
@@ -102,21 +114,22 @@ class Lease:
 
     async def held(self) -> bool:
         """Is the lease ours and live right now (read from the database, not remembered)?"""
-        now = self._clock.now()
         async with self._db.session() as s:
+            now = await self._now(s)
             row = await s.get(ServiceLeaseRow, self.name)
         return row is not None and row.holder == self.holder and row.expires_at > now
 
     async def release(self) -> None:
         self.stop_heartbeat()
         async with self._db.session() as s:
+            now = await self._now(s)
             row = await s.get(ServiceLeaseRow, self.name)
             if row is not None and row.holder == self.holder:
-                row.expires_at = self._clock.now() - timedelta(seconds=1)
+                row.expires_at = now - timedelta(seconds=1)
 
     async def info(self) -> dict[str, Any]:
-        now = self._clock.now()
         async with self._db.session() as s:
+            now = await self._now(s)
             row = (await s.scalars(select(ServiceLeaseRow).where(ServiceLeaseRow.name == self.name))).first()
         if row is None:
             return {
@@ -134,7 +147,12 @@ class Lease:
             "live": live,
             "acquired_at": row.acquired_at.isoformat() if row.acquired_at else None,
             "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+            "heartbeat_age_seconds": round((now - row.heartbeat_at).total_seconds(), 1)
+            if row.heartbeat_at
+            else None,
             "expires_at": row.expires_at.isoformat(),
+            "expires_in_seconds": round((row.expires_at - now).total_seconds(), 1),
+            "clock": "database" if self._db_time else "process",
             "this_process": self.holder,
         }
 
