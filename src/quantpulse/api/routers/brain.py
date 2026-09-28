@@ -222,6 +222,17 @@ async def trades(limit: int = Query(50, ge=1, le=500), c: Container = ContainerD
 
 
 @router.get(
+    "/checkpoints",
+    summary="The 20/40/60-session evaluation: Brain vs benchmark vs the replaced strategy, P&L, drawdown, "
+    "volatility, turnover, execution, calibration, decision quality, risk behaviour, agent reliability — never a verdict",
+)
+async def checkpoints(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.checkpoints import build
+
+    return await build(c.brain.db, c.settings)
+
+
+@router.get(
     "/reviews", summary="The Brain's automatic daily and weekly reviews of its own results (newest first)"
 )
 async def reviews(

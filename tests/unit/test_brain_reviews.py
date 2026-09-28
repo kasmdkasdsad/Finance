@@ -21,7 +21,9 @@ def test_the_weeks_last_session():
     assert last_session_of_week(date(2026, 9, 25))  # a Friday
     assert not last_session_of_week(date(2026, 9, 24))
     assert last_session_of_week(date(2026, 4, 2))  # Thursday: Good Friday (April 3, 2026) is a market holiday
-    assert not last_session_of_week(date(2026, 11, 25))  # the Friday after Thanksgiving is a (half-day) session
+    assert not last_session_of_week(
+        date(2026, 11, 25)
+    )  # the Friday after Thanksgiving is a (half-day) session
     assert not last_session_of_week(date(2026, 9, 26))  # Saturday: not a session
 
 

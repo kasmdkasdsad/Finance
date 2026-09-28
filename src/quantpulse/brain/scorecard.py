@@ -59,12 +59,16 @@ def _status(n: int, needed: int) -> str:
 
 
 # ---------------------------------------------------------------------------------------------- execution
-async def execution_quality(db: Database, since: datetime | None = None) -> dict[str, Any]:
+async def execution_quality(
+    db: Database, since: datetime | None = None, until: datetime | None = None
+) -> dict[str, Any]:
     """From the execution ledger (the Brain's real Alpaca paper orders): execution only, never profit."""
     async with db.session() as s:
         q = select(BrainExecutionRow)
         if since is not None:
             q = q.where(BrainExecutionRow.decided_at >= since)
+        if until is not None:
+            q = q.where(BrainExecutionRow.decided_at < until)
         rows = (await s.scalars(q)).all()
     sent = [r for r in rows if r.alpaca_order_id]
     filled = [r for r in sent if r.filled_qty > 0]
