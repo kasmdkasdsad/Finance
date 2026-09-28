@@ -248,3 +248,111 @@ async def test_an_unexpected_position_and_a_stalled_supervisor_are_alerted(tmp_p
         finally:
             forever.cancel()
             c.poller._tasks = []
+
+
+# --------------------------------------------------------------------------- supervisor, execution, cycles
+def kinds(c) -> list[str]:
+    return [a["kind"] for a in c.alerts.sent]
+
+
+async def test_a_lost_lease_and_a_takeover_after_a_crash_alert_once(tmp_path, monkeypatch):
+    from .test_render_deploy import start
+
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    fake, feed = shared(clock)
+    a_gen, a = await start(tmp_path, clock, fake, feed, **ALERTS)
+    b_gen, b = await start(tmp_path, clock, fake, feed, **ALERTS)
+    try:
+        await a.container.brain.supervisor.tick()
+        a.container.lease.stop_heartbeat()  # A hangs past its lease ...
+        clock.advance(a.container.lease.ttl.total_seconds() + 1)
+        await b.container.brain.supervisor.tick()  # ... B takes over from a lease that was never released
+        await b.container.health.run()
+        await b.container.health.run()
+        assert kinds(b.container).count("supervisor_takeover") == 1
+        assert (await a.container.brain.supervisor.tick()).startswith("standby")  # A comes back: it lost
+        await a.container.health.run()
+        await a.container.health.run()
+        assert kinds(a.container).count("supervisor_lost") == 1
+    finally:
+        await b_gen.stop()
+        await a_gen.stop()
+
+
+async def test_a_standby_reports_a_leader_that_holds_the_lease_but_stopped_ticking(tmp_path, monkeypatch):
+    from .test_render_deploy import start
+
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    fake, feed = shared(clock)
+    a_gen, a = await start(tmp_path, clock, fake, feed)
+    b_gen, b = await start(tmp_path, clock, fake, feed, **ALERTS)
+    try:
+        await a.container.brain.supervisor.tick()
+        await b.container.brain.supervisor.tick()
+        assert (await b.container.health.check())["parts"]["supervisor"]["status"] == "standby"
+        clock.advance(6 * 60)
+        await (
+            a.container.lease.acquire()
+        )  # A still renews its lease (its heartbeat task runs) but never ticks
+        await b.container.brain.supervisor.tick()
+        part = (await b.container.health.check())["parts"]["supervisor"]
+        assert part["status"] == "fail" and "has not ticked" in part["detail"]
+    finally:
+        await b_gen.stop()
+        await a_gen.stop()
+
+
+async def test_autonomous_execution_blocked_in_the_session_alerts_after_ten_minutes(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    fake, feed = shared(clock)
+    async for api in brain_client(tmp_path, clock, fake=fake, feed=feed, trading_dry_run=True,
+                                  alpaca_trading_enabled=True, brain_mode="paper_execution", **ALERTS):  # fmt: skip
+        c = api.container
+        await c.brain.supervisor.tick()
+        await c.health.run()
+        assert "execution_blocked" not in kinds(c)  # not yet: it may be a moment
+        for _ in range(3):
+            clock.advance(5 * 60)
+            await c.brain.supervisor.tick()
+            await c.health.run()
+        blocked = [a for a in c.alerts.sent if a["kind"] == "execution_blocked"]
+        assert len(blocked) == 1 and "QP_TRADING_DRY_RUN=true" in blocked[0]["message"]
+
+
+async def test_nothing_alerts_about_execution_while_the_market_is_closed(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    with_stock_model(monkeypatch)
+    clock = FakeClock(datetime(2026, 9, 26, 15, 0, tzinfo=UTC))  # a Saturday
+    fake, feed = shared(clock)
+    fake.market_open = False
+    async for api in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED, **ALERTS):
+        c = api.container
+        for _ in range(4):
+            await c.brain.supervisor.tick()
+            await c.health.run()
+            clock.advance(5 * 60)
+        assert "execution_blocked" not in kinds(c)
+
+
+async def test_repeated_failed_cycles_alert(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    fake, feed = shared(clock)
+    async for api in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED, **ALERTS):
+        c = api.container
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("a bug in a Brain step")
+
+        monkeypatch.setattr(c.brain.orchestrator, "_context", broken)
+        for _ in range(3):
+            await api.post(f"{API}/run")
+            clock.advance(60)
+        report = await c.health.check()
+        assert report["parts"]["last_cycle"]["failed_streak"] >= 3
+        await c.health.run()
+        assert "cycles_failing" in kinds(c)

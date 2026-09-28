@@ -9,7 +9,9 @@ same database) must never run the Brain side by side. The lease is a row in ``se
   condition against the new row, so exactly one process wins; SQLite serialises writes. Holding it renews it;
 * **held** — read back from the database immediately before an order is sent, so a process that lost the
   lease (a long pause, a network partition) stops at once;
-* **release** — on a clean shutdown, so the next process takes over without waiting.
+* **release** — on a clean shutdown, so the next process takes over without waiting. A released row is marked
+  (its expiry is set just *before* its last heartbeat, which a renewal never does), so the next holder can
+  tell a clean hand-over from a process that died holding the lease (:meth:`info` ``released``).
 
 A process that crashes simply stops renewing: its lease expires after ``ttl`` and another process may take
 over — never earlier. A restarted process is a new holder and waits like any other. Order ids are also
@@ -125,7 +127,7 @@ class Lease:
             now = await self._now(s)
             row = await s.get(ServiceLeaseRow, self.name)
             if row is not None and row.holder == self.holder:
-                row.expires_at = now - timedelta(seconds=1)
+                row.heartbeat_at, row.expires_at = now, now - timedelta(seconds=1)
 
     async def info(self) -> dict[str, Any]:
         async with self._db.session() as s:
@@ -153,6 +155,8 @@ class Lease:
             "expires_at": row.expires_at.isoformat(),
             "expires_in_seconds": round((row.expires_at - now).total_seconds(), 1),
             "clock": "database" if self._db_time else "process",
+            # handed over cleanly (a renewal always sets the expiry after the heartbeat; a release before it)
+            "released": bool(row.heartbeat_at and row.expires_at < row.heartbeat_at),
             "this_process": self.holder,
         }
 

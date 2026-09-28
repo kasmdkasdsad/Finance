@@ -116,7 +116,13 @@ class Supervisor:
         self._daily_vol: dict[str, float] = {}
         self.log: deque[dict[str, Any]] = deque(maxlen=200)
         self._booted_at = clock.now()
+        self._elected_at = self._booted_at  # when this process last became the leader
         self._recovered = False
+        # the previous leader stopped without handing over (a crash, a kill, a lost connection): reported once
+        self.takeover: dict[str, Any] | None = None
+        # this process led and lost the lease to another holder without stopping (a pause, a partition, a second
+        # installation on the same database): reported once
+        self.lost: dict[str, Any] | None = None
         self.waiting: str | None = None  # why supervision has not resumed after a start
         self.standby: str | None = None  # another process holds the supervisor lease
         self.last_tick_at: datetime | None = None
@@ -222,12 +228,14 @@ class Supervisor:
         async with self._tick_lock:
             lease = self._brain.trading.lease
             if lease is not None:  # one supervisor at a time, across every process on this database
+                before = None if self.leader else await lease.info()  # who held it, and how it ended
                 if not await lease.acquire():
                     info = await lease.info()
                     standby = f"another process supervises the Brain ({info.get('holder')})"
                     if self.leader:
                         log_event(logger, "supervisor.lost", "this process lost the supervisor lease: it stands by",
                                   level=logging.WARNING, holder=info.get("holder"), this=lease.holder)  # fmt: skip
+                        self.lost = {"at": self._clock.now().isoformat(), "to": info.get("holder")}
                     elif self.standby != standby:
                         log_event(
                             logger,
@@ -240,9 +248,7 @@ class Supervisor:
                     await self._note_standby(lease.holder)
                     return f"standby: {self.standby}"
                 if not self.leader:
-                    rt = runtime.current()
-                    log_event(logger, "supervisor.elected", "this process supervises the Brain (lease acquired)",
-                              holder=lease.holder, commit=rt.short_commit, instance=rt.instance)  # fmt: skip
+                    self._on_elected(lease.holder, before or {})
                 self.leader, self.standby = True, None
                 lease.start_heartbeat()
             self.last_tick_at = self._clock.now()
@@ -252,6 +258,32 @@ class Supervisor:
             return result
 
     # ------------------------------------------------------------------ running in the cloud
+    def _on_elected(self, holder: str, before: dict[str, Any]) -> None:
+        """This process has just become the leader. Nothing it remembers is trusted: another supervisor may have
+        acted since it last led (or it never led), so the startup recovery runs again before any other work."""
+        rt = runtime.current()
+        now = self._clock.now()
+        self._elected_at, self._recovered = now, False
+        log_event(logger, "supervisor.elected", "this process supervises the Brain (lease acquired)",
+                  holder=holder, commit=rt.short_commit, instance=rt.instance)  # fmt: skip
+        previous = before.get("holder")
+        if previous and previous != holder and not before.get("released"):
+            self.takeover = {
+                "at": now.isoformat(),
+                "previous_holder": previous,
+                "previous_heartbeat_at": before.get("heartbeat_at"),
+                "previous_expires_at": before.get("expires_at"),
+            }
+            log_event(
+                logger,
+                "supervisor.takeover",
+                f"the previous supervisor ({previous}) stopped without handing over (a crash, a kill or a lost "
+                "connection): its lease lapsed; recovery runs before anything else",
+                level=logging.WARNING,
+                previous=previous,
+                previous_heartbeat_at=before.get("heartbeat_at"),
+            )
+
     def begin_stop(self) -> None:
         """No new tick from now on (the process is shutting down)."""
         self.stopping = True
@@ -283,6 +315,8 @@ class Supervisor:
                 "last_result": result[:300],
                 "recovered": self._recovered,
                 "waiting": self.waiting,
+                "elected_at": self._elected_at.isoformat(),
+                "takeover": self.takeover,
             },
             now,
         )
@@ -415,7 +449,9 @@ class Supervisor:
         trading cycles), bring the execution ledger up to date, and run the execution audit (the paper
         account, endpoint, key, environment, kill switches, clock and data). Orders resume only once a
         pre-trade audit passes (the executor runs one before the first order in every process)."""
-        closed = await self._brain.store.close_interrupted(self._booted_at, self._clock.now())
+        # cycles still marked running from before this process became the leader belong to a supervisor that
+        # stopped (only the leader runs cycles): close them — even ones begun after this process started
+        closed = await self._brain.store.close_interrupted(self._elected_at, self._clock.now())
         out: dict[str, Any] = {"interrupted_cycles": len(closed)}
         trading = self._brain.trading
         if self._s.brain_owns_account and trading.broker.configured():

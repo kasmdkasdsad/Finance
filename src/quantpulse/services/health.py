@@ -23,9 +23,12 @@ after a failed reconciliation, until one succeeds. Execution anomalies — ``QP_
 rejected, failed or left unknown within an hour — turn the Brain kill switch on (persisted; a person releases
 it from the dashboard after looking). Exits, the trading kill switch and close-all are unaffected.
 
-**Alerts** go out on changes, not on every check: Brain stopped or waiting, reconciliation failed, an
-unexpected position, a kill switch turned on, repeated data-quality halts, Alpaca unreachable, the
-database failing, an execution anomaly — and a note when things recover, and at every start.
+**Alerts** go out on changes, not on every check: Brain stopped or waiting (also seen from a standby: the
+leader holds the lease but stopped ticking), the supervisor lease lost to another process, a takeover from a
+supervisor that died holding it, reconciliation failed, an unexpected position, a kill switch turned on,
+repeated data-quality halts, Alpaca unreachable, the database failing, an execution anomaly (repeated
+rejections), Brain cycles failing in a row, autonomous execution blocked for ten minutes in the session —
+and a note when things recover, and at every start. Normal skipped trades never alert.
 """
 
 from __future__ import annotations
@@ -60,6 +63,9 @@ GATE_FRESH = timedelta(minutes=3)  # a failing check older than this no longer b
 # live by the trading service itself, so a successful one releases them at once).
 ORDER_CRITICAL = ("database", "alpaca")
 ANOMALY_KINDS = ("order_rejected", "order_failed", "order_unknown")
+FAILED_CYCLES_ALERT = 3  # Brain cycles failing in a row before an alert
+BLOCKED_ALERT_AFTER = timedelta(minutes=10)  # autonomous execution blocked this long, in the session
+BLOCKED_EVERY = timedelta(minutes=5)  # how often the leader re-reads the execution gates for that alert
 ANOMALY_WINDOW = timedelta(hours=1)
 
 
@@ -77,6 +83,10 @@ class HealthMonitor:
         self._anomaly_seen_id = 0
         self._unexpected: set[str] = set()
         self._kills: dict[str, bool] = {}
+        self._reported: set[str] = set()  # one-off events already alerted (a takeover, a lost lease)
+        self._blocked_since: datetime | None = None
+        self._blocked_checked: datetime | None = None
+        self._blocked_alerted = False
 
     # ------------------------------------------------------------------ checks
     async def check(self) -> dict[str, Any]:
@@ -138,6 +148,12 @@ class HealthMonitor:
         if status["paused"]:
             return part("warn", "paused from the dashboard/API: no cycles run", **extra)
         if status["standby"]:
+            beat = status.get("heartbeat") or {}
+            leader_tick = beat.get("last_tick_at")
+            age = now - datetime.fromisoformat(leader_tick) if leader_tick else None
+            if age is not None and age > STALLED:  # the leader holds the lease but has stopped ticking
+                return part("fail", f"supervisor lost: the leader ({beat.get('holder')}) has not ticked for "
+                                    f"{_ago(age)}", **extra)  # fmt: skip
             return part("standby", status["standby"], **extra)
         if status["waiting"]:
             return part("fail", f"waiting: startup recovery has not passed ({status['waiting']})", **extra)
@@ -215,6 +231,13 @@ class HealthMonitor:
             ).all()
         completed = [r for r in rows if r.status == "completed"]
         last = completed[0] if completed else None
+        failed_streak = 0
+        for r in rows:  # newest first: cycles that failed in a row (a running one is skipped)
+            if r.status == "running":
+                continue
+            if r.status != "failed":
+                break
+            failed_streak += 1
         failed = next((r for r in rows if r.status == "failed"), None)
         if last is None:
             cycle = part("n/a", "no completed Brain cycle yet")
@@ -227,6 +250,10 @@ class HealthMonitor:
             else:
                 cycle = part("warn" if overdue else "ok", detail + ("; overdue" if overdue else ""))
             cycle["last_at"] = (last.finished_at or last.started_at).isoformat()
+        cycle["failed_streak"] = failed_streak
+        if failed_streak >= FAILED_CYCLES_ALERT and cycle["status"] != "fail":
+            cycle = {**cycle, "status": "warn", "detail": f"{failed_streak} Brain cycles failed in a row; "
+                                                          f"{cycle['detail']}"}  # fmt: skip
         if not is_market_open(now):
             data = part("n/a", "the market is closed: no executable quotes are expected")
         else:
@@ -342,8 +369,67 @@ class HealthMonitor:
                 except Exception:
                     logger.warning("retrying the kill switch's cancellations failed", exc_info=True)
         await self._transitions(parts)
+        await self._supervisor_events()
+        if leader:
+            await self._execution_blocked()
         await c.alerts.heartbeat(report["status"] != "fail")
         return f"health {report['status']}"
+
+    async def _supervisor_events(self) -> None:
+        """One alert per event: this process lost the lease to another holder, or took it over from a
+        supervisor that died holding it."""
+        sup, alerts = self._c.brain.supervisor, self._c.alerts
+        lost = sup.lost
+        if lost and f"lost:{lost['at']}" not in self._reported:
+            self._reported.add(f"lost:{lost['at']}")
+            await alerts.send(Alert("supervisor_lost", "Brain supervisor lost its lease",
+                                    f"another process ({lost['to']}) now supervises the Brain; this one stands by. "
+                                    "Outside a deploy that means a second installation on the same database, or a "
+                                    "long pause.", "warning"), force=True)  # fmt: skip
+        takeover = sup.takeover
+        if takeover and f"takeover:{takeover['at']}" not in self._reported:
+            self._reported.add(f"takeover:{takeover['at']}")
+            await alerts.send(Alert("supervisor_takeover", "Brain supervisor restarted after a crash",
+                                    f"the previous supervisor ({takeover['previous_holder']}) stopped without handing "
+                                    f"over (last heartbeat {takeover.get('previous_heartbeat_at')}); this process "
+                                    "took over, reconciled with Alpaca and re-ran the safety audit before anything "
+                                    "else.", "warning"), force=True)  # fmt: skip
+
+    async def _execution_blocked(self) -> None:
+        """The Brain owns the account and the market is open, yet autonomous execution has been refused for a
+        while: say why (once per cool-down), and when it resumes. Read through the cloud status — the same
+        gates the orders pass, never a second copy of them."""
+        c = self._c
+        now = c.clock.now()
+        if not (
+            c.settings.brain_owns_account and c.settings.brain_supervisor_enabled and is_market_open(now)
+        ):
+            self._blocked_since, self._blocked_alerted = None, False
+            return
+        if self._blocked_checked is not None and now - self._blocked_checked < BLOCKED_EVERY:
+            return
+        self._blocked_checked = now
+        from quantpulse.services.cloud import cloud_status
+
+        try:
+            ae = (await cloud_status(c))["autonomous_execution"]
+        except Exception:
+            logger.warning("reading the execution gates for the health alert failed", exc_info=True)
+            return
+        reasons = [r for r in ae["reasons"] if "market is closed" not in r]
+        if not reasons:
+            if self._blocked_alerted:
+                await c.alerts.send(Alert("execution_resumed", "Autonomous execution permitted again",
+                                          "every execution gate passes", "info"), force=True)  # fmt: skip
+            self._blocked_since, self._blocked_alerted = None, False
+            return
+        self._blocked_since = self._blocked_since or now
+        if now - self._blocked_since >= BLOCKED_ALERT_AFTER:
+            self._blocked_alerted = await c.alerts.send(
+                Alert("execution_blocked", "Autonomous execution blocked",
+                      f"for {_ago(now - self._blocked_since)} in the session: " + "; ".join(reasons[:4])[:600],
+                      "warning")
+            ) or self._blocked_alerted  # fmt: skip
 
     async def _fail_closed_on_anomalies(self) -> None:
         c = self._c
@@ -407,6 +493,9 @@ class HealthMonitor:
                     Alert("supervisor_warn", "Brain supervisor", parts[name]["detail"], "warning")
                 )
             self._previous[name] = now_status
+        lc = parts["last_cycle"]
+        if lc.get("failed_streak", 0) >= FAILED_CYCLES_ALERT:
+            await alerts.send(Alert("cycles_failing", "Brain cycles failing", lc["detail"], "warning"))
         md = parts["market_data"]
         if md.get("halted_streak", 0) >= self._c.settings.health_data_quality_alert_cycles:
             await alerts.send(Alert("data_quality", "Market data halting new positions",

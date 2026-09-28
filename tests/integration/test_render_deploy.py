@@ -128,7 +128,7 @@ async def test_a_cycle_running_when_the_deploy_stops_the_old_instance_is_allowed
     real = sup._tick
 
     async def slow_tick():
-        await asyncio.sleep(0.3)  # a cycle still sending its orders when SIGTERM arrives
+        await asyncio.sleep(0.3)  # a tick still running when the supervisor is drained
         return await real()
 
     monkeypatch.setattr(sup, "_tick", slow_tick)
@@ -355,6 +355,57 @@ async def test_the_api_refuses_to_start_on_a_schema_behind_the_code(tmp_path):
         await c.startup()
     assert not c.poller.running  # nothing started
     await c.db.dispose()
+    await c.http.aclose()
+
+
+async def test_start_up_waits_for_a_database_that_is_restarting(tmp_path, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from quantpulse.db.session import Database
+
+    settings = make_settings(tmp_path, db_startup_wait_seconds=30)
+    c = Container(settings, clock=FakeClock(NOW))
+    real, calls = Database.session, {"n": 0}
+
+    def flaky(self):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise OperationalError("SELECT 1", {}, Exception("the database system is starting up"))
+        return real(self)
+
+    monkeypatch.setattr(Database, "session", flaky)
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def quick(seconds):
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", quick)
+    try:
+        await c.startup()  # waits it out: two failures, then it answers
+        assert calls["n"] >= 3 and sleeps[:2] == [1.0, 2.0]  # back-off
+    finally:
+        monkeypatch.setattr(asyncio, "sleep", real_sleep)
+        monkeypatch.setattr(Database, "session", real)
+        await c.shutdown()
+
+
+async def test_start_up_gives_up_on_a_database_that_never_answers(tmp_path, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from quantpulse.db.session import Database
+
+    settings = make_settings(tmp_path, db_startup_wait_seconds=0)
+    c = Container(settings, clock=FakeClock(NOW))
+
+    def down(self):
+        raise OperationalError("SELECT 1", {}, Exception("could not connect"))
+
+    monkeypatch.setattr(Database, "session", down)
+    with pytest.raises(RuntimeError, match="did not answer"):
+        await c.startup()
+    assert not c.poller.running  # nothing started
     await c.http.aclose()
 
 

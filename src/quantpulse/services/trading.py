@@ -271,6 +271,8 @@ class TradingService:
         self.reconcile_error: tuple[datetime, str] | None = None
         # the health monitor's order-critical checks (database, Alpaca, reconciliation), read at the last gate
         self.health_gate: Callable[[], Awaitable[list[str]]] | None = None
+        # the process is shutting down (a deploy or restart): no new order leaves; one already in flight finishes
+        self.stopping = False
         self._retry_at: datetime | None = None
         self._started = False
 
@@ -456,6 +458,16 @@ class TradingService:
             kill = await self.kill_switch()
             if kill.active:
                 out.append(f"kill switch ON ({kill.reason or kill.source})")
+            if self.stopping:
+                out.append(
+                    "this process is shutting down (a deploy or restart): no new order; the next supervisor "
+                    "decides again after its own recovery"
+                )
+            if owner in ("brain", "strategy") and not is_market_open(self._clock.now()):
+                # the cycle's risk check saw the market open; a cycle still running at the close sends nothing
+                out.append(
+                    "the market is closed now (it closed after the cycle began): the order is not sent"
+                )
         if self.lease is not None and not flatten and not await self.lease.acquire():
             info = await self.lease.info()
             out.append(

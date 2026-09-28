@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -59,6 +59,9 @@ from quantpulse.services.valuation import ValuationService
 from quantpulse.services.vehicle import VehicleService
 
 logger = logging.getLogger(__name__)
+LIFECYCLE_KEY = "app_lifecycle"
+LIFECYCLE_KEEP = 10
+FINAL_RECONCILE_SECONDS = 15.0
 
 
 def _secret(value: Any) -> str | None:
@@ -252,6 +255,7 @@ class Container:
         log_event(logger, "app.startup", f"QuantPulse {rt.version} starting ({self.settings.deployment})",
                   commit=rt.short_commit, branch=rt.branch, instance=rt.instance, platform=rt.platform,
                   deployment=self.settings.deployment, brain_mode=self.settings.brain_mode)  # fmt: skip
+        await self._wait_for_database()
         if self.settings.auto_migrate:
             await asyncio.to_thread(migrate.upgrade, self.settings.database_url)
         else:  # migrations ran once per deploy (the pre-deploy command): the schema must be at the head
@@ -262,15 +266,70 @@ class Container:
                     f"the database schema is at {current}, this version needs {head}: run quantpulse-migrate "
                     "(the pre-deploy command) — nothing was started"
                 )
+        await self._record_lifecycle(started_at=self.clock.now().isoformat(), stopped_at=None, clean=None)
         if self.settings.polling_enabled:
             self.poller.start()
 
+    async def _wait_for_database(self) -> None:
+        """The database must answer before anything starts; a short outage (a restart for maintenance) is
+        waited out with back-off for up to ``QP_DB_STARTUP_WAIT_SECONDS``, then start-up fails (and the host
+        restarts the process). Nothing trades meanwhile: nothing has started."""
+        from sqlalchemy import text
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.db_startup_wait_seconds
+        delay, attempt = 1.0, 0
+        while True:
+            attempt += 1
+            try:
+                async with self.db.session() as s:
+                    await asyncio.wait_for(
+                        s.execute(text("SELECT 1")), self.settings.db_connect_timeout_seconds
+                    )
+                if attempt > 1:
+                    log_event(logger, "app.database.ready", f"the database answered after {attempt} attempts")
+                return
+            except Exception as exc:
+                left = deadline - loop.time()
+                if left <= 0:
+                    raise RuntimeError(
+                        f"the database did not answer within {self.settings.db_startup_wait_seconds:.0f} s "
+                        f"({type(exc).__name__}): nothing was started"
+                    ) from exc
+                log_event(logger, "app.database.waiting", "the database is not answering yet: retrying",
+                          level=logging.WARNING, attempt=attempt, error=type(exc).__name__,
+                          retry_in_seconds=round(min(delay, left), 1))  # fmt: skip
+                await asyncio.sleep(min(delay, left))
+                delay = min(delay * 2, 15.0)
+
+    async def _record_lifecycle(self, **fields: Any) -> None:
+        """Each process's start and stop, in the database (``app_lifecycle``): a stop without a record is a
+        crash, which the next leader also sees from the lease it had to wait for."""
+        try:
+            now = self.clock.now()
+            store = self.brain.store
+            record = await store.get_state(LIFECYCLE_KEY) or {}
+            rt = runtime.current()
+            mine = record.get(self.lease.holder) or {"instance": rt.instance, "commit": rt.short_commit}
+            record[self.lease.holder] = {**mine, **fields}
+            keep = sorted(record.items(), key=lambda kv: str(kv[1].get("started_at") or ""))[-LIFECYCLE_KEEP:]
+            await store.set_state(LIFECYCLE_KEY, dict(keep), now)
+        except Exception:  # bookkeeping only: never stops a start or a shutdown
+            logger.warning("recording the process lifecycle failed", exc_info=True)
+
     async def shutdown(self) -> None:
-        # a deploy or restart: take no new Brain tick, and let a cycle that may be sending orders finish (up to
-        # QP_SHUTDOWN_DRAIN_SECONDS) before the lease is handed over; whatever is still running is cancelled
-        # safely (orders are recorded before they are sent, and the next supervisor reconciles first)
+        """A deploy or restart (SIGTERM). In order: no new Brain tick and no new order (an order already being
+        sent completes: it was recorded before it left); the running tick or cycle may finish for up to
+        ``QP_SHUTDOWN_DRAIN_SECONDS``, anything still running is then cancelled safely (orders are recorded
+        before they are sent, and the next supervisor reconciles first); the leader reconciles once more so the
+        record ends in step with Alpaca; the shutdown is recorded; the lease is handed over; network clients
+        and the database pool are closed."""
         drain = self.settings.shutdown_drain_seconds
-        log_event(logger, "app.shutdown", "QuantPulse shutting down: draining the Brain", drain_seconds=drain)
+        self.trading.stopping = True  # the last gate refuses new orders from now on
+        self.brain.supervisor.begin_stop()
+        log_event(logger, "app.shutdown", "QuantPulse shutting down: no new orders; draining the Brain",
+                  drain_seconds=drain)  # fmt: skip
+        finished, still = True, cast(tuple[str, ...], ())
         try:
             finished = await self.brain.supervisor.drain(drain)
             still = await self.jobs.drain({"brain", "trading"}, drain if finished else 0.0)
@@ -280,6 +339,9 @@ class Container:
         except Exception:
             logger.warning("draining the Brain at shutdown failed", exc_info=True)
         await self.poller.stop()
+        reconciled = await self._final_reconcile()
+        await self._record_lifecycle(stopped_at=self.clock.now().isoformat(), clean=True,
+                                     drained=finished and not still, reconciled=reconciled)  # fmt: skip
         try:  # hand the Brain over at once instead of after the lease lapses
             await self.lease.release()
         except Exception:  # the database may already be gone: the lease then lapses on its own
@@ -287,6 +349,23 @@ class Container:
         await self.jobs.shutdown()
         await self.http.aclose()
         await self.db.dispose()
+        log_event(logger, "app.stopped", "QuantPulse stopped cleanly", reconciled=reconciled)
+
+    async def _final_reconcile(self) -> str:
+        """The leader brings the order record in step with Alpaca before handing over (bounded: an Alpaca
+        outage never holds up a shutdown — the next supervisor reconciles first anyway)."""
+        s = self.settings
+        if not (s.brain_owns_account and self.broker.configured()):
+            return "not applicable"
+        try:
+            if not await self.lease.held():
+                return "skipped: not the leader"
+            await asyncio.wait_for(self.trading.reconcile("shutdown"), FINAL_RECONCILE_SECONDS)
+            return "done"
+        except Exception as exc:
+            logger.warning("the reconciliation at shutdown failed (%s): the next supervisor reconciles first",
+                           type(exc).__name__)  # fmt: skip
+            return f"failed: {type(exc).__name__}"
 
     async def status(self) -> dict[str, Any]:
         now = self.clock.now()

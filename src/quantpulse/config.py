@@ -176,6 +176,14 @@ class Settings(BaseSettings):
     db_command_timeout_seconds: float = Field(
         default=120.0, gt=0, le=3600, description="A PostgreSQL statement that takes longer is cancelled."
     )
+    db_startup_wait_seconds: float = Field(
+        default=90.0,
+        ge=0,
+        le=600,
+        description="At start-up, wait this long (retrying with back-off) for the database to answer before "
+        "giving up: a database restarting for maintenance does not crash-loop the API. Nothing starts until it "
+        "answers.",
+    )
     shutdown_drain_seconds: float = Field(
         default=75.0,
         ge=0,
