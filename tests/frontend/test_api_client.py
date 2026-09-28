@@ -47,3 +47,11 @@ def test_formatters():
     )
     assert pct(0.1234) == "12.34%" and pct(-0.01, 1, signed=True) == "-1.0%"
     assert num(1234.5, 1) == "1,234.5" and num(None) == "—"
+
+
+def test_a_render_private_network_address_gets_http(monkeypatch):
+    from frontend.api_client import ApiClient
+
+    monkeypatch.setenv("QP_API_URL", "quantpulse-api-x1y2:10000")
+    assert ApiClient().base_url == "http://quantpulse-api-x1y2:10000"
+    assert ApiClient("https://quantpulse-api.onrender.com/").base_url == "https://quantpulse-api.onrender.com"

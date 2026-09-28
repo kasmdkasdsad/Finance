@@ -90,3 +90,22 @@ def test_guard_lockout_doubles_and_resets():
     assert g.attempt(PASSWORD, hashed, now=1.0) is None  # locked: not even checked
     assert g.attempt("x", hashed, now=61.0) is False and g.locked_for(61.0) == 2 * auth.FIRST_LOCKOUT_SECONDS
     assert g.attempt(PASSWORD, hashed, now=500.0) is True and g.failures == 0
+
+
+def test_a_plain_password_from_the_hosts_secret_settings_works(monkeypatch):
+    """On Render the password is a secret environment variable; it is hashed in memory, never written."""
+    monkeypatch.delenv("QP_DASHBOARD_PASSWORD_HASH")
+    monkeypatch.setenv("QP_DASHBOARD_PASSWORD", PASSWORD)
+    auth._hash_of_plain.clear()
+    at = sign_in(app(), "wrong password here")
+    assert any("Wrong password" in e.value for e in at.error)
+    at = sign_in(at, PASSWORD)
+    assert "Password" not in [t.label for t in at.text_input]
+
+
+def test_a_too_short_plain_password_keeps_the_cloud_dashboard_locked(monkeypatch):
+    monkeypatch.delenv("QP_DASHBOARD_PASSWORD_HASH")
+    monkeypatch.setenv("QP_DASHBOARD_PASSWORD", "short")
+    auth._hash_of_plain.clear()
+    at = app()
+    assert any("dashboard is locked" in e.value for e in at.error) and len(at.text_input) == 0

@@ -139,7 +139,7 @@ def test_no_credentials_are_committed():
     key_id = re.compile(r"\b[PA]K[A-Z0-9]{16,24}\b")  # the shape of a real Alpaca key id
     assignment = re.compile(
         r"^[ \t]*(?:export[ \t]+)?(?:APCA_API_SECRET_KEY|QP_ALPACA_API_SECRET_KEY|ALPACA_API_SECRET_KEY|QP_API_TOKEN"
-        r"|APCA_API_KEY_ID|QP_ALPACA_API_KEY_ID|POSTGRES_PASSWORD|QP_DASHBOARD_PASSWORD_HASH)[ \t]*[=:][ \t]*['\"]?"
+        r"|APCA_API_KEY_ID|QP_ALPACA_API_KEY_ID|POSTGRES_PASSWORD|QP_DASHBOARD_PASSWORD_HASH|QP_DASHBOARD_PASSWORD)[ \t]*[=:][ \t]*['\"]?"
         r"([A-Za-z0-9/+$_\-]{16,})",
         re.MULTILINE,
     )

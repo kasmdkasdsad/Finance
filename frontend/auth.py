@@ -1,7 +1,8 @@
 """Dashboard login: nothing renders — no page, no data, no control — until the password is verified.
 
 The password is checked against ``QP_DASHBOARD_PASSWORD_HASH`` (PBKDF2, made with
-``quantpulse-hash-password``); the password itself is never stored. In the cloud (``QP_DEPLOYMENT=cloud``)
+``quantpulse-hash-password``), or against ``QP_DASHBOARD_PASSWORD`` kept as a secret in the host's settings (on
+Render) and hashed in memory at start; nothing is written anywhere. In the cloud (``QP_DEPLOYMENT=cloud``)
 the login is mandatory: without a hash the dashboard stays locked. Locally, without a hash, it opens as
 before.
 
@@ -20,7 +21,7 @@ from threading import Lock
 
 import streamlit as st
 
-from quantpulse.core.passwords import verify_password
+from quantpulse.core.passwords import PasswordHashError, hash_password, verify_password
 
 logger = logging.getLogger("quantpulse.dashboard.auth")
 FREE_ATTEMPTS = 5
@@ -33,8 +34,23 @@ def cloud() -> bool:
     return os.environ.get("QP_DEPLOYMENT", "").strip().lower() == "cloud"
 
 
+@st.cache_resource
+def _hash_of_plain(password: str) -> str | None:
+    """``QP_DASHBOARD_PASSWORD`` (a secret in the host's settings, e.g. Render): hashed once, in memory."""
+    try:
+        return hash_password(password)
+    except PasswordHashError:
+        return None  # shorter than the minimum: the dashboard stays locked
+
+
 def password_hash() -> str | None:
-    return os.environ.get("QP_DASHBOARD_PASSWORD_HASH", "").strip() or None
+    """The PBKDF2 hash to check against: ``QP_DASHBOARD_PASSWORD_HASH``, or one made in memory from
+    ``QP_DASHBOARD_PASSWORD``; ``None`` when neither is usable."""
+    hashed = os.environ.get("QP_DASHBOARD_PASSWORD_HASH", "").strip()
+    if hashed:
+        return hashed
+    plain = os.environ.get("QP_DASHBOARD_PASSWORD", "")
+    return _hash_of_plain(plain) if plain.strip() else None
 
 
 @dataclass
@@ -86,8 +102,8 @@ def require_login() -> None:
     if hashed is None:
         if cloud():
             st.error(
-                "The dashboard is locked: QP_DASHBOARD_PASSWORD_HASH is not set on the server. Make one with "
-                "`quantpulse-hash-password` and restart.",
+                "The dashboard is locked: set QP_DASHBOARD_PASSWORD (at least 12 characters) or "
+                "QP_DASHBOARD_PASSWORD_HASH (`quantpulse-hash-password`) on the server, then restart it.",
                 icon=":material/lock:",
             )
             st.stop()

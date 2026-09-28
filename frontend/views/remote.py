@@ -179,6 +179,68 @@ def _experiment(cp: dict[str, Any] | None, opp: dict[str, Any] | None, data: dic
         st.caption(_md(f"Market data: {data.get('headline', '—')}"))
 
 
+def _ago(seconds: int | None) -> str:
+    if seconds is None:
+        return "never"
+    return (
+        f"{seconds} s ago"
+        if seconds < 90
+        else f"{seconds // 60} min ago"
+        if seconds < 5400
+        else f"{seconds // 3600} h ago"
+    )
+
+
+def _cloud(cs: dict[str, Any]) -> None:
+    """CLOUD and TRADING at a glance, from /brain/cloud-status (the existing gates, read-only)."""
+    sv, sup, db = cs["service"], cs["supervisor"], cs["database"]
+    ae = cs["autonomous_execution"]
+    if ae["permitted"]:
+        st.success("Autonomous PAPER execution: PERMITTED — the Brain may send paper orders on its own now.",
+                   icon=":material/smart_toy:")  # fmt: skip
+    else:
+        st.warning(_md("Autonomous PAPER execution: not permitted now — " + "; ".join(ae["reasons"])[:700]),
+                   icon=":material/pause_circle:")  # fmt: skip
+    st.markdown("**Cloud**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Service", "online", f"v{sv['version']} · {sv.get('short_commit') or 'local'}", delta_color="off"
+    )
+    c2.metric("Uptime", _ago(sv.get("uptime_seconds")).replace(" ago", ""))
+    c3.metric("Database", db["status"], db.get("schema") or "", delta_color="off")
+    leader = sup.get("leader") or {}
+    recon = cs.get("reconciliation") or {}
+    last = cs.get("last_cycle") or {}
+    st.caption(
+        _md(
+            f"Supervisor: {'this instance leads' if sup.get('this_process_is_leader') else 'leader ' + str(leader.get('holder'))}"
+            f" (lease {'live' if leader.get('live') else 'NOT live'}; {len(sup.get('standby_processes') or {})} "
+            f"standing by) · last tick {_ago(sup.get('last_tick_age_seconds'))} · last reconciliation "
+            f"{_ago(recon.get('last_success_age_seconds'))} · last Brain cycle: {last.get('detail', '—')}"
+        )
+    )
+    st.markdown("**Trading**")
+    sw, market, today = cs["switches"], cs["market"], cs.get("today") or {}
+    t1, t2, t3 = st.columns(3)
+    t1.metric("Paper endpoint", "verified" if cs["alpaca"]["paper_endpoint_verified"] else "NOT verified")
+    t2.metric(
+        "Market", "open" if market["open"] else "closed", market["new_york_time"] + " NY", delta_color="off"
+    )
+    t3.metric("Orders / fills today", f"{today.get('orders', 0)} / {today.get('fills', 0)}")
+    bk = (sw.get("brain_kill_switch") or {}).get("active")
+    st.caption(
+        _md(
+            f"Trading enabled {sw['trading_enabled']} · dry run {sw['dry_run']} · Brain mode {sw['brain_mode']} · "
+            f"Brain kill switch {'ON' if bk else 'off'} · Alpaca {cs['alpaca']['connectivity']['status']} · "
+            f"data: {(cs.get('data') or {}).get('detail', '—')}"
+        )
+    )
+    for key, label in (("latest_decision", "Latest decision"), ("latest_rejection", "Latest rejection")):
+        d = cs.get(key)
+        if d:
+            st.caption(_md(f"{label}: **{d['action']} {d['symbol']}** ({d['status']})" + (f" — {d['reason']}" if d.get("reason") else "")))  # fmt: skip
+
+
 def render() -> None:
     st.title("QuantPulse · Remote", anchor=False)
     st.badge("ALPACA PAPER · simulated money", icon=":material/science:", color="orange")
@@ -188,6 +250,9 @@ def render() -> None:
     ex = guarded(lambda: api().get(f"{BASE}/execution"), "Brain execution")
     if ex:
         _kill_switch(ex)
+    cs = guarded(lambda: api().get(f"{BASE}/cloud-status"), "cloud status")
+    if cs:
+        _cloud(cs)
     sup = guarded(lambda: api().get(f"{BASE}/supervisor"), "supervisor")
     if sup:
         _brain(sup)
@@ -205,6 +270,15 @@ def render() -> None:
             _cycle(cycle)
     else:
         st.caption("No cycle yet.")
+    learning = guarded(lambda: api().get(f"{BASE}/learning"), "learning") or {}
+    if learning:
+        preds = learning.get("predictions") or {}
+        st.caption(
+            _md(
+                "Learning: "
+                + ", ".join(f"{k} {v}" for k, v in preds.items() if isinstance(v, int | float))[:300]
+            )
+        )
     with st.expander("Execution, opportunities, experiment"):
         trades = guarded(lambda: api().get(f"{BASE}/trades"), "trades") or []
         sent = [t for t in trades if t.get("sent")]

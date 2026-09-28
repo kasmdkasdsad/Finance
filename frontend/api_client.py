@@ -38,7 +38,9 @@ class Pending(Exception):
 
 class ApiClient:
     def __init__(self, base_url: str | None = None, token: str | None = None, timeout: float = 90.0) -> None:
-        self.base_url = (base_url or os.environ.get("QP_API_URL") or DEFAULT_URL).rstrip("/")
+        url = (base_url or os.environ.get("QP_API_URL") or DEFAULT_URL).strip().rstrip("/")
+        # Render's private network hands out "host:port" (fromService hostport): plain HTTP inside the network
+        self.base_url = url if "://" in url else f"http://{url}"
         token = token if token is not None else os.environ.get("QP_API_TOKEN")
         headers = {"X-API-Key": token} if token else {}
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout, headers=headers)

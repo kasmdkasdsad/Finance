@@ -14,6 +14,13 @@ def test_the_remote_page_shows_health_the_brain_and_the_account(brain_server):  
     assert "Brain supervisor" in text and "Equity" in text and "Day P&L" in text
     assert any(b.label == "STOP BRAIN TRADING" for b in at.button)
     assert "Cycle #" in text  # the last cycle, its agents and consensus
+    # CLOUD and TRADING from /brain/cloud-status
+    assert (
+        "Cloud" in text and "Trading" in text and "Paper endpoint" in text and "Orders / fills today" in text
+    )
+    assert "Autonomous PAPER execution" in " ".join(
+        [*(w.value for w in at.warning), *(s.value for s in at.success)]
+    )
     for secret in ("ui-secret", "PKUITEST"):
         assert secret not in text
 
