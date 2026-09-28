@@ -557,6 +557,95 @@ def _execution(d: dict[str, Any]) -> str:
     return reason if reason.startswith("not sent") else f"not sent: {reason}"
 
 
+def _positions() -> None:
+    st.markdown(
+        "**Positions and their theses** — every position on the Alpaca paper account the Brain owns: why it is "
+        "held, what would prove it wrong, its stop and (once calibrated) target, the agents for and against, "
+        "and how it has done against the benchmark since entry. A **broken** thesis is exited without waiting "
+        "for a new signal; a **weakening** one is first in line to be replaced by a stronger idea."
+    )
+    data = guarded(lambda: api().get(f"{BASE}/positions"), "positions")
+    if data is None:
+        return
+    if "Brain" not in data["owner"]:
+        st.caption(_md(f"Owner: {data['owner']}. See the paper book tab for the Brain's own positions."))
+        return
+    for sym in data.get("unexpected") or []:
+        c1, c2 = st.columns([4, 1])
+        c1.warning(
+            _md(
+                f"{sym}: a position the Brain did not open or adopt — no new positions until it is adopted or gone."
+            ),
+            icon=":material/help:",
+        )
+        if c2.button(f"Adopt {sym}", key=f"adopt_{sym}") and guarded(
+            lambda sym=sym: api().post(f"{BASE}/positions/{sym}/adopt"), "adopt"
+        ):
+            st.rerun()
+    rows = data.get("open") or []
+    if not rows:
+        st.caption("No open positions.")
+    else:
+        table = [
+            {
+                "symbol": r["symbol"],
+                "check": (r.get("check") or {}).get("status", "—"),
+                "origin": r["origin"],
+                "qty": r["qty"],
+                "weight": pct(r.get("weight"), 1),
+                "P&L": money(r.get("unrealized_pnl")),
+                "return": pct(r.get("return_pct"), 1),
+                "vs benchmark": pct(r.get("relative_return"), 1),
+                "stop": money(r.get("stop_price")),
+                "target": money(r.get("target_price")) if r.get("target_price") else "uncalibrated",
+                "horizon": r.get("horizon_days"),
+                "confidence": num(r.get("confidence")),
+                "for": ", ".join(r.get("supporting") or []) or "—",
+                "against": ", ".join(r.get("opposing") or []) or "—",
+                "regime": r.get("regime") or "—",
+                "sector": r.get("sector") or "—",
+            }
+            for r in rows
+        ]
+        st.dataframe(pd.DataFrame(table).astype(str), hide_index=True, use_container_width=True)
+        for r in rows:
+            check = r.get("check") or {}
+            with st.expander(
+                _md(f"{r['symbol']} — {check.get('status', 'not checked yet')}: {r['thesis'][:90]}")
+            ):
+                st.markdown(_md(f"**Thesis:** {r['thesis']}"))
+                st.markdown(_md(f"**Invalidation:** {r.get('invalidation') or 'below the stop'}"))
+                if check.get("reasons"):
+                    st.markdown(_md("**Check:** " + "; ".join(check["reasons"])))
+                st.caption(
+                    _md(
+                        f"Opened {r['opened_at'][:16].replace('T', ' ')} UTC at {money(r['entry_price'])} · "
+                        f"entry order {r.get('entry_order_id') or '—'} · decision #{r.get('entry_decision_id') or '—'}"
+                    )
+                )
+    closed = data.get("closed") or []
+    if closed:
+        st.markdown("**Closed**")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": r["symbol"],
+                        "opened": r["opened_at"][:10],
+                        "closed": (r.get("closed_at") or "")[:10],
+                        "entry": money(r["entry_price"]),
+                        "exit": money(r.get("exit_price")),
+                        "realised": money(r.get("realized_pnl")),
+                        "why": r.get("exit_reason") or "—",
+                    }
+                    for r in closed
+                ]
+            ).astype(str),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+
 def _book() -> None:
     st.markdown(
         "**The Brain's paper book** — a hypothetical portfolio the Brain manages. Every trade the risk engine "
@@ -1227,6 +1316,7 @@ def render() -> None:
             "Strategy lab",
             "Improvements",
             "Supervisor & events",
+            "Positions & theses",
             "Paper book",
             "Memory",
             "History",
@@ -1251,8 +1341,10 @@ def render() -> None:
     with tabs[8]:
         _operations()
     with tabs[9]:
-        _book()
+        _positions()
     with tabs[10]:
-        _memory()
+        _book()
     with tabs[11]:
+        _memory()
+    with tabs[12]:
         _history(cycles)

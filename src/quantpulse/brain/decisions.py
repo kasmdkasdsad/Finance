@@ -38,6 +38,10 @@ from .debate import Debate
 from .types import BUYING, EXECUTABLE_STATES, MARKET, SELLING, Action, BrainMode, Stance
 
 TRADES = BUYING | SELLING
+MAX_RISK_SHARE = 0.40  # a new name carrying more of the portfolio's risk than this is a poor fit
+MAX_VOL_RISE = 1.3  # nor one that raises portfolio volatility by more than 30% …
+VOL_FLOOR_FOR_RISE = 0.20  # … to above 20% a year
+REPLACE_MARGIN = 0.20  # a candidate this much stronger (score × confidence) may replace a fading holding
 
 
 @dataclass
@@ -59,6 +63,7 @@ class Proposal:
     memory: list[str] = field(default_factory=list)  # what memory says about this decision (context only)
     protective: bool = False  # an exit at a stop or a broken thesis (never held back by an entry halt)
     execution: dict[str, Any] = field(default_factory=dict)  # what happened to it (paper_execution)
+    entry: dict[str, Any] = field(default_factory=dict)  # a buy's thesis, stop, target, horizon, agents
 
     @property
     def is_trade(self) -> bool:
@@ -89,6 +94,7 @@ class Proposal:
             "memory": self.memory,
             "protective": self.protective,
             "execution": self.execution,
+            "entry": self.entry,
         }
 
 
@@ -137,6 +143,16 @@ def portfolio_fit(ctx: BrainContext, symbol: str, add_weight: float) -> dict[str
     beta_after = (port_beta or 0.0) + add_weight * beta if beta is not None else None
     if beta_after is not None and beta_after > BETA_LIMIT:
         notes.append(f"portfolio beta would reach {beta_after:.2f}")
+    risk = portfolio_risk(ctx, symbol, add_weight)
+    if risk.get("risk_share") is not None and risk["risk_share"] > MAX_RISK_SHARE and len(held) >= 2:
+        ok = False
+        notes.append(
+            f"it would carry {risk['risk_share']:.0%} of the portfolio's risk at a {add_weight:.0%} weight"
+        )
+    vb, va = risk.get("vol_before"), risk.get("vol_after")
+    if vb and va and va > MAX_VOL_RISE * vb and va > VOL_FLOOR_FOR_RISE:
+        ok = False
+        notes.append(f"it would raise portfolio volatility from {vb:.1%} to {va:.1%}")
     return {
         "ok": ok,
         "notes": notes,
@@ -145,6 +161,53 @@ def portfolio_fit(ctx: BrainContext, symbol: str, add_weight: float) -> dict[str
         "sector": sector,
         "sector_weight_after": round(after, 4) if after is not None else None,
         "beta_after": round(beta_after, 3) if beta_after is not None else None,
+        **risk,
+    }
+
+
+def portfolio_risk(ctx: BrainContext, symbol: str, add_weight: float) -> dict[str, Any]:
+    """The portfolio before and after adding ``add_weight`` of ``symbol``: annualised volatility (six months of
+    daily returns), the new name's share of the portfolio's risk (its marginal contribution), concentration
+    (Herfindahl of the invested weights) and the momentum tilt. Empty when the history is too short."""
+    held = {h: ctx.portfolio.weight(h) for h in ctx.held if h in ctx.close.columns and h != symbol}
+    if symbol not in ctx.close.columns:
+        return {}
+    names = [*held, symbol]
+    rets = np.log(ctx.close[names].iloc[-127:].astype(float)).diff().dropna(how="all").fillna(0.0)
+    if len(rets) < 60:
+        return {}
+    cov = rets.cov().to_numpy() * 252
+    before = np.array([*held.values(), 0.0])
+    after = before.copy()
+    after[-1] += add_weight
+
+    def vol(w: np.ndarray) -> float:
+        return float(np.sqrt(max(w @ cov @ w, 0.0)))
+
+    vb, va = vol(before), vol(after)
+    share = float(after[-1] * (cov @ after)[-1] / (va**2)) if va > 0 else None
+
+    def hhi(w: np.ndarray) -> float | None:
+        total = float(w.sum())
+        return float(((w / total) ** 2).sum()) if total > 0 else None
+
+    def tilt(w: np.ndarray) -> float | None:
+        mom = [ctx.ind(n, "mom_3m") for n in names]
+        if any(m is None for m in mom) or float(w.sum()) <= 0:
+            return None
+        return float(np.dot(w, np.array(mom, dtype=float)) / w.sum())
+
+    def r(x: float | None, n: int = 4) -> float | None:
+        return round(x, n) if x is not None else None
+
+    return {
+        "vol_before": r(vb) if held else None,
+        "vol_after": r(va),
+        "risk_share": r(share),
+        "hhi_before": r(hhi(before)),
+        "hhi_after": r(hhi(after)),
+        "momentum_tilt_before": r(tilt(before)),
+        "momentum_tilt_after": r(tilt(after)),
     }
 
 
@@ -194,6 +257,7 @@ def plan(
         for o in ctx.working.opinions.get(s, [])
         if o.agent_id == "portfolio"
     }
+    theses = ctx.working.facts.get("thesis_checks")  # the Alpaca account's position theses (paper_execution)
 
     # --- holdings
     for s in ctx.held:
@@ -217,6 +281,18 @@ def plan(
                     quantity=pos.qty,
                     target_weight=0.0,
                     reasons=[f"at its stop ({pos.unrealized_plpc:+.1%})"],
+                    protective=True,
+                    **base,
+                )
+            )
+        elif theses and (theses.get(s) or {}).get("status") == "broken":
+            out.append(
+                Proposal(
+                    action=Action.CLOSE,
+                    confidence=1.0,
+                    quantity=pos.qty,
+                    target_weight=0.0,
+                    reasons=["thesis broken: " + "; ".join(theses[s]["reasons"])],
                     protective=True,
                     **base,
                 )
@@ -409,6 +485,11 @@ def plan(
             continue
         candidates.append((c.score * c.confidence, s, c, base))
     slots = min(int(constraints.get("free_slots", 0)), max_new)
+    if slots == 0 and max_new > 0 and candidates:
+        slots, freed = _replace_weakest(ctx, out, candidates, consensus, theses)
+        cash += (
+            freed  # an estimate: the risk engine re-checks the buy against the cash once the sale has filled
+        )
     rank = 0
     for _, s, c, base in sorted(candidates, key=lambda x: -x[0]):
         price = base["est_price"]
@@ -468,6 +549,54 @@ def plan(
                 )
             )
     return out
+
+
+def _replace_weakest(
+    ctx: BrainContext,
+    out: list[Proposal],
+    candidates: list[tuple[float, str, Consensus, dict[str, Any]]],
+    consensus: dict[str, Consensus],
+    theses: dict[str, Any] | None,
+) -> tuple[int, float]:
+    """No free position slot: close the weakest fading holding when a candidate is clearly stronger (one per
+    cycle; the sell goes first, and the buy is re-checked by the risk engine once it has filled)."""
+    best = max(candidates, key=lambda x: x[0])
+    fading: list[tuple[float, int, str]] = []
+    for i, p in enumerate(out):
+        if p.action is not Action.HOLD or p.subject not in ctx.held:
+            continue
+        c = consensus.get(p.subject)
+        if theses is not None:
+            if (theses.get(p.subject) or {}).get("status") != "weakening":
+                continue
+        elif c is not None and c.actionable_view and c.stance is Stance.BULLISH:
+            continue
+        strength = c.score * c.confidence if c is not None and not c.unknown else 0.0
+        fading.append((strength, i, p.subject))
+    if not fading:
+        return 0, 0.0
+    strength, i, weakest = min(fading)
+    if best[0] - strength < REPLACE_MARGIN:
+        return 0, 0.0
+    old = out[i]
+    pos = ctx.portfolio.positions[weakest]
+    why = (theses or {}).get(weakest, {}).get("reasons") or old.reasons
+    out[i] = Proposal(
+        subject=weakest,
+        action=Action.CLOSE,
+        confidence=old.confidence,
+        quantity=pos.qty,
+        est_price=old.est_price,
+        current_weight=old.current_weight,
+        target_weight=0.0,
+        consensus=old.consensus,
+        reasons=[
+            f"replace with {best[1]} ({best[0]:+.2f} vs {strength:+.2f}): no free position slot and this holding "
+            "is fading",
+            *why,
+        ],
+    )
+    return 1, max(pos.market_value, 0.0)
 
 
 def quote_checks(ctx: BrainContext) -> dict[str, QuoteCheck]:

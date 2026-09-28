@@ -340,6 +340,8 @@ class BrainStore:
                         "blocked_by": p.blocked_by,
                         "fit": p.fit,
                         "memory": p.memory,
+                        "entry": p.entry,
+                        "protective": p.protective,
                     },
                     risk_approved=p.risk_approved,
                     risk=p.risk,

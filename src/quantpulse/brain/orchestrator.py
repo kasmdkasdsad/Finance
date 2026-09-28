@@ -42,6 +42,7 @@ from .perception import Perception
 from .registry import AgentRegistry, AgentRun, Skip
 from .routing import route
 from .store import BrainStore
+from .theses import ThesisBook, attach_entries
 from .types import MARKET, PORTFOLIO, SELLING, BrainMode, Opinion, Stance
 
 logger = logging.getLogger(__name__)
@@ -60,9 +61,9 @@ class CycleResult:
     predictions: int = 0
     fills: list[Fill] = field(default_factory=list)  # simulated in the Brain's paper book
     mark: dict[str, Any] = field(default_factory=dict)
-    execution: dict[str, Any] = field(
-        default_factory=dict
-    )  # paper_execution: what went to the trading service
+    # paper_execution: what went to the trading service, and the positions' theses reconciled with Alpaca
+    execution: dict[str, Any] = field(default_factory=dict)
+    theses: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
 
@@ -80,6 +81,7 @@ class Orchestrator:
         models: ModelRouter | None = None,
         book: PaperBook | None = None,
         executor: BrainExecutor | None = None,
+        theses: ThesisBook | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -92,6 +94,7 @@ class Orchestrator:
         self._models = models
         self._book = book
         self._executor = executor
+        self._theses = theses
         self._lock = asyncio.Lock()
         self.last_ctx: BrainContext | None = None  # the latest completed cycle's picture (for the monitor)
 
@@ -152,6 +155,11 @@ class Orchestrator:
             self._fail_safe(ctx, runs, skips)
             result.consensus = self._consensus(ctx, reliability, runs, skips)
             result.debates = review(ctx, result.consensus)  # bull, bear, devil's advocate
+            if mode is BrainMode.PAPER_EXECUTION and self._theses is not None and ctx.account.available:
+                # the account's positions and their theses, reconciled with Alpaca, then checked
+                result.theses = await self._theses.sync(ctx, cycle_id)
+                checks = await self._theses.review(ctx, result.consensus, self._s.brain_min_confidence)
+                result.theses["checks"] = _count(c["status"] for c in checks.values())
             if mode is not BrainMode.RESEARCH_ONLY:
                 result.proposals = plan(
                     ctx,
@@ -166,6 +174,11 @@ class Orchestrator:
                     debates=result.debates,
                 )
                 risk_preview(ctx, result.proposals, mode)
+                attach_entries(
+                    ctx,
+                    result.proposals,
+                    expected_by_subject(result.consensus, reliability, CONSENSUS_VERSION),
+                )
                 await self._recall(ctx, result)
             trace(
                 ctx.opportunities,
@@ -541,6 +554,7 @@ class Orchestrator:
                     else "proposals only: nothing is sent to Alpaca in this mode",
                 },
                 "execution": result.execution,
+                "theses": result.theses,
             },
             "data_quality": {
                 "market": dq[0].to_dict() if dq else None,

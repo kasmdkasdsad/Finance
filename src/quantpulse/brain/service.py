@@ -37,6 +37,7 @@ from .reflection import consensus_calibration
 from .registry import AgentRegistry
 from .store import BrainStore
 from .supervisor import Supervisor
+from .theses import ThesisBook
 from .types import BrainMode
 
 JOB_KEY = "brain-cycle"
@@ -79,6 +80,9 @@ class BrainService:
         self.memory = MemoryStore(db)
         self.models = ModelRouter(settings, clock, store=self.store)  # 'none' unless a provider is configured
         self.book = PaperBook(settings, db, clock)  # the Brain's own hypothetical portfolio
+        self.theses = ThesisBook(
+            settings, db, clock
+        )  # the Alpaca account's position theses (paper_execution)
         self.perception = Perception(
             settings, clock, data, BrokerView(broker), trading, reference, model, options, market, self.book
         )
@@ -94,6 +98,7 @@ class BrainService:
             self.models,
             self.book,
             BrainExecutor(settings, clock, trading),
+            self.theses,
         )
         self._synced = False
         self.learner = (

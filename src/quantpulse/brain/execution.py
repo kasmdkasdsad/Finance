@@ -96,6 +96,16 @@ def entry_halts(ctx: BrainContext) -> list[dict[str, str]]:
                 " quote ages cannot be trusted",
             }
         )
+    unexpected = ctx.working.facts.get("unexpected_positions") or []
+    if unexpected:
+        out.append(
+            {
+                "code": "unexpected_exposure",
+                "reason": "positions the Brain did not open or adopt: "
+                + ", ".join(sorted(unexpected))
+                + " (adopt them on the Brain page, or close them): nothing new until then",
+            }
+        )
     if acct is not None:
         problems: list[str] = []
         if acct.blocked:

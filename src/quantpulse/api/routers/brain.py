@@ -191,6 +191,24 @@ async def execution(c: Container = ContainerDep) -> dict[str, Any]:
     return await c.brain.execution_status()
 
 
+@router.get(
+    "/positions", summary="The Alpaca account's positions and their theses (open and recently closed)"
+)
+async def positions(closed: int = Query(50, ge=0, le=500), c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.theses.positions(closed=closed)
+
+
+@router.post(
+    "/positions/{symbol}/adopt",
+    dependencies=ControlAuth,
+    summary="Adopt a position the Brain did not open (it then manages it, and new positions may resume)",
+)
+async def adopt(
+    symbol: str = Path(..., max_length=24, pattern=r"^[A-Za-z0-9.\-]+$"), c: Container = ContainerDep
+) -> dict[str, Any]:
+    return await c.brain.theses.adopt(symbol)
+
+
 @router.get("/kill-switch", response_model=KillSwitchOut, summary="The Brain kill switch")
 async def brain_kill_switch(c: Container = ContainerDep) -> KillSwitchOut:
     return await c.trading.brain_kill_switch()

@@ -1286,7 +1286,15 @@ The decision step now also:
   trims a third of every holding that is not confidently bullish (`DE_RISK`);
 * rejects a new position that is nearly the same bet as a holding (return correlation ≥ 0.85) or would
   push a sector over 45% (`portfolio fit`), and notes a high resulting beta;
-* trims a bullish holding that has grown to more than 1.5× its target weight (`REBALANCE`).
+* judges it against the **whole portfolio**: annualised volatility before and after (six months of daily
+  returns and their covariance), the new name's share of the portfolio's risk (its marginal
+  contribution), concentration (Herfindahl of the invested weights) and the momentum tilt. A good idea is
+  still a poor fit when it would carry more than 40% of the portfolio's risk, or raise the portfolio's
+  volatility by more than 30% to above 20% a year;
+* trims a bullish holding that has grown to more than 1.5× its target weight (`REBALANCE`);
+* when no position slot is free, closes the weakest *fading* holding (a weakening thesis, or no bullish
+  consensus) for a candidate at least 0.20 stronger (score × confidence) — one per cycle; the sale goes
+  first and the buy is re-checked by the risk engine once it has filled.
 
 `QP_BRAIN_MIN_CONFIDENCE` now applies after the devil's advocate. Its default is 0.45: the scale moved
 when more agents and the debate were added, and the calibration report (learning) is what should confirm
@@ -1639,6 +1647,29 @@ on the *Paper Trading* page; Brain orders are tagged `brain` in the order record
 * **per decision** — a buy needs the risk preview's approval and no veto; a discretionary sell needs no
   veto; a protective exit (at its stop) is always handed on and the risk engine decides.
 
+**Positions and theses** (`GET /brain/positions`, the page's *Positions & theses* tab). Every position on
+the account has a thesis per holding period (`brain_theses`), reconciled with Alpaca at the start of every
+cycle — Alpaca is authoritative:
+
+* a position the Brain bought (a filled Brain order in the order records, so a fill after the cycle or a
+  restart is never lost) carries the thesis recorded with the decision: why, what would invalidate it, the
+  stop, the expected return and target (only once the consensus is calibrated — empty until then, nothing
+  is invented), the horizon, the confidence, the agents for and against, the regime, the sector and the
+  benchmark's price at entry; it is marked every cycle (price, value, weight, P&L, return against the
+  benchmark since entry);
+* positions already there when the Brain took the account over are *inherited* (managed like the rest);
+* any other position is **unexpected**: new positions stop (`unexpected_exposure`) until a person adopts it
+  (`POST /brain/positions/{symbol}/adopt`, or the button on the page) or it is gone — the Brain still
+  manages it meanwhile;
+* a thesis whose position is gone is closed with the Brain's exit (price, reason, decision) or "closed
+  outside the Brain".
+
+Each open thesis is checked every cycle: **broken** below its stop, when most of the agents that supported
+it now oppose it, when the consensus has turned confidently bearish, or when it has not worked in twice its
+horizon (behind the benchmark) — a broken thesis is closed as a protective exit without waiting for a new
+signal (it goes even while entries are halted); **weakening** when the evidence has faded (no bullish
+consensus, past its horizon, behind the benchmark) — first in line to be replaced; otherwise **intact**.
+
 **Never twice.** Brain client order ids are `qp-brain-<slot>-<SYMBOL>-<b|s>`, the slot being New York time
 floored to `QP_BRAIN_CYCLE_MINUTES`: however many cycles or restarts happen in a slot, at most one buy and
 one sell per symbol can be sent in it (a repeat is refused by the order manager's write-ahead record and
@@ -1684,6 +1715,7 @@ recorded as `duplicate_prevented`).
 | `GET /brain/agents` · `/agents/{id}` | Agents with their spec, run statistics and measured performance (empty until predictions are evaluated) |
 | `POST /brain/agents/{id}` `{"enabled": false}` | Switch an agent off or on |
 | `POST /brain/run?wait=` `{"symbols": ["NVDA"], "kind": "full"}` (`full`, `portfolio`, `event`, `deep`) | Run one cycle now (202 with progress if it takes longer than `wait`); in `paper_execution` its decisions go to the trading service (a manual cycle: no arming needed) |
+| `GET /brain/positions?closed=` · `POST /brain/positions/{symbol}/adopt` | The account's positions with their theses, checks and performance (open, recently closed, unexpected) · adopt a position the Brain did not open |
 | `GET /brain/execution` | Who owns the account, both kill switches, what would stop Brain orders (manual and scheduled), the last cycle's entry halts and orders sent |
 | `GET /brain/kill-switch` · `POST /brain/kill-switch {"active": true, "reason": "…", "cancel_open_orders": true}` | The Brain kill switch: stop new Brain orders at once (or allow them again) |
 | `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |

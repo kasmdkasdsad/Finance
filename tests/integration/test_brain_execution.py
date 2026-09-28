@@ -251,3 +251,60 @@ async def test_the_first_tick_after_a_restart_closes_interrupted_cycles_and_reco
         events = (await api.get(f"{TRADING}/events")).json()
         assert any(e["kind"] == "reconciliation_completed" and "(startup)" in e["message"] for e in events)
         assert "startup_recovery" not in await sup.tick()  # once per start
+
+
+async def test_every_position_gets_a_thesis_reconciled_with_alpaca(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, **OWNS, **ENABLED):
+        api.fake.hold("UPC", 25, 70.0, api.feed.live_price("UPC"))  # on the account when the Brain takes over
+        first = await run_cycle(api)
+        bought = {d["subject"] for d in sent(first) if d["action"] == "buy"}
+        assert bought
+        clock.advance(31 * 60)
+        await run_cycle(api)
+        pos = (await api.get(f"{API}/positions")).json()
+        held = {p["symbol"]: p for p in pos["open"]}
+        assert held["UPC"]["origin"] == "inherited" and "took the account over" in held["UPC"]["thesis"]
+        for sym in bought:
+            t = held[sym]
+            assert t["origin"] == "brain" and t["entry_order_id"].startswith("qp-brain-")
+            assert t["thesis"] and t["supporting"] and t["stop_price"] and t["horizon_days"] and t["regime"]
+            assert (
+                t["expected_return"] is None and t["target_price"] is None
+            )  # uncalibrated: nothing invented
+            assert t["check"]["status"] in ("intact", "weakening", "broken") and t["weight"] > 0
+            assert t["entry_decision_id"] is not None
+        gone = sorted(bought)[0]  # closed by hand at Alpaca
+        qty = api.fake.positions.pop(gone)["qty"]
+        api.fake.cash += qty * api.fake.price(gone)
+        clock.advance(31 * 60)
+        cycle = await run_cycle(api)
+        assert gone in cycle["portfolio"]["theses"]["closed"]
+        closed = {p["symbol"]: p for p in (await api.get(f"{API}/positions")).json()["closed"]}
+        assert closed[gone]["exit_reason"].startswith("closed outside the Brain")
+
+
+async def test_an_unexpected_position_halts_new_positions_until_it_is_adopted(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    fake = FakeAlpacaPaper(clock=clock)
+    async for api in brain_client(tmp_path, clock, fake=fake, **OWNS):  # trading disabled: nothing is sent
+        await run_cycle(api)  # the Brain takes the (empty) account over
+        fake.hold("MIDC", 10, api.feed.live_price("MIDC"))  # then someone buys by hand
+        clock.advance(31 * 60)
+        cycle = await run_cycle(api)
+        assert "unexpected_exposure" in cycle["summary"]["entry_halts"]
+        assert (await api.get(f"{API}/positions")).json()["unexpected"] == ["MIDC"]
+        halts = (await api.get(f"{API}/execution")).json()["last_cycle"]["entry_halts"]
+        assert any(h["code"] == "unexpected_exposure" and "MIDC" in h["reason"] for h in halts)
+        r = await api.post(f"{API}/positions/MIDC/adopt")
+        assert r.status_code == 200 and r.json()["adopt"] == ["MIDC"]
+        clock.advance(31 * 60)
+        cycle = await run_cycle(api)
+        assert "unexpected_exposure" not in cycle["summary"]["entry_halts"]
+        pos = (await api.get(f"{API}/positions")).json()
+        assert pos["unexpected"] == [] and {p["symbol"]: p["origin"] for p in pos["open"]} == {
+            "MIDC": "adopted"
+        }
+        assert posts(fake) == []

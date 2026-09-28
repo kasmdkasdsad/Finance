@@ -1049,3 +1049,49 @@ class BrainBookEquityRow(Base):
     invested: Mapped[float] = mapped_column(Float)
     positions: Mapped[int] = mapped_column(Integer)
     benchmark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class BrainThesisRow(Base):
+    """Why the Brain holds a position on the Alpaca paper account, what would end it, and how it is doing.
+    One row per holding period (open until the position is gone); Alpaca's positions are authoritative."""
+
+    __tablename__ = "brain_theses"
+    __table_args__ = (Index("ix_brain_theses_symbol_status", "symbol", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(12))  # open | closed
+    origin: Mapped[str] = mapped_column(String(12))  # brain | inherited | adopted
+    opened_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    entry_price: Mapped[float] = mapped_column(Float)
+    entry_qty: Mapped[float] = mapped_column(Float)
+    entry_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    thesis: Mapped[str] = mapped_column(Text)
+    invalidation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    horizon_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    supporting: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    opposing: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    regime: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    sector: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    benchmark_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    qty: Mapped[float] = mapped_column(Float)
+    avg_price: Mapped[float] = mapped_column(Float)
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    check: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # the latest thesis check
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exit_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    history: Mapped[list[Any]] = mapped_column(JSON, default=list)
