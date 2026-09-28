@@ -95,6 +95,7 @@ PROTECTED = (
     "QP_ALPACA_TRADING_ENABLED",
     "QP_BRAIN_KILL_SWITCH",
     "QP_BRAIN_MODE",
+    "QP_BRAIN_MAX_",  # the Brain's own caps (new positions per cycle, …), protected like the trading limits
 )
 STATUSES = ("proposed", "testing", "validated", "rejected", "applied", "protected_review")
 PROTECTED_NOTE = (
