@@ -26,6 +26,7 @@ from typing import Any
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
 
+from . import opportunity_outcomes
 from .book import Fill, PaperBook, expected_by_subject
 from .consensus import CONSENSUS_VERSION, Consensus, ReliabilityBook, build_consensus
 from .context import BrainContext
@@ -66,6 +67,7 @@ class CycleResult:
     # paper_execution: what went to the trading service, and the positions' theses reconciled with Alpaca
     execution: dict[str, Any] = field(default_factory=dict)
     theses: dict[str, Any] = field(default_factory=dict)
+    ideas: int = 0  # new ideas recorded for outcome grading (one per kind, symbol, direction and day)
     error: str | None = None
 
 
@@ -224,7 +226,18 @@ class Orchestrator:
                 await self._store.record_book_fills(decision_ids, result.fills)
                 result.mark = await self._book.mark(ctx, cycle_id)
             await self._store.save_debates(cycle_id, result.debates, now)
-            await self._store.save_opportunities(cycle_id, ctx.opportunities, now)
+            opportunity_ids = await self._store.save_opportunities(cycle_id, ctx.opportunities, now)
+            try:  # every idea considered, taken or not and why not — graded later (never fatal)
+                result.ideas = await opportunity_outcomes.record(
+                    self._store.db,
+                    ctx,
+                    ctx.opportunities,
+                    {p.subject: p for p in result.proposals},
+                    cycle_id,
+                    opportunity_ids,
+                )
+            except Exception:
+                logger.exception("recording the opportunity outcomes of brain cycle %s failed", cycle_id)
             forecasts = [
                 o for r in runs for o in r.opinions if self.registry.get(r.agent_id).role == "forecast"
             ]
@@ -630,6 +643,7 @@ class Orchestrator:
                 "trades_proposed": sum(1 for p in result.proposals if p.is_trade),
                 "risk_approved": sum(1 for p in result.proposals if p.risk_approved),
                 "predictions_recorded": result.predictions,
+                "ideas_recorded": result.ideas,
                 "orders_sent": int(result.execution.get("orders_sent") or 0),
                 "entry_halts": [h["code"] for h in result.execution.get("entry_halts") or []],
                 "book_fills": len(result.fills),

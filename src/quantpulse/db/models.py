@@ -1175,3 +1175,53 @@ class BrainExecutionRow(Base):
     )  # vs the midpoint as it left
     grade: Mapped[str | None] = mapped_column(String(12), nullable=True)  # good | fair | poor | unknown
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainOpportunityOutcomeRow(Base):
+    """One idea the Brain considered on one day — taken or not, and why not — graded later against the
+    benchmark, so it learns from the trades it rejected as well as from those it made. Repeated detections of
+    the same idea (kind, symbol, direction) on the same day are one record (``repeats``), never a bigger
+    sample."""
+
+    __tablename__ = "brain_opportunity_outcomes"
+    __table_args__ = (
+        Index("ix_brain_opportunity_outcomes_key", "kind", "symbol", "direction", "day", unique=True),
+        Index("ix_brain_opportunity_outcomes_state", "state", "due_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    opportunity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # the first detection
+    cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    symbol: Mapped[str] = mapped_column(String(24))
+    direction: Mapped[int] = mapped_column(Integer)  # +1 an idea to own it, −1 an idea to avoid / sell it
+    day: Mapped[date] = mapped_column(Date)  # New York date of the first detection
+    detected_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    strength: Mapped[float] = mapped_column(Float)
+    headline: Mapped[str] = mapped_column(Text)
+    taken: Mapped[bool] = mapped_column(
+        Boolean, default=False
+    )  # a trade on it went out (any detection that day)
+    reason: Mapped[str] = mapped_column(String(32))  # why not taken (a category), or "taken"
+    reason_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stopped_at: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )  # the pipeline stage it stopped at
+    status: Mapped[str] = mapped_column(String(24))  # the opportunity's status at its last detection that day
+    repeats: Mapped[int] = mapped_column(Integer, default=0)
+    regime: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    vol_env: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    market_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    due_date: Mapped[date] = mapped_column(Date)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_benchmark: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vol: Mapped[float | None] = mapped_column(Float, nullable=True)  # annualised, at detection
+    state: Mapped[str] = mapped_column(String(12))  # open | evaluated | void
+    realized_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    relative: Mapped[float | None] = mapped_column(Float, nullable=True)  # vs the benchmark over the horizon
+    favourable: Mapped[float | None] = mapped_column(Float, nullable=True)  # direction × relative
+    z: Mapped[float | None] = mapped_column(Float, nullable=True)  # favourable in units of the horizon's risk
+    verdict: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())

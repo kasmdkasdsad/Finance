@@ -75,7 +75,9 @@ async def test_every_trade_has_an_audit_trail_from_the_idea_to_the_fill(tmp_path
             "lesson",
         }
         traces = (await api.get(f"{API}/traces")).json()
-        assert traces["trades"] >= 1 and traces["with_gaps"] == 0, [(t["action"], t["gaps"]) for t in traces["trades_detail"]]
+        assert traces["trades"] >= 1 and traces["with_gaps"] == 0, [
+            (t["action"], t["gaps"]) for t in traces["trades_detail"]
+        ]
         assert traces["in_progress"] == traces["trades"]
         assert "traceable" in traces["headline"]
         assert (await api.get(f"{API}/decisions/999999/audit")).status_code == 404

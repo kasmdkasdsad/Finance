@@ -12,6 +12,7 @@ from datetime import date
 
 import pytest
 
+from quantpulse.brain.opportunity_outcomes import REASONS
 from quantpulse.core.clock import FakeClock
 from tests.fakes.alpaca_paper import FakeAlpacaPaper
 
@@ -86,3 +87,50 @@ async def test_a_closed_and_graded_trade_is_traceable_from_the_idea_to_the_lesso
         assert report["with_gaps"] == 0 and report["trades"] >= 2
         mine = next(t for t in report["trades_detail"] if t["decision_id"] == buy["id"])
         assert mine["complete"] and mine["gaps"] == [] and mine["pending"] == []
+
+
+async def test_ideas_not_taken_are_recorded_once_a_day_and_graded_later(tmp_path, monkeypatch):
+    """The Brain learns from the trades it rejected: every idea it considered is kept with why it was not
+    taken, folded to one record per idea per day, and graded against the benchmark after its horizon."""
+    from quantpulse.core.market_calendar import NEW_YORK
+
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, **OWNS, **ENABLED):
+        first = await run_cycle(api)
+        assert first["summary"]["ideas_recorded"] > 0
+        rows = (await api.get(f"{API}/opportunity-outcomes/rows")).json()
+        assert len(rows) == first["summary"]["ideas_recorded"]
+        assert all(r["state"] == "open" and r["entry_price"] and r["horizon_days"] > 0 for r in rows)
+        assert all(
+            r["direction"] in (-1, 1) and r["day"] == NOW.astimezone(NEW_YORK).date().isoformat()
+            for r in rows
+        )
+        reasons = {r["reason"] for r in rows}
+        assert reasons and reasons <= set(REASONS)
+        assert all(r["reason_detail"] for r in rows if r["reason"] != "taken")
+        clock.advance(31 * 60)
+        second = await run_cycle(api)  # the same ideas again today: folded in, not new observations
+        again = (await api.get(f"{API}/opportunity-outcomes/rows", params={"limit": 2000})).json()
+        assert len(again) == len(rows) + second["summary"]["ideas_recorded"]
+        assert sum(r["repeats"] for r in again) > 0
+        report = (await api.get(f"{API}/opportunity-outcomes")).json()
+        assert report["graded"] == 0 and report["open"] == len(again) and report["by_reason"] == {}
+
+        extend_feed(api.feed, date(2027, 2, 5))
+        clock.advance(130 * 86400)
+        learned = (await api.post(f"{API}/learn")).json()
+        assert learned["ideas_graded"] == len(again)
+        report = (await api.get(f"{API}/opportunity-outcomes")).json()
+        assert report["graded"] == len(again) and report["open"] == 0
+        for g in report["by_reason"].values():  # far too few ideas to judge a rejection rule
+            assert g["status"] == "unproven" and g["needs"] > 0 and g["meaning"]
+        assert report["taken_vs_rejected"]["status"].startswith("unproven")
+        graded = (await api.get(f"{API}/opportunity-outcomes/rows", params={"limit": 2000})).json()
+        verdicts = {"missed", "avoided", "noise", "worked", "failed", "signal_right", "signal_wrong"}
+        assert all(r["verdict"] in verdicts and r["relative"] is not None for r in graded)
+        assert all(r["favourable"] == pytest.approx(r["direction"] * r["relative"], abs=1e-6) for r in graded)
+        patterns = (
+            await api.get(f"{API}/memory", params={"kind": "pattern", "subject": "@rejections"})
+        ).json()
+        assert patterns and all("rejected for" in p["summary"] for p in patterns)

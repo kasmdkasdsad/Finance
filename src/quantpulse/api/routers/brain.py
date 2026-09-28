@@ -222,6 +222,29 @@ async def trades(limit: int = Query(50, ge=1, le=500), c: Container = ContainerD
 
 
 @router.get(
+    "/opportunity-outcomes",
+    summary="Ideas considered, taken or not and why not, graded later: which rejections saved money, which "
+    "cost opportunities",
+)
+async def opportunity_outcomes(c: Container = ContainerDep) -> dict[str, Any]:
+    from quantpulse.brain.opportunity_outcomes import report
+
+    return await report(c.brain.db, c.settings.brain_min_reliability_observations)
+
+
+@router.get("/opportunity-outcomes/rows", summary="The ideas themselves (newest first), with their verdicts")
+async def opportunity_outcome_rows(
+    limit: int = Query(200, ge=1, le=2000),
+    verdict: str | None = Query(None, description="missed | avoided | noise | worked | failed | …"),
+    reason: str | None = Query(None, description="why it was not taken (a category)"),
+    c: Container = ContainerDep,
+) -> list[dict[str, Any]]:
+    from quantpulse.brain.opportunity_outcomes import rows
+
+    return await rows(c.brain.db, limit, verdict, reason)
+
+
+@router.get(
     "/traces",
     summary="Is every sent Brain order traceable end to end? Gaps (missing links) and stages still to come",
 )

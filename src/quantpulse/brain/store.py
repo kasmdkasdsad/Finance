@@ -385,11 +385,18 @@ class BrainStore:
                 if row is not None:
                     row.execution = {**(row.execution or {}), "book": f.to_dict()}
 
-    async def save_opportunities(self, cycle_id: int, items: Sequence[Opportunity], now: datetime) -> None:
+    async def save_opportunities(
+        self, cycle_id: int, items: Sequence[Opportunity], now: datetime
+    ) -> dict[int, int]:
+        """Returns each opportunity's row id by its position in ``items``."""
+        ids: dict[int, int] = {}
         async with self._db.session() as s:
-            for o in items:
-                d = o.to_dict()
-                s.add(BrainOpportunityRow(cycle_id=cycle_id, created_at=now, **d))
+            for i, o in enumerate(items):
+                row = BrainOpportunityRow(cycle_id=cycle_id, created_at=now, **o.to_dict())
+                s.add(row)
+                await s.flush()
+                ids[i] = row.id
+        return ids
 
     async def save_debates(self, cycle_id: int, items: dict[str, Debate], now: datetime) -> None:
         async with self._db.session() as s:

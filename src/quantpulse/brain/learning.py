@@ -35,8 +35,8 @@ from quantpulse.core.market_calendar import NEW_YORK, sessions_after
 from quantpulse.db.models import BrainPredictionRow
 from quantpulse.db.session import Database
 
+from . import opportunity_outcomes, reflection
 from . import performance as perf
-from . import reflection
 from .consensus import CONSENSUS_VERSION, Consensus, ReliabilityBook
 from .context import BrainContext
 from .debate import Debate
@@ -284,11 +284,16 @@ class Learner:
                 tags=["performance", f["agent_id"]],
                 importance=0.7 if f["notes"] else 0.4,
             )
+        ideas = await opportunity_outcomes.evaluate_due(self._db, self._prices, self._clock, self._benchmark)
+        rejection_patterns = await opportunity_outcomes.remember(self._db, self._memory, now, self._min)
         patterns = await consolidate(self._db, self._memory, now, self._min)
         purged = await self._memory.purge_expired(now)
         summary = {
             "at": now.isoformat(),
             "patterns": patterns,
+            "ideas_graded": ideas["evaluated"],
+            "ideas_voided": ideas["voided"],
+            "rejection_patterns": rejection_patterns,
             "memory_purged": purged,
             "evaluated": evaluated.evaluated,
             "voided": evaluated.voided,
