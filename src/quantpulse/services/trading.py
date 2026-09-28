@@ -31,6 +31,7 @@ never fires a batch by itself.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.metadata
 import logging
 import math
@@ -265,8 +266,21 @@ class TradingService:
         self.strategy = StrategyConfig.from_settings(settings)
         self._lock = asyncio.Lock()
         self._last_reconcile: datetime | None = None
+        # the last reconciliation that failed (cleared by the next one that succeeds): no Brain order meanwhile
+        self.reconcile_error: tuple[datetime, str] | None = None
+        # the health monitor's order-critical checks (database, Alpaca, reconciliation), read at the last gate
+        self.health_gate: Callable[[], Awaitable[list[str]]] | None = None
         self._retry_at: datetime | None = None
         self._started = False
+
+    @property
+    def last_reconciled_at(self) -> datetime | None:
+        return self._last_reconcile
+
+    def _reconciled(self) -> datetime:
+        now = self._clock.now()
+        self._last_reconcile, self.reconcile_error = now, None
+        return now
 
     # ------------------------------------------------------------------ state
     async def _state(self, key: str) -> dict[str, Any]:
@@ -415,6 +429,14 @@ class TradingService:
             brain_kill = await self.brain_kill_switch()
             if brain_kill.active:
                 out.append(f"Brain kill switch ON ({brain_kill.reason or brain_kill.source})")
+            if not flatten:  # unhealthy: fail closed (exits requested by hand still pass)
+                if self.reconcile_error is not None:
+                    out.append(
+                        f"the last reconciliation with Alpaca failed ({self.reconcile_error[1][:120]}): no Brain "
+                        "order until one succeeds"
+                    )
+                if self.health_gate is not None:
+                    out += await self.health_gate()
         elif owner == "strategy" and s.brain_owns_account and not flatten:
             out.append("the Brain owns the Alpaca paper account: the strategy sends nothing")
         return out
@@ -1523,14 +1545,22 @@ class TradingService:
 
     async def reconcile(self, trigger: str = "manual") -> ReconcileOut:
         self._require_broker()
-        if trigger == "startup":
-            await self._close_interrupted()
-        report = await self.orders.reconcile()
-        account, positions = await asyncio.gather(self.broker.account(), self.broker.positions())
-        await self._baseline(account)
-        await self._forget_closed({p.symbol for p in positions})
-        now = self._clock.now()
-        self._last_reconcile = now
+        try:
+            if trigger == "startup":
+                await self._close_interrupted()
+            report = await self.orders.reconcile()
+            account, positions = await asyncio.gather(self.broker.account(), self.broker.positions())
+            await self._baseline(account)
+            await self._forget_closed({p.symbol for p in positions})
+        except Exception as exc:  # recorded: new Brain orders wait until a reconciliation succeeds
+            self.reconcile_error = (self._clock.now(), f"{type(exc).__name__}: {exc}"[:300])
+            with contextlib.suppress(Exception):  # the database may be what failed
+                await self._event(
+                    "reconciliation_failed",
+                    f"Reconciliation with Alpaca failed ({trigger}): {self.reconcile_error[1]}",
+                )
+            raise
+        now = self._reconciled()
         await self._event(
             "reconciliation_completed",
             f"Reconciled with Alpaca ({trigger}): {len(positions)} position(s), {report.open_orders} open order(s), "
@@ -1749,7 +1779,7 @@ class TradingService:
         # 1. Alpaca is authoritative: reconcile and read the account
         progress(0.01, "reconciling with Alpaca")
         await self.orders.reconcile()
-        self._last_reconcile = self._clock.now()
+        self._reconciled()
         account, positions, open_orders = await self._snapshot()
         await self._baseline(account)
         is_open, _ = await self._market()
@@ -2066,8 +2096,7 @@ class TradingService:
         # 1. Alpaca is authoritative: reconcile and read the account
         progress(0.05, "reconciling with Alpaca")
         await self.orders.reconcile()
-        now = self._clock.now()
-        self._last_reconcile = now
+        now = self._reconciled()
         account, positions, open_orders = await self._snapshot()
         await self._baseline(account)
         is_open, _ = await self._market()

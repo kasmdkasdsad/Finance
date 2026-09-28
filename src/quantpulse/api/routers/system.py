@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Query
 
 from quantpulse import __version__
@@ -25,6 +27,27 @@ async def health() -> Health:
 )
 async def system_status(c: Container = ContainerDep) -> SystemStatus:
     return SystemStatus.model_validate(await c.status())
+
+
+@router.get(
+    "/system/health", summary="Every part of the deployment: ok / warn / fail (and what blocks orders)"
+)
+async def system_health(
+    fresh: bool = Query(False, description="Run the checks now instead of returning the last round's"),
+    c: Container = ContainerDep,
+) -> dict[str, Any]:
+    if fresh or c.health.last is None:
+        return await c.health.check()
+    return c.health.last
+
+
+@router.get("/system/alerts", summary="The most recent alerts and where they were delivered")
+async def system_alerts(c: Container = ContainerDep) -> dict[str, Any]:
+    return {
+        "channels": c.alerts.channels,
+        "heartbeat": c.settings.heartbeat_url is not None,
+        "recent": list(reversed(c.alerts.sent)),
+    }
 
 
 @router.get("/system/ingestions", response_model=list[IngestionEvent], summary="Recent warehouse ingestions")

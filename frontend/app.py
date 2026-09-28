@@ -23,6 +23,7 @@ from frontend.views import (  # noqa: E402
     overview,
     picks,
     portfolio,
+    remote,
     sandbox,
     sports,
     stock,
@@ -88,7 +89,9 @@ if ICON.is_file():
 st.badge("ALPACA PAPER TRADING · SIMULATED MONEY", icon=":material/science:", color="orange")
 pages = {
     "Markets": [
-        st.Page(overview.render, title="Command Center", icon=":material/dashboard:", default=True),
+        st.Page(
+            overview.render, title="Command Center", icon=":material/dashboard:", default=not auth.cloud()
+        ),
         st.Page(options.render, title="Options Lab", icon=":material/candlestick_chart:", url_path="options"),
     ],
     "Predictions": [
@@ -101,6 +104,14 @@ pages = {
         st.Page(sandbox.render, title="Trading Sandbox", icon=":material/smart_toy:", url_path="sandbox"),
     ],
     "Alpaca Paper Trading": [
+        # the phone page: health, the stop button, P&L; the landing page in the cloud
+        st.Page(
+            remote.render,
+            title="Remote",
+            icon=":material/phone_iphone:",
+            url_path="remote",
+            default=auth.cloud(),
+        ),
         st.Page(brain.render, title="Brain", icon=":material/psychology:", url_path="brain"),
         st.Page(
             trading.render,

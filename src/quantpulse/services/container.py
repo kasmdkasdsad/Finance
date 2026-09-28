@@ -32,10 +32,12 @@ from quantpulse.providers.sec_edgar import SecEdgar
 from quantpulse.providers.sp500 import SP500Wikipedia
 from quantpulse.providers.treasury import Treasury
 from quantpulse.providers.yahoo import YahooFinance
+from quantpulse.services.alerts import AlertService
 from quantpulse.services.backfill import BackfillService
 from quantpulse.services.facts import FactsService
 from quantpulse.services.forecast import ForecastService
 from quantpulse.services.fundamentals import FundamentalsService
+from quantpulse.services.health import HealthMonitor
 from quantpulse.services.lease import Lease
 from quantpulse.services.market import MarketService
 from quantpulse.services.model import ModelService
@@ -216,6 +218,12 @@ class Container:
             self.options,
             self.market,
         )
+
+        # cloud monitoring: alerts (ntfy / webhook / heartbeat, all optional) and the health monitor, whose
+        # order-critical checks (database, Alpaca, reconciliation) fail Brain orders closed at the last gate
+        self.alerts = AlertService(settings, self.clock, self.db, self.http.raw)
+        self.health = HealthMonitor(self)
+        self.trading.health_gate = self.health.order_blockers
 
         from quantpulse.workers.poller import Poller  # local import avoids a cycle
 

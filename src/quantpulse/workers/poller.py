@@ -20,6 +20,8 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
   cycle, a quote monitor, a reconciliation or a learning pass. When the Brain owns the Alpaca paper account
   (``QP_BRAIN_MODE=paper_execution``) its cycles' decisions are executed by the trading service — the Brain
   itself never talks to the broker's order endpoint.
+* health — once a minute: the database, the supervisor, the scheduler, Alpaca, market data, reconciliation
+  and the last cycle; alerts on changes, the heartbeat, and Brain orders failing closed while unhealthy.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ PREDICTIONS_CHECK_SECONDS = 60.0
 MODEL_WARM_SECONDS = 300.0
 TRADING_CHECK_SECONDS = 60.0
 BRAIN_CHECK_SECONDS = 60.0
+HEALTH_CHECK_SECONDS = 60.0
 
 
 @dataclass
@@ -101,6 +104,7 @@ class Poller:
             asyncio.create_task(self._loop("model", lambda: MODEL_WARM_SECONDS, self.warm_model)),
             asyncio.create_task(self._loop("trading", lambda: TRADING_CHECK_SECONDS, self.run_trading)),
             asyncio.create_task(self._loop("brain", lambda: BRAIN_CHECK_SECONDS, self.run_brain)),
+            asyncio.create_task(self._loop("health", lambda: HEALTH_CHECK_SECONDS, self.run_health)),
         ]
         logger.info("poller started (%d jobs)", len(self._tasks))
 
@@ -200,6 +204,10 @@ class Poller:
     async def run_brain(self) -> str:
         """The brain's supervisor: session- and event-driven cycles (orders only via the trading service)."""
         return await self._c.brain.supervisor.tick()
+
+    async def run_health(self) -> str:
+        """Health of every part, alerts on changes, the heartbeat, and failing closed when unhealthy."""
+        return await self._c.health.run()
 
     async def warm_model(self) -> str:
         """Keep the latest close's model run computed, so pages and the ledger never wait for it."""

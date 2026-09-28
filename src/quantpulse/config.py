@@ -635,6 +635,37 @@ class Settings(BaseSettings):
         default=3, ge=0, le=20, description="Focus symbols summarised by the briefing agent per cycle."
     )
 
+    # --- Cloud monitoring and alerts (all optional and free; nothing is sent unless a URL is set) ------
+    alert_ntfy_url: SecretStr | None = Field(
+        default=None,
+        description="Push alerts to a phone through ntfy (https://ntfy.sh/<a long random topic>); the topic "
+        "acts as a password: keep it secret.",
+    )
+    alert_webhook_url: SecretStr | None = Field(
+        default=None, description="Also POST alerts as JSON to this webhook (Slack- and Discord-compatible)."
+    )
+    heartbeat_url: SecretStr | None = Field(
+        default=None,
+        description="A dead-man's switch (e.g. healthchecks.io): pinged every few minutes while QuantPulse is "
+        "healthy, '<url>/fail' when it is not; the service alerts you when the pings stop (server down).",
+    )
+    alert_cooldown_minutes: int = Field(
+        default=30, ge=1, le=1440, description="The same alert is not repeated within this many minutes."
+    )
+    brain_anomaly_orders_per_hour: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Brain orders rejected, failed or left unknown within an hour that turn the Brain kill "
+        "switch on by themselves (fail closed; a person releases it).",
+    )
+    health_data_quality_alert_cycles: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description="Consecutive in-session cycles halted by market data before an alert.",
+    )
+
     # --- Prediction ledger ------------------------------------------------------------------------
     predictions_enabled: bool = Field(
         default=True, description="Log forecasts and model predictions after each close and grade them later."
@@ -672,6 +703,9 @@ class Settings(BaseSettings):
         "eia_api_key",
         "odds_api_key",
         "smtp_password",
+        "alert_ntfy_url",
+        "alert_webhook_url",
+        "heartbeat_url",
         mode="before",
     )
     @classmethod

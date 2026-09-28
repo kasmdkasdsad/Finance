@@ -25,10 +25,11 @@ def restore_logging():
     root = logging.getLogger()
     handlers, level = root.handlers[:], root.level
     access = logging.getLogger("uvicorn.access")
-    access_handlers, access_propagate = access.handlers[:], access.propagate
+    access_handlers, access_propagate, access_level = access.handlers[:], access.propagate, access.level
     yield
     root.handlers[:], root.level = handlers, level
     access.handlers[:], access.propagate = access_handlers, access_propagate
+    access.setLevel(access_level)
 
 
 def settings() -> Settings:
@@ -107,6 +108,7 @@ def test_uvicorn_access_lines_keep_their_fields_and_lose_query_secrets(restore_l
     handler.setFormatter(AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s'))
     access.handlers[:] = [handler]
     access.propagate = False
+    access.setLevel(logging.INFO)  # a uvicorn server started by another test may have raised it
     configure_logging("INFO", secrets=[TOKEN])
     access.info(
         '%s - "%s %s HTTP/%s" %d', "10.0.0.2:5000", "GET", f"/api/v1/market/ws?api_key={TOKEN}", "1.1", 101
