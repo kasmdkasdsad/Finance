@@ -15,8 +15,8 @@ NO_ACTION, with the reason — the brain is allowed (and expected) to do nothing
 
 Every proposed trade is then evaluated by the existing :class:`~quantpulse.services.trading_risk.RiskBook`
 — the exact limits and checks that guard real orders — as a **preview**: sells first (committed so buys see
-them), then buys. The brain never sends an order; this module only records what it would do and whether
-the risk engine would allow it.
+them), then buys. This module never sends an order: in ``paper_execution`` the decisions are executed
+afterwards by the trading service (:mod:`quantpulse.brain.execution`), which checks them again on fresh data.
 """
 
 from __future__ import annotations
@@ -57,6 +57,8 @@ class Proposal:
     status: str = "proposed"
     fit: dict[str, Any] = field(default_factory=dict)  # portfolio fit of a new position
     memory: list[str] = field(default_factory=list)  # what memory says about this decision (context only)
+    protective: bool = False  # an exit at a stop or a broken thesis (never held back by an entry halt)
+    execution: dict[str, Any] = field(default_factory=dict)  # what happened to it (paper_execution)
 
     @property
     def is_trade(self) -> bool:
@@ -85,6 +87,8 @@ class Proposal:
             "status": self.status,
             "fit": self.fit,
             "memory": self.memory,
+            "protective": self.protective,
+            "execution": self.execution,
         }
 
 
@@ -213,6 +217,7 @@ def plan(
                     quantity=pos.qty,
                     target_weight=0.0,
                     reasons=[f"at its stop ({pos.unrealized_plpc:+.1%})"],
+                    protective=True,
                     **base,
                 )
             )

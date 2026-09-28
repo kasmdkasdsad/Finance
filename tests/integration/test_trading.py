@@ -36,6 +36,9 @@ def settings_for(tmp_path, **overrides):
         trading_use_implied_vol=False,
         trading_earnings_blackout_days=0,
         trading_fill_wait_seconds=0,
+        # these tests exercise the strategy as the account's owner; the Brain-owned account is tested in
+        # test_brain_execution.py
+        brain_mode="paper_recommendation",
     )
     base.update(overrides)
     return make_settings(tmp_path, **base)

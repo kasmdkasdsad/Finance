@@ -232,9 +232,11 @@ class Perception:
         self._notes: list[str] = []
         now = self._clock.now()
         errors: dict[str, str] = {}
-        account = await self._portfolio(errors)  # the strategy's Alpaca account: read only, context
+        account = await self._portfolio(errors)  # the Alpaca paper account (read here; orders go via trading)
         market_open, clock_source, skew = await self._market_open(now, errors)
-        book = await self._book.load() if self._book is not None else None
+        # the portfolio the decisions manage: the Alpaca paper account when the Brain owns it, else its book
+        owns = mode is BrainMode.PAPER_EXECUTION
+        book = await self._book.load() if self._book is not None and not owns else None
         held = (
             [s for s, p in book.positions.items() if p.qty > 0]
             if book is not None
@@ -325,8 +327,8 @@ class Perception:
         )[: self._s.brain_max_opportunities_recorded]
 
         kill = await self._trading.kill_switch()
-        # the trading controls, read only: why an order would not reach Alpaca right now (the brain never submits)
-        blockers = await self._trading.submit_blockers(kill)
+        # why a Brain order would not reach Alpaca right now (the executor asks again before sending)
+        blockers = await self._trading.submit_blockers(kill, owner="brain")
         closed = None
         if not market_open:
             closed = closed_reason(now) or (

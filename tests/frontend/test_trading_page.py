@@ -49,6 +49,7 @@ def trading_server(tmp_path_factory):
         trading_use_implied_vol=False,
         trading_earnings_blackout_days=0,
         trading_fill_wait_seconds=0,
+        brain_mode="paper_recommendation",  # the strategy owns the account in these page tests
     )
     clock = FakeClock(NOW)
     fake = FakeAlpacaPaper(clock=clock)

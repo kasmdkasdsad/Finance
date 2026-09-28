@@ -36,6 +36,7 @@ import logging
 import math
 import time as _time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -71,6 +72,7 @@ from quantpulse.providers.alpaca_trading import (
     BrokerOrder,
     BrokerPosition,
     MarketClock,
+    NotPaperTrading,
 )
 from quantpulse.schemas.common import DataStatus
 from quantpulse.schemas.trading import (
@@ -106,10 +108,13 @@ from quantpulse.schemas.trading import (
 )
 from quantpulse.services.order_manager import (
     AT_ALPACA,
+    BRAIN,
+    BRAIN_SLOT,
     STRATEGY,
     OrderManager,
     Submission,
     client_order_id,
+    is_brain,
     is_ours,
     trade_stage,
 )
@@ -133,6 +138,7 @@ from quantpulse.services.trading_risk import (
 logger = logging.getLogger(__name__)
 
 KILL_KEY = "kill_switch"
+BRAIN_KILL_KEY = "brain_kill_switch"
 MEMORY_KEY = "positions"
 BASELINE_KEY = "baseline"
 DAY_KEY = "daily_loss"
@@ -148,6 +154,7 @@ TEST_WAIT_SECONDS = 6.0
 RECONCILE_EVERY = timedelta(minutes=5)
 SCHEDULER_BACKOFF = timedelta(minutes=10)
 TOP_SIGNALS = 40
+BRAIN_TRIGGERS = ("brain:manual", "brain:scheduled")
 Progress = Callable[[float, str], None]
 
 
@@ -189,6 +196,34 @@ def _fin(x: Any) -> float | None:
 
 def _round_price(p: float) -> float:
     return round(p, 2) if p >= 1 else round(p, 4)
+
+
+def brain_slot(moment: datetime, minutes: int) -> str:
+    """The Brain's order slot: New York time floored to ``minutes``. Client order ids are derived from it,
+    so however many Brain cycles run in one slot — or restarts happen — at most one buy and one sell per
+    symbol can be sent in it."""
+    local = moment.astimezone(NEW_YORK)
+    floored = (local.hour * 60 + local.minute) // max(minutes, 1) * max(minutes, 1)
+    return f"{BRAIN_SLOT}-{local:%Y%m%d}T{floored // 60:02d}{floored % 60:02d}"
+
+
+@dataclass(frozen=True, slots=True)
+class BrainOrder:
+    """A trade the Brain decided on. Only the trading service can send it, after the same reconciliation,
+    fresh quotes, risk engine, order manager and switches as every other order."""
+
+    symbol: str
+    side: str  # buy | sell
+    qty: float
+    est_price: float
+    action: str  # the Brain's action: buy, increase, reduce, close, de_risk, rebalance
+    reason: str
+    closes_position: bool = False
+    protective: bool = False  # an exit at a stop or a broken thesis: never delayed by the anti-churn cooldown
+    score: float | None = None
+    adv_dollar: float | None = None  # average daily dollar volume (the risk engine's liquidity check)
+    current_weight: float = 0.0
+    target_weight: float = 0.0
 
 
 class TradingService:
@@ -249,6 +284,49 @@ class TradingService:
             changed_at=datetime.fromisoformat(changed) if changed else None,
         )
 
+    async def brain_kill_switch(self) -> KillSwitchOut:
+        """The Brain's own kill switch: refuses every new Brain-originated order (the strategy's kill switch
+        and close-all are separate). The setting cannot be released from the dashboard."""
+        if self._s.brain_kill_switch:
+            return KillSwitchOut(active=True, source="env", reason="QP_BRAIN_KILL_SWITCH=true")
+        st = await self._state(BRAIN_KILL_KEY)
+        changed = datetime.fromisoformat(st["changed_at"]) if st.get("changed_at") else None
+        if st.get("active"):
+            return KillSwitchOut(active=True, source="runtime", reason=st.get("reason"), changed_at=changed)
+        return KillSwitchOut(active=False, source=None, reason=None, changed_at=changed)
+
+    async def set_brain_kill_switch(
+        self, active: bool, reason: str | None, cancel_open_orders: bool
+    ) -> KillSwitchOut:
+        """Stop (or allow again) new Brain orders; stopping can also cancel the Brain's working orders."""
+        now = self._clock.now()
+        if not active and self._s.brain_kill_switch:
+            raise DomainError(
+                "the Brain kill switch is set by QP_BRAIN_KILL_SWITCH=true: change the setting to release it"
+            )
+        await self._put_state(
+            BRAIN_KILL_KEY, {"active": active, "reason": reason, "changed_at": now.isoformat()}
+        )
+        canceled = 0
+        if active and cancel_open_orders and self.broker.configured() and self._s.alpaca_trading_enabled:
+            for o in [o for o in await self.broker.open_orders() if is_brain(o.client_order_id)]:
+                try:
+                    await self.broker.cancel(o.id)
+                    canceled += 1
+                except BrokerError as exc:
+                    logger.warning("Brain kill switch could not cancel %s: %s", o.client_order_id, exc)
+        await self._event(
+            "brain_kill_switch_activated" if active else "brain_kill_switch_released",
+            (
+                f"Brain kill switch ON: no new Brain orders ({reason or 'no reason given'})"
+                if active
+                else "Brain kill switch released: Brain orders may be sent again"
+            )
+            + (f"; canceled {canceled} open Brain order(s)" if canceled else ""),
+            details={"reason": reason, "canceled": canceled},
+        )
+        return await self.brain_kill_switch()
+
     def _require_broker(self) -> None:
         if not self.broker.configured():
             raise BrokerNotConfigured(
@@ -273,10 +351,29 @@ class TradingService:
             details={"by": how},
         )
 
-    async def submit_blockers(self, kill: KillSwitchOut, *, scheduled: bool = False) -> list[str]:
-        """Every reason orders would not reach Alpaca right now (empty: they would)."""
+    async def submit_blockers(
+        self, kill: KillSwitchOut, *, scheduled: bool = False, owner: str = "strategy"
+    ) -> list[str]:
+        """Every reason orders would not reach Alpaca right now (empty: they would). ``owner`` is who wants
+        to send them: the ``strategy``, the ``brain``, or a ``diagnostic`` (the confirmed test order). Only
+        the owner of the account may manage it: while the Brain owns it the strategy is a dry run, and the
+        Brain sends nothing unless it owns it."""
         s = self._s
         out: list[str] = []
+        if owner == "strategy" and s.brain_owns_account:
+            out.append(
+                "the Brain owns the Alpaca paper account (QP_BRAIN_MODE=paper_execution): the strategy only "
+                "runs as a dry run"
+            )
+        if owner == "brain":
+            if not s.brain_owns_account:
+                out.append(
+                    f"QP_BRAIN_MODE={s.brain_mode}: the Brain does not manage the Alpaca paper account"
+                )
+            brain_kill = await self.brain_kill_switch()
+            if brain_kill.active:
+                where = "QP_BRAIN_KILL_SWITCH=true" if brain_kill.source == "env" else "dashboard/API"
+                out.append(f"Brain kill switch ON ({where}: {brain_kill.reason or 'no reason given'})")
         if not self.broker.configured():
             out.append("Alpaca paper keys are not set (QP_ALPACA_API_KEY_ID / QP_ALPACA_API_SECRET_KEY)")
         if not s.alpaca_trading_enabled:
@@ -297,14 +394,19 @@ class TradingService:
         return out
 
     async def _mode(
-        self, force_dry_run: bool = False, *, scheduled: bool = False
+        self, force_dry_run: bool = False, *, scheduled: bool = False, owner: str = "strategy"
     ) -> tuple[str, KillSwitchOut, list[str]]:
         kill = await self.kill_switch()
-        blockers = await self.submit_blockers(kill, scheduled=scheduled)
+        blockers = await self.submit_blockers(kill, scheduled=scheduled, owner=owner)
         if force_dry_run:
             blockers = [*blockers, "dry run requested for this cycle"]
         submit = not blockers and self._s.trading_can_submit and self.broker.configured()
         return ("paper" if submit else "dry_run"), kill, blockers
+
+    @property
+    def owner(self) -> str:
+        """Who manages the Alpaca paper account: ``brain`` (QP_BRAIN_MODE=paper_execution) or ``strategy``."""
+        return "brain" if self._s.brain_owns_account else "strategy"
 
     @staticmethod
     def _cycle_key(base: str, mode: str) -> str:
@@ -358,8 +460,9 @@ class TradingService:
     # ------------------------------------------------------------------ read views
     async def status(self) -> TradingStatus:
         s = self._s
-        mode, kill, blockers = await self._mode()
-        scheduled_mode, _, _ = await self._mode(scheduled=True)
+        owner = self.owner
+        mode, kill, blockers = await self._mode(owner=owner)
+        scheduled_mode, _, _ = await self._mode(scheduled=True, owner=owner)
         market: MarketClockOut | None = None
         warnings: list[str] = []
         if self.broker.configured():
@@ -393,16 +496,35 @@ class TradingService:
             dry_run=s.trading_dry_run,
             mode=mode,
             mode_banner=(
-                "ALPACA PAPER EXECUTION ACTIVE — orders are sent to your Alpaca paper account"
+                (
+                    "ALPACA PAPER EXECUTION ACTIVE — the Brain sends its approved decisions to your Alpaca "
+                    "paper account (the strategy runs as a dry run only)"
+                    if owner == "brain"
+                    else "ALPACA PAPER EXECUTION ACTIVE — orders are sent to your Alpaca paper account"
+                )
                 if mode == "paper"
                 else DRY_RUN_BANNER
             ),
             can_submit=mode == "paper",
             submit_blockers=blockers,
             kill_switch=kill,
+            owner=owner,
+            owner_note=(
+                "The Brain owns the Alpaca paper account (QP_BRAIN_MODE=paper_execution): its supervisor "
+                "decides and every order goes through this service's reconciliation, risk engine and order "
+                "manager. Strategy cycles are dry runs only."
+                if owner == "brain"
+                else "The strategy owns the Alpaca paper account; the Brain proposes only "
+                f"(QP_BRAIN_MODE={s.brain_mode})."
+            ),
+            brain_kill_switch=await self.brain_kill_switch(),
             scheduler_enabled=s.trading_scheduler_enabled,
             scheduler_armed=await self.armed(),
-            scheduled_mode=scheduled_mode if s.trading_scheduler_enabled else "dry_run",
+            scheduled_mode=(
+                scheduled_mode
+                if (s.brain_supervisor_enabled if owner == "brain" else s.trading_scheduler_enabled)
+                else "dry_run"
+            ),
             interval_minutes=s.trading_rebalance_interval_minutes,
             first_cycle_time=s.trading_time,
             next_cycle_at=self._next_slot() if s.trading_scheduler_enabled else None,
@@ -621,7 +743,7 @@ class TradingService:
         self._require_broker()
         a, positions = await asyncio.gather(self.broker.account(), self.broker.positions())
         is_open, _ = await self._market()
-        mode, kill, _ = await self._mode()
+        mode, kill, _ = await self._mode(owner=self.owner)
         L = self.limits
         eq = a.equity if a.equity > 0 else 0.0
         largest = max(positions, key=lambda p: p.market_value, default=None)
@@ -782,7 +904,7 @@ class TradingService:
             "orders_canceled", f"Cancel all: Alpaca accepted {n} cancellation(s)", details={"count": n}
         )
         await self.orders.reconcile()
-        mode, _, _ = await self._mode()
+        mode, _, _ = await self._mode(owner=self.owner)
         return ActionOut(
             message=f"Canceled {n} open order(s) on the Alpaca paper account", mode=mode, canceled=n
         )
@@ -855,7 +977,7 @@ class TradingService:
         )
 
     async def _test_order_blockers(self, kill: KillSwitchOut) -> list[str]:
-        return await self.submit_blockers(kill)
+        return await self.submit_blockers(kill, owner="diagnostic")
 
     async def diagnostics(self, symbols: Sequence[str] = ()) -> TradingDiagnosticsOut:
         """Read-only end-to-end check of the Alpaca paper connection: settings, SDK client (paper endpoint),
@@ -863,7 +985,7 @@ class TradingService:
         changes or cancels an order."""
         now = self._clock.now()
         checks: list[DiagnosticCheckOut] = []
-        mode, kill, blockers = await self._mode()
+        mode, kill, blockers = await self._mode(owner=self.owner)
         config = self.config()
         creds = self._credentials()
 
@@ -1424,10 +1546,24 @@ class TradingService:
         )
         return account, {p.symbol: p for p in positions}, open_orders
 
-    async def _cycle(self, base_key: str, trigger: str, force_dry_run: bool, progress: Progress) -> CycleOut:
+    async def _cycle(
+        self,
+        base_key: str,
+        trigger: str,
+        force_dry_run: bool,
+        progress: Progress,
+        *,
+        owner: str = "strategy",
+        scheduled: bool | None = None,
+        work: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    ) -> CycleOut:
+        """One recorded cycle: the mode is decided once, the cycle key is unique (a repeat returns the
+        recorded cycle), and ``work`` (the strategy's :meth:`_execute` by default, or the Brain's
+        :meth:`_execute_brain`) does the reconciliation, risk checks and orders."""
         async with self._lock:
             now = self._clock.now()
-            mode, kill, blockers = await self._mode(force_dry_run, scheduled=trigger == "schedule")
+            scheduled = trigger == "schedule" if scheduled is None else scheduled
+            mode, kill, blockers = await self._mode(force_dry_run, scheduled=scheduled, owner=owner)
             key = self._cycle_key(base_key, mode)
             try:
                 async with self._db.session() as s:
@@ -1456,7 +1592,7 @@ class TradingService:
                 assert found is not None
                 return await self._cycle_view(found)
             try:
-                record = await self._execute(cycle_id, key, mode, kill, progress, blockers)
+                record = await (work or self._execute)(cycle_id, key, mode, kill, progress, blockers)
                 status, error = record.pop("status", "completed"), None
             except (BrokerError, DomainError) as exc:
                 logger.warning("trading cycle %s failed: %s", key, exc)
@@ -1487,8 +1623,8 @@ class TradingService:
                         cycle_id=cycle_id,
                     )
                 await s.flush()
-            if mode == "paper" and status == "completed" and trigger == "manual":
-                await self._arm("manual paper cycle")
+            if mode == "paper" and status == "completed" and not scheduled:
+                await self._arm("manual Brain paper cycle" if owner == "brain" else "manual paper cycle")
             return await self._cycle_view(row)
 
     async def _execute(
@@ -1746,6 +1882,299 @@ class TradingService:
             "notes": notes,
         }
 
+    # ------------------------------------------------------------------ Brain execution
+    async def run_brain(
+        self,
+        orders: Sequence[BrainOrder],
+        *,
+        brain_cycle_id: int,
+        scheduled: bool,
+        progress: Progress = _noop,
+    ) -> CycleOut:
+        """Execute the Brain's decisions — through this service only. The cycle reconciles with Alpaca,
+        re-reads the account, prices every order from fresh quotes, and sends each through the risk engine
+        and the order manager exactly as a strategy cycle would (sells first, then buys against the cash
+        actually available). Nothing is sent unless the Brain owns the account and every switch allows it
+        (otherwise the cycle is a dry run with the reasons in its notes). Client order ids come from the
+        Brain's slot, so a restart or a second cycle in the same slot can never send an order twice."""
+        self._require_broker()
+        slot = brain_slot(self._clock.now(), self._s.brain_cycle_minutes)
+        trigger = BRAIN_TRIGGERS[1] if scheduled else BRAIN_TRIGGERS[0]
+
+        async def work(
+            cycle_id: int,
+            key: str,
+            mode: str,
+            kill: KillSwitchOut,
+            prog: Progress,
+            blockers: Sequence[str] = (),
+        ) -> dict[str, Any]:
+            return await self._execute_brain(
+                cycle_id,
+                key,
+                mode,
+                kill,
+                prog,
+                blockers,
+                orders=orders,
+                slot=slot,
+                brain_cycle_id=brain_cycle_id,
+            )
+
+        return await self._cycle(
+            f"brain-{brain_cycle_id}", trigger, False, progress, owner="brain", scheduled=scheduled, work=work
+        )
+
+    def _verify_paper(self) -> str:
+        """Fail closed unless the SDK client points at Alpaca's paper API (checked before every Brain cycle)."""
+        if not self._s.alpaca_paper:  # the setting refuses false; kept as a guard
+            raise NotPaperTrading("QP_ALPACA_PAPER is not true: refusing to trade")
+        endpoint = self.broker.verify_paper_client()
+        if endpoint.rstrip("/") != PAPER_URL or self.broker.base_url.rstrip("/") != PAPER_URL:
+            raise NotPaperTrading(
+                f"refusing to trade: the Alpaca client points at {endpoint!r}, not the paper API"
+            )
+        return endpoint
+
+    async def _execute_brain(
+        self,
+        cycle_id: int,
+        key: str,
+        mode: str,
+        kill: KillSwitchOut,
+        progress: Progress,
+        blockers: Sequence[str] = (),
+        *,
+        orders: Sequence[BrainOrder],
+        slot: str,
+        brain_cycle_id: int,
+    ) -> dict[str, Any]:
+        s = self._s
+        notes: list[str] = [f"Brain cycle {brain_cycle_id}: {len(orders)} decision(s) (order slot {slot})"]
+        if kill.active:
+            notes.append(
+                f"Kill switch ON ({kill.reason or kill.source}): every order is refused; this is a dry run"
+            )
+        elif mode == "dry_run":
+            notes.append(DRY_RUN_BANNER)
+        if mode == "dry_run" and blockers:
+            notes.append("Not sent to Alpaca because: " + "; ".join(blockers))
+
+        # 0. paper only, fail closed
+        endpoint = self._verify_paper()
+        notes.append(f"endpoint verified: {endpoint}")
+
+        # 1. Alpaca is authoritative: reconcile and read the account
+        progress(0.05, "reconciling with Alpaca")
+        await self.orders.reconcile()
+        now = self._clock.now()
+        self._last_reconcile = now
+        account, positions, open_orders = await self._snapshot()
+        await self._baseline(account)
+        is_open, _ = await self._market()
+        if mode == "paper":
+            canceled = await self.orders.cancel_stale(open_orders)
+            if canceled:
+                await asyncio.sleep(1.0)
+                account, positions, open_orders = await self._snapshot()
+                notes.append(f"canceled {len(canceled)} stale unfilled order(s) before trading")
+        if not is_open:
+            notes.append("The market is closed: orders would be refused (risk check market_open)")
+
+        # 2. what may be traded now (the same planning rules as the strategy: never a symbol with a working
+        #    or unresolved order; no reversal within the cooldown, except protective exits)
+        progress(0.2, "checking the Brain's decisions against the account")
+        cooldown = timedelta(minutes=self.strategy.cooldown_minutes)
+        last_traded = await self.orders.last_trades(now - cooldown, strategies=(STRATEGY, BRAIN))
+        working = {o.symbol for o in open_orders if o.is_open} | await self.orders.unresolved_symbols()
+        daily_hit = account.last_equity > 0 and account.day_pl_pct <= -self.limits.max_daily_loss_pct
+        if daily_hit:
+            await self._daily_loss_event(account)
+        trades: list[ProposedTrade] = []
+        skipped: dict[str, str] = {}
+        flatten = daily_hit and s.trading_daily_loss_action == "flatten"
+        if flatten:
+            notes.append(
+                "daily loss limit reached (QP_TRADING_DAILY_LOSS_ACTION=flatten): flattening instead"
+            )
+            trades = [
+                ProposedTrade(
+                    sym,
+                    "sell",
+                    p.qty,
+                    p.current_price,
+                    "daily_loss_flatten",
+                    f"daily loss {account.day_pl_pct:+.2%} hit the −{self.limits.max_daily_loss_pct:.0%} limit "
+                    "(QP_TRADING_DAILY_LOSS_ACTION=flatten)",
+                    p.market_value / account.equity if account.equity > 0 else 0.0,
+                    0.0,
+                    None,
+                    closes_position=True,
+                )
+                for sym, p in positions.items()
+                if p.qty > 0 and sym not in working
+            ]
+        else:
+            for o in orders:
+                sym = o.symbol.upper()
+                if sym in working:
+                    skipped[sym] = "an order for it is still working (or of unknown outcome): not sent"
+                    continue
+                last = last_traded.get(sym)
+                if last is not None and last[1] != o.side and now - last[0] < cooldown and not o.protective:
+                    skipped[sym] = (
+                        f"cooldown: {'sold' if o.side == 'buy' else 'bought'} within the last "
+                        f"{self.strategy.cooldown_minutes:.0f} minutes"
+                    )
+                    continue
+                qty, closes = o.qty, o.closes_position
+                if o.side == "sell":
+                    held = positions[sym].qty if sym in positions else 0.0
+                    if held <= 0:
+                        skipped[sym] = "not held any more: nothing to sell"
+                        continue
+                    qty = min(qty, held)
+                    closes = closes or qty >= held - 1e-9
+                trades.append(
+                    ProposedTrade(
+                        sym,
+                        o.side,
+                        qty,
+                        o.est_price,
+                        f"brain_{o.action}",
+                        o.reason[:300],
+                        o.current_weight,
+                        o.target_weight,
+                        o.score,
+                        closes_position=closes,
+                    )
+                )
+        for sym, why in skipped.items():
+            notes.append(f"{sym}: {why}")
+
+        # 3. fresh quotes. Sells: live quotes; only a protective exit (a stop, a broken thesis, the daily-loss
+        #    flatten) may fall back to Alpaca's own mark, as close-all does, so a data outage cannot trap a
+        #    position. Buys: the live quote with the consolidated check. Every order is re-priced at it.
+        progress(0.35, "fresh quotes")
+        protective = {o.symbol.upper() for o in orders if o.protective} | (
+            {t.symbol for t in trades} if flatten else set()
+        )
+        sell_syms = {t.symbol for t in trades if t.side == "sell"}
+        buy_syms = [t.symbol for t in trades if t.side == "buy"]
+        quotes, live = await self._position_quote_map({x: positions[x] for x in sell_syms if x in positions})
+        for sym in list(quotes):
+            if sym not in live and sym not in protective:
+                del quotes[sym]  # a discretionary sell needs a live quote (the risk engine says why)
+        fresh = await self._data.live_quotes(buy_syms, consolidated=True) if buy_syms else {}
+        adv = {o.symbol.upper(): o.adv_dollar for o in orders}
+        for sym in buy_syms:
+            q = fresh.get(sym)
+            if q is None:
+                continue
+            qq = assess_quote(q, s.trading_max_quote_age_seconds)
+            quotes[sym] = QuoteCheck(
+                price=q.price,
+                status=DataStatus.LIVE,
+                provider=q.provider,
+                age_seconds=q.age_seconds,
+                spread_bps=qq.spread_bps,
+                adv_dollar=adv.get(sym),
+                spread_source=qq.spread_source,
+                quote_problems=qq.problems,
+                entry_blocks=qq.entry_blocks,
+            )
+            live[sym] = q
+        trades = [_repriced(t, quotes[t.symbol].price) if t.symbol in quotes else t for t in trades]
+
+        # 4-5. risk and execution: sells first, then buys against the cash actually available
+        progress(0.5, "risk checks" + (" and orders" if mode == "paper" else " (dry run)"))
+        book = RiskBook(self.limits, account, positions, open_orders, is_open, kill.active, quotes, daily_hit)
+        trade_rows: list[ProposedTradeOut] = []
+        submitted: list[Submission] = []
+        sells = [t for t in trades if t.side == "sell"]
+        buys = [t for t in trades if t.side == "buy"]
+        for t in sells:
+            out, sub = await self._risk_and_submit(
+                t, book, live.get(t.symbol), slot, mode, cycle_id, flatten=flatten, strategy=BRAIN
+            )
+            trade_rows.append(out)
+            if sub is not None:
+                submitted.append(sub)
+        if buys:
+            if mode == "paper" and any(x.submitted for x in submitted):
+                progress(0.7, "waiting for sells to fill")
+                sold = await self.orders.wait_for(
+                    [x.client_order_id for x in submitted if x.submitted], s.trading_fill_wait_seconds
+                )
+                unfilled = [o.symbol for o in sold.values() if o.status != "filled"]
+                if unfilled:
+                    notes.append(
+                        f"{len(unfilled)} sell(s) not filled after {s.trading_fill_wait_seconds:.0f}s "
+                        f"({', '.join(sorted(unfilled))}): buys were re-checked against the cash actually "
+                        "available (never margin)"
+                    )
+                account, positions, open_orders = await self._snapshot()
+                book = RiskBook(
+                    self.limits, account, positions, open_orders, is_open, kill.active, quotes, daily_hit
+                )
+            for t in buys:
+                out, sub = await self._risk_and_submit(
+                    t, book, live.get(t.symbol), slot, mode, cycle_id, strategy=BRAIN
+                )
+                trade_rows.append(out)
+                if sub is not None:
+                    submitted.append(sub)
+
+        # 6. fills and the record
+        sent = [x.client_order_id for x in submitted if x.submitted]
+        if sent:
+            progress(0.85, "reconciling fills")
+            final = await self.orders.wait_for(sent, s.trading_fill_wait_seconds)
+            by_cid = {o.client_order_id: o for o in final.values()}
+            trade_rows = [
+                r.model_copy(
+                    update={
+                        "status": by_cid[r.client_order_id].status,
+                        "stage": trade_stage(True, by_cid[r.client_order_id].status),
+                        "alpaca_order_id": by_cid[r.client_order_id].id,
+                        "filled_qty": by_cid[r.client_order_id].filled_qty,
+                        "filled_avg_price": by_cid[r.client_order_id].filled_avg_price,
+                        "submitted_at": by_cid[r.client_order_id].submitted_at or r.submitted_at,
+                    }
+                )
+                if r.client_order_id in by_cid
+                else r
+                for r in trade_rows
+            ]
+            account, positions, _ = await self._snapshot()
+        return {
+            "status": "completed",
+            "equity": account.equity,
+            "last_equity": account.last_equity,
+            "cash": account.cash,
+            "buying_power": account.buying_power,
+            "long_market_value": account.long_market_value,
+            "data_status": DataStatus.LIVE.value if quotes else None,
+            "regime": {},
+            "positions": [
+                {
+                    "symbol": p.symbol,
+                    "qty": p.qty,
+                    "avg_entry_price": p.avg_entry_price,
+                    "current_price": p.current_price,
+                    "market_value": p.market_value,
+                    "weight": p.market_value / account.equity if account.equity > 0 else 0.0,
+                    "unrealized_plpc": p.unrealized_plpc,
+                }
+                for p in positions.values()
+            ],
+            "signals": [],
+            "targets": [],
+            "trades": [r.model_dump(mode="json") for r in trade_rows],
+            "plan": {"gross_target": None, "exits": {}, "skipped": skipped, "brain_cycle_id": brain_cycle_id},
+            "notes": notes,
+        }
+
     # ------------------------------------------------------------------ cycle helpers
     def _regime(self, inputs: TradingInputs) -> regime_mod.MarketRegime:
         spy = inputs.benchmark
@@ -1871,7 +2300,12 @@ class TradingService:
     async def _position_quotes(self, positions: Mapping[str, BrokerPosition]) -> dict[str, QuoteCheck]:
         """Prices for closing held positions: live quotes where available, else Alpaca's own live mark
         (so a market-data outage can never trap a position)."""
-        live = await self._data.live_quotes(list(positions), consolidated=False)
+        return (await self._position_quote_map(positions))[0]
+
+    async def _position_quote_map(
+        self, positions: Mapping[str, BrokerPosition]
+    ) -> tuple[dict[str, QuoteCheck], dict[str, LiveQuote]]:
+        live = await self._data.live_quotes(list(positions), consolidated=False) if positions else {}
         out: dict[str, QuoteCheck] = {}
         for sym, p in positions.items():
             q = live.get(sym)
@@ -1892,7 +2326,7 @@ class TradingService:
                 out[sym] = QuoteCheck(
                     p.current_price, DataStatus.LIVE, "alpaca position mark", None, None, None
                 )
-        return out
+        return out, live
 
     def _order_params(self, t: ProposedTrade, q: LiveQuote | None, flatten: bool) -> tuple[str, float | None]:
         kind = self._s.trading_order_type
@@ -1922,6 +2356,7 @@ class TradingService:
         cycle_id: int | None,
         *,
         flatten: bool = False,
+        strategy: str = STRATEGY,
     ) -> tuple[ProposedTradeOut, Submission | None]:
         intent = OrderIntent(
             symbol=t.symbol,
@@ -1985,7 +2420,7 @@ class TradingService:
             return base, None
         book.commit(intent)
         sub = await self.orders.submit(
-            intent, cid=cid, order_type=order_type, limit_price=limit, cycle_id=cycle_id, strategy=STRATEGY
+            intent, cid=cid, order_type=order_type, limit_price=limit, cycle_id=cycle_id, strategy=strategy
         )
         o = sub.order
         return (
@@ -2114,6 +2549,22 @@ class TradingService:
             skipped=dict(plan.get("skipped") or {}),
             notes=list(row.notes or []),
         )
+
+
+def _repriced(t: ProposedTrade, price: float) -> ProposedTrade:
+    """The same trade at the fresh quote's price (the risk checks use what an order would cost now)."""
+    return ProposedTrade(
+        t.symbol,
+        t.side,
+        t.qty,
+        price,
+        t.kind,
+        t.reason,
+        t.current_weight,
+        t.target_weight,
+        t.score,
+        closes_position=t.closes_position,
+    )
 
 
 def _version(package: str) -> str | None:

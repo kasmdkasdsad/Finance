@@ -60,10 +60,20 @@ def _banners(status: dict[str, Any]) -> None:
         st.error(f"**{status['mode_banner']}**", icon=":material/send:")
     else:
         st.info(f"**{status['mode_banner']}**", icon=":material/visibility:")
+    if status.get("owner") == "brain":
+        st.success(_md(status.get("owner_note") or ""), icon=":material/smart_toy:")
+    elif status.get("owner_note"):
+        st.caption(_md(status["owner_note"]))
     ks = status["kill_switch"]
     if ks["active"]:
         st.error(
             f"**KILL SWITCH ON** — no new orders ({ks.get('reason') or ks.get('source')}).",
+            icon=":material/block:",
+        )
+    bk = status.get("brain_kill_switch") or {}
+    if bk.get("active") and status.get("owner") == "brain":
+        st.error(
+            f"**BRAIN KILL SWITCH ON** — no new Brain orders ({bk.get('reason') or bk.get('source')}).",
             icon=":material/block:",
         )
     blockers = status.get("submit_blockers") or []

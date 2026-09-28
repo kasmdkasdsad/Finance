@@ -6,9 +6,12 @@
 4. **Consensus** — per subject from the forecasting agents; vetoes from constraint agents stay attached;
    disagreement is measured and kept; "unknown" when the evidence does not support a view.
 5. **Decide** — proposed portfolio actions (HOLD / REDUCE / CLOSE / INCREASE / BUY / WATCH / NO_ACTION).
-6. **Risk preview** — every proposed trade through the existing deterministic risk engine. Nothing is sent
-   to Alpaca: the brain has no broker access beyond a read-only view.
-7. **Remember** — the cycle, agent runs, opinions, consensus, decisions, gradeable predictions and memory.
+6. **Risk preview** — every proposed trade through the existing deterministic risk engine.
+7. **Execute** — ``paper_execution`` only (the Brain owns the Alpaca paper account): the decisions that may
+   go are handed to the trading service, which alone sends orders — after reconciling, fresh quotes and
+   the same risk engine and order manager as every order (:mod:`~quantpulse.brain.execution`). In the
+   other modes the Brain's simulated paper book trades instead; nothing reaches Alpaca.
+8. **Remember** — the cycle, agent runs, opinions, consensus, decisions, gradeable predictions and memory.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from .context import BrainContext
 from .debate import Debate, review
 from .decisions import Proposal, plan, risk_preview
 from .events import EventBus, from_cycle
+from .execution import BrainExecutor
 from .learning import PredictionRecorder
 from .llm import ModelRouter
 from .memory import LONG_TERM, SHORT_TERM, WORKING, MemoryStore
@@ -38,7 +42,7 @@ from .perception import Perception
 from .registry import AgentRegistry, AgentRun, Skip
 from .routing import route
 from .store import BrainStore
-from .types import MARKET, PORTFOLIO, BrainMode, Opinion, Stance
+from .types import MARKET, PORTFOLIO, SELLING, BrainMode, Opinion, Stance
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,9 @@ class CycleResult:
     predictions: int = 0
     fills: list[Fill] = field(default_factory=list)  # simulated in the Brain's paper book
     mark: dict[str, Any] = field(default_factory=dict)
+    execution: dict[str, Any] = field(
+        default_factory=dict
+    )  # paper_execution: what went to the trading service
     error: str | None = None
 
 
@@ -72,6 +79,7 @@ class Orchestrator:
         bus: EventBus | None = None,
         models: ModelRouter | None = None,
         book: PaperBook | None = None,
+        executor: BrainExecutor | None = None,
     ) -> None:
         self._s = settings
         self._clock = clock
@@ -83,6 +91,7 @@ class Orchestrator:
         self._bus = bus
         self._models = models
         self._book = book
+        self._executor = executor
         self._lock = asyncio.Lock()
         self.last_ctx: BrainContext | None = None  # the latest completed cycle's picture (for the monitor)
 
@@ -175,7 +184,13 @@ class Orchestrator:
             decision_ids = await self._store.save_decisions(
                 cycle_id, result.proposals, consensus_ids, mode.value, now
             )
-            if self._book is not None:  # the Brain's paper book: simulated fills, never a broker order
+            if mode is BrainMode.PAPER_EXECUTION and self._executor is not None:
+                # the Brain owns the Alpaca paper account: the trading service executes (or says why not)
+                result.execution = await self._executor.execute(
+                    ctx, result.proposals, cycle_id=cycle_id, scheduled=trigger != "manual"
+                )
+                await self._store.record_execution(decision_ids, result.proposals)
+            elif self._book is not None:  # the Brain's paper book: simulated fills, never a broker order
                 result.fills = await self._book.execute(
                     ctx,
                     result.proposals,
@@ -449,10 +464,36 @@ class Orchestrator:
                 importance=0.7,
                 cycle_id=cycle_id,
             )
+        # orders the trading service sent for the Brain (paper_execution) that Alpaca filled
+        for p in result.proposals:
+            ex = p.execution or {}
+            if not ex.get("filled_qty"):
+                continue
+            side = "sell" if p.action in SELLING else "buy"
+            await self._memory.remember(
+                LONG_TERM,
+                "trade",
+                p.subject,
+                f"Alpaca paper {side} {ex['filled_qty']:g} {p.subject} at ${ex.get('filled_avg_price') or 0:,.2f} "
+                f"({p.action.value}; order {ex.get('client_order_id')})",
+                now,
+                data={
+                    **ex,
+                    "action": p.action.value,
+                    "reasons": p.reasons[:4],
+                    "confidence": round(p.confidence, 3),
+                    "regime": label,
+                    "posture": (ctx.working.facts.get("situation") or {}).get("posture"),
+                },
+                tags=["trade", p.action.value, side, "alpaca_paper"],
+                importance=0.8,
+                cycle_id=cycle_id,
+            )
 
     # ------------------------------------------------------------------ summary
     def _summary(self, ctx: BrainContext, result: CycleResult) -> dict[str, Any]:
         regime = ctx.regime
+        owns = ctx.mode is BrainMode.PAPER_EXECUTION
         runs = result.runs
         dq = [o for o in ctx.working.opinions.get(MARKET, []) if o.agent_id == "data_quality"]
         by_status: dict[str, int] = {}
@@ -477,21 +518,29 @@ class Orchestrator:
                 "situation": ctx.working.facts.get("situation") or {},
             },
             "portfolio": {
-                "owner": "the Brain's paper book (hypothetical)"
+                "owner": "the Alpaca paper account (owned by the Brain)"
+                if owns
+                else "the Brain's paper book (hypothetical)"
                 if self._book is not None
                 else "Alpaca account",
                 **ctx.portfolio.summary(),
                 "constraints": ctx.working.facts.get("portfolio_constraints"),
                 "book": {"fills": [f.to_dict() for f in result.fills], "mark": result.mark},
                 "alpaca_account": {
-                    "owner": "the trading strategy (the Brain only reads it)",
+                    "owner": "the Brain (QP_BRAIN_MODE=paper_execution)"
+                    if owns
+                    else "the trading strategy (the Brain only reads it)",
                     **ctx.account.summary(),
                 },
                 "trading_controls": {
                     "orders_would_reach_alpaca": not ctx.trading_blockers,
                     "blockers": ctx.trading_blockers,
-                    "note": "read only: the Brain never submits orders",
+                    "note": "every Brain order goes through the trading service (reconciliation, fresh quotes, "
+                    "the risk engine, the order manager)"
+                    if owns
+                    else "proposals only: nothing is sent to Alpaca in this mode",
                 },
+                "execution": result.execution,
             },
             "data_quality": {
                 "market": dq[0].to_dict() if dq else None,
@@ -526,7 +575,8 @@ class Orchestrator:
                 "trades_proposed": sum(1 for p in result.proposals if p.is_trade),
                 "risk_approved": sum(1 for p in result.proposals if p.risk_approved),
                 "predictions_recorded": result.predictions,
-                "orders_sent": 0,
+                "orders_sent": int(result.execution.get("orders_sent") or 0),
+                "entry_halts": [h["code"] for h in result.execution.get("entry_halts") or []],
                 "book_fills": len(result.fills),
                 "opportunities": _count(o.status for o in ctx.opportunities),
                 "debates": _count(d.verdict for d in result.debates.values()),

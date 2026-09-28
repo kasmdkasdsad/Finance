@@ -25,6 +25,7 @@ from .book import PaperBook
 from .context import BrokerView
 from .evaluation import MarketPrices
 from .events import Event, EventBus, EventType
+from .execution import BrainExecutor
 from .improvement import ImprovementEngine
 from .lab.service import StrategyLab
 from .learning import Learner, PredictionRecorder
@@ -71,6 +72,7 @@ class BrainService:
         self._db = db
         self.db = db
         self.data = data
+        self.trading = trading  # the only way a Brain decision reaches the Alpaca paper account
         self.bus = EventBus(db, clock)
         self.registry = AgentRegistry(default_agents())
         self.store = BrainStore(db)
@@ -91,6 +93,7 @@ class BrainService:
             self.bus,
             self.models,
             self.book,
+            BrainExecutor(settings, clock, trading),
         )
         self._synced = False
         self.learner = (
@@ -235,6 +238,37 @@ class BrainService:
             f"{u['calls']} calls, {u['cached']} answered from cache"
         )
 
+    async def execution_status(self) -> dict[str, Any]:
+        """Ownership, the Brain kill switch and every reason a Brain order would not be sent right now (the
+        entry halts are the last cycle's: they depend on what it saw)."""
+        trading = self.trading
+        kill = await trading.kill_switch()
+        recent = await self.store.cycles(1)
+        last = (await self.store.cycle(recent[0]["id"])) if recent else None
+        executed = ((last or {}).get("portfolio") or {}).get("execution") or {}
+        return {
+            "paper_only": True,
+            "endpoint": trading.broker.base_url,
+            "owner": trading.owner,
+            "mode": self._s.brain_mode,
+            "owns_account": self._s.brain_owns_account,
+            "brain_kill_switch": (await trading.brain_kill_switch()).model_dump(mode="json"),
+            "trading_kill_switch": kill.model_dump(mode="json"),
+            "blockers_manual": await trading.submit_blockers(kill, owner="brain"),
+            "blockers_scheduled": await trading.submit_blockers(kill, scheduled=True, owner="brain"),
+            "last_cycle": {
+                "id": last["id"],
+                "started_at": last["started_at"],
+                "orders_sent": executed.get("orders_sent", 0),
+                "entries_allowed": executed.get("entries_allowed"),
+                "entry_halts": executed.get("entry_halts") or [],
+                "blockers": executed.get("blockers") or [],
+                "trading_cycle_id": executed.get("trading_cycle_id"),
+            }
+            if last
+            else None,
+        }
+
     async def status(self) -> dict[str, Any]:
         await self._sync()
         recent = await self.store.cycles(1)
@@ -246,7 +280,13 @@ class BrainService:
         return {
             "paper_only": True,
             "mode": BrainMode(self._s.brain_mode).value,
-            "orders": "never sent by the brain: proposals go to the deterministic risk engine only",
+            "owns_account": self._s.brain_owns_account,
+            "orders": (
+                "the Brain owns the Alpaca paper account: its decisions are executed by the trading service "
+                "(reconciliation, fresh quotes, the risk engine, the order manager, every trading switch)"
+                if self._s.brain_owns_account
+                else "proposals only: managed in the Brain's simulated paper book; nothing is sent to Alpaca"
+            ),
             "agents": {
                 "registered": len(self.registry.all()),
                 "enabled": sum(1 for a in self.registry.all() if self.registry.enabled(a.spec.id)),

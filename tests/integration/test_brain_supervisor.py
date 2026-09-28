@@ -147,7 +147,7 @@ async def test_off_hours_learn_review_and_research_once_a_day(tmp_path):
         async for api in brain_client(tmp_path / moment.strftime("%a%H"), clock, fake=fake):
             sup = api.container.brain.supervisor
             done = set((await sup.tick()).split(", "))
-            assert done == expected, (moment, done)
+            assert done == expected | {"startup_recovery"}, (moment, done)  # the first tick after a start
             assert (await sup.tick()).startswith("idle")  # once a day
             kinds = [c["kind"] for c in (await api.get(f"{BRAIN}/cycles")).json()]
             assert kinds == [

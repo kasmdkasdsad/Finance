@@ -194,7 +194,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         for d in trades:
             assert d["risk"]["checks"] and d["status"] in {"recommended", "risk_rejected", "blocked"}
             ex = d["execution"]
-            assert ex["sent"] is False and ex["reason"] == "the brain never sends orders itself"
+            assert ex["sent"] is False and "nothing is sent to Alpaca" in ex["reason"]
             if d["risk_approved"]:
                 assert d["notional"] <= 15_000  # sized within the risk engine's per-order limit
             if d["status"] == "recommended":  # simulated in the Brain's paper book, not sent anywhere
@@ -633,7 +633,11 @@ async def test_the_brain_sends_nothing_even_when_paper_orders_are_enabled(tmp_pa
     ):
         cycle = await run_cycle(api)
         controls = cycle["portfolio"]["trading_controls"]
-        assert controls["orders_would_reach_alpaca"] and controls["blockers"] == []
+        # the strategy could send (it owns the account); the Brain may not: it only recommends in this mode
+        assert controls["blockers"] == [
+            "QP_BRAIN_MODE=paper_recommendation: the Brain does not manage the Alpaca paper account"
+        ]
+        assert not controls["orders_would_reach_alpaca"]
         assert any(d["status"] == "recommended" for d in cycle["decisions"])  # it has trades it would make
         assert cycle["summary"]["orders_sent"] == 0
         assert only_reads(api.fake)  # the brain proposed them; nothing was sent

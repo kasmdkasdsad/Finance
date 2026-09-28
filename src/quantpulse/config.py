@@ -462,13 +462,21 @@ class Settings(BaseSettings):
         description="Extra entry score required per regime.",
     )
 
-    # --- Brain (multi-agent analysis; proposes, never sends orders) --------------------------------
-    brain_mode: Literal["research_only", "dry_run", "paper_recommendation"] = Field(
-        default="paper_recommendation",
+    # --- Brain (multi-agent portfolio manager of the Alpaca PAPER account) ---------------------------
+    brain_mode: Literal["research_only", "dry_run", "paper_recommendation", "paper_execution"] = Field(
+        default="paper_execution",
         description=(
-            "research_only: analysis and memory only; dry_run / paper_recommendation: proposed actions, each "
-            "checked by the deterministic risk engine. The brain never sends orders itself."
+            "paper_execution: the Brain owns the Alpaca PAPER account — its approved decisions go through the "
+            "trading service (the same risk engine, order manager and switches as every order; nothing is sent "
+            "while QP_ALPACA_TRADING_ENABLED=false or QP_TRADING_DRY_RUN=true) and the strategy only runs as a "
+            "dry run. paper_recommendation / dry_run: proposals only, managed in the Brain's simulated paper "
+            "book; research_only: analysis and memory only."
         ),
+    )
+    brain_kill_switch: bool = Field(
+        default=False,
+        description="Refuse every new Brain-originated order (the dashboard has a runtime Brain kill switch too). "
+        "Positions stay where they are; the trading kill switch and close-all still work.",
     )
     brain_focus_candidates: int = Field(
         default=8,
@@ -511,8 +519,8 @@ class Settings(BaseSettings):
     )
     brain_supervisor_enabled: bool = Field(
         default=True,
-        description="Run the brain by market session and by event while the server runs (analysis only: the "
-        "brain never sends orders). Can be paused at runtime.",
+        description="Run the brain by market session and by event while the server runs (in paper_execution "
+        "its approved decisions go to the trading service). Can be paused at runtime.",
     )
     brain_cycle_minutes: int = Field(default=30, ge=5, le=390, description="Full cycles in the session.")
     brain_monitor_minutes: int = Field(
@@ -768,6 +776,11 @@ class Settings(BaseSettings):
         )
 
     @property
+    def brain_owns_account(self) -> bool:
+        """Whether the Brain manages the Alpaca paper account (the strategy is then a dry run only)."""
+        return self.brain_mode == "paper_execution"
+
+    @property
     def sqlite_path(self) -> Path | None:
         """Filesystem path of the SQLite database, or ``None`` for in-memory / non-SQLite URLs."""
         prefix = "sqlite+aiosqlite:///"
@@ -800,6 +813,8 @@ TRADING_SWITCHES: dict[str, tuple[str, ...]] = {
     "trading_kill_switch": ("QP_TRADING_KILL_SWITCH",),
     "trading_scheduler_enabled": ("QP_TRADING_SCHEDULER_ENABLED",),
     "trading_scheduler_requires_arming": ("QP_TRADING_SCHEDULER_REQUIRES_ARMING",),
+    "brain_mode": ("QP_BRAIN_MODE",),
+    "brain_kill_switch": ("QP_BRAIN_KILL_SWITCH",),
     "trading_require_live_data": ("QP_TRADING_REQUIRE_LIVE_DATA",),
     "trading_max_spread_bps": ("QP_TRADING_MAX_SPREAD_BPS",),
     "enable_live_data": ("QP_ENABLE_LIVE_DATA",),

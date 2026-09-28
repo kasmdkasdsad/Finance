@@ -1,12 +1,15 @@
-"""The Brain: what QuantPulse's agents see, think and propose — and what the risk engine says about it.
+"""The Brain: what QuantPulse's agents see, think and decide — and what happened to each decision.
 
 Four layers are kept visibly apart on this page:
 
 1. **Agent analysis** — each agent's own opinion (stance, confidence, evidence, what would prove it wrong);
 2. **Consensus** — the agents' views combined per subject, with the disagreement kept visible;
 3. **Risk preview** — the deterministic risk engine's verdict on each proposed trade;
-4. **Broker execution** — none: the Brain never sends an order. Orders only come from the Paper Trading
-   (Alpaca) page, through its own risk checks and order manager.
+4. **Broker execution** — when the Brain owns the Alpaca **paper** account (``QP_BRAIN_MODE=paper_execution``)
+   its decisions are executed by the trading service (reconciliation, fresh quotes, the same risk engine,
+   the order manager, every trading switch); otherwise none — proposals only, simulated in its paper book.
+
+The Brain kill switch at the top stops new Brain orders at once.
 """
 
 from __future__ import annotations
@@ -23,10 +26,24 @@ STANCE_ICON = {"bullish": "▲", "bearish": "▼", "neutral": "■", "abstain": 
 STATUS_LABEL = {
     "recommended": "Risk engine: would allow (recommendation only)",
     "dry_run_approved": "Risk engine: would allow (dry run)",
+    "approved": "Risk engine: would allow",
     "risk_rejected": "Risk engine: rejected",
     "blocked": "Blocked by a data veto",
     "not_checked": "Not checked (account unreadable)",
     "no_trade": "No trade proposed",
+    "halted": "Halted: no new positions (see the execution panel)",
+    "skipped": "Not traded (a working order or the cooldown)",
+    "duplicate_prevented": "Already sent in this slot: not resent",
+    "failed": "Execution failed (nothing sent)",
+    "submitted": "Sent to Alpaca paper",
+    "accepted": "Sent to Alpaca paper: working",
+    "partially_filled": "Alpaca paper: partially filled",
+    "filled": "Alpaca paper: filled",
+    "canceled": "Alpaca paper: canceled",
+    "expired": "Alpaca paper: expired",
+    "rejected": "Rejected by Alpaca",
+    "unknown": "Sent: outcome unknown (reconciliation settles it)",
+    "risk_approved": "Risk engine: approved (dry run: not sent)",
 }
 QUALITY_COLOR = {
     "fresh": "green",
@@ -47,17 +64,92 @@ def _stance(value: str) -> str:
     return f"{STANCE_ICON.get(value, '')} {value}"
 
 
-def _layers_banner() -> None:
+def _layers_banner(owns: bool) -> None:
+    execution = (
+        "the trading service executes the Brain's decisions on the Alpaca **paper** account — after "
+        "reconciling, on fresh quotes, through the same risk engine and order manager as every order, and only "
+        "while every trading switch allows it."
+        if owns
+        else "**none** — the Brain never sends an order in this mode (proposals only, simulated in its paper "
+        "book); orders only come from the Paper Trading (Alpaca) page."
+    )
     st.info(
         "**How to read this page.** ① *Agent analysis* is what each specialist concludes on its own. "
         "② *Consensus* combines them and shows where they disagree. ③ *Risk preview* is the deterministic risk "
-        "engine's verdict on each proposed trade — the same checks that guard real orders. ④ *Broker execution*: "
-        "**none** — the Brain never sends an order; orders only come from the Paper Trading (Alpaca) page.",
+        f"engine's verdict on each proposed trade — the same checks that guard real orders. ④ *Broker execution*: "
+        f"{execution}",
         icon=":material/psychology:",
     )
 
 
-def _status(status: dict[str, Any]) -> None:
+def _execution_panel(ex: dict[str, Any]) -> None:
+    """Who owns the account, the Brain kill switch (always one click away) and what stops Brain orders."""
+    kill = ex["brain_kill_switch"]
+    last = ex.get("last_cycle") or {}
+    if not ex["owns_account"]:
+        st.caption(
+            _md(
+                f"QP_BRAIN_MODE={ex['mode']}: the Brain proposes only (its paper book); the strategy owns the "
+                "Alpaca paper account."
+            )
+        )
+    elif kill["active"]:
+        st.error(
+            _md(f"BRAIN KILL SWITCH ON — no new Brain orders ({kill.get('reason') or kill['source']})."),
+            icon=":material/block:",
+        )
+    elif ex["blockers_scheduled"]:
+        st.warning(
+            _md(
+                "The Brain owns the Alpaca PAPER account; its orders are not sent right now: "
+                + "; ".join(ex["blockers_scheduled"])
+            ),
+            icon=":material/pause_circle:",
+        )
+    else:
+        st.success(
+            "The Brain owns the Alpaca PAPER account and executes its decisions through the trading service.",
+            icon=":material/smart_toy:",
+        )
+    halts = last.get("entry_halts") or []
+    if ex["owns_account"] and halts:
+        data = [h for h in halts if h["code"] == "data_quality"]
+        if data:
+            st.error(_md(data[0]["reason"]), icon=":material/signal_disconnected:")
+        others = [h for h in halts if h["code"] != "data_quality"]
+        if others:
+            st.warning(
+                _md("New positions halted (exits still allowed): " + "; ".join(h["reason"] for h in others)),
+                icon=":material/front_hand:",
+            )
+    if kill["active"]:
+        if kill["source"] == "env":
+            st.caption("Set by QP_BRAIN_KILL_SWITCH=true: change the setting and restart to release it.")
+        elif st.button(
+            "Allow Brain orders again", icon=":material/lock_open:", key="brain_release"
+        ) and guarded(lambda: api().post(f"{BASE}/kill-switch", {"active": False}), "Brain kill switch"):
+            st.rerun()
+    elif ex["owns_account"]:
+        c1, c2 = st.columns([3, 1])
+        reason = c1.text_input("Reason (optional)", key="brain_kill_reason", label_visibility="collapsed",
+                               placeholder="Why stop the Brain? (optional)")  # fmt: skip
+        body = {"active": True, "reason": reason or None, "cancel_open_orders": True}
+        stop = c2.button(
+            "STOP BRAIN ORDERS",
+            icon=":material/block:",
+            type="primary",
+            key="brain_kill",
+            use_container_width=True,
+        )
+        if stop and guarded(lambda: api().post(f"{BASE}/kill-switch", body), "Brain kill switch"):
+            st.rerun()
+        st.caption(
+            "Stops every new Brain-originated order at once and cancels the Brain's working orders. Positions "
+            "stay as they are; the trading kill switch and close-all on the Paper Trading page still work."
+        )
+
+
+def _status(status: dict[str, Any], ex: dict[str, Any] | None) -> None:
     cols = st.columns(5)
     cols[0].metric("Mode", status["mode"].replace("_", " "))
     agents = status["agents"]
@@ -65,7 +157,8 @@ def _status(status: dict[str, Any]) -> None:
     last = status.get("last_cycle")
     cols[2].metric("Last cycle", f"#{last['id']} · {last['status']}" if last else "none yet")
     cols[3].metric("Open predictions", status["open_predictions"])
-    cols[4].metric("Orders sent by the Brain", 0)
+    sent = ((ex or {}).get("last_cycle") or {}).get("orders_sent", 0)
+    cols[4].metric("Orders sent by the Brain", sent, help="in the latest cycle (through the trading service)")
     st.caption(
         _md(
             f"Orders: {status['orders']}. Learning: {status['learning']}. "
@@ -89,9 +182,10 @@ def _run_controls() -> None:
         out = guarded(lambda: api().post(f"{BASE}/run", body, wait=60), "brain cycle")
         if out:
             st.session_state["brain_cycle_id"] = out["id"]
+            summary = out.get("summary") or {}
             st.success(
-                f"Cycle #{out['id']} {out['status']}: {out['summary'].get('trades_proposed', 0)} trades proposed, "
-                "0 orders sent.",
+                f"Cycle #{out['id']} {out['status']}: {summary.get('trades_proposed', 0)} trades proposed, "
+                f"{summary.get('orders_sent', 0)} orders sent.",
                 icon=":material/check_circle:",
             )
 
@@ -150,14 +244,19 @@ def _overview(cycle: dict[str, Any]) -> None:
                 f"free slots {cons.get('free_slots')} · beta {num(cons.get('beta'))}"
             )
         alpaca = pf.get("alpaca_account") or {}
-        with st.expander("Alpaca paper account — owned by the trading strategy (read only here)"):
+        owner = alpaca.get("owner") or "the trading strategy (the Brain only reads it)"
+        with st.expander(_md(f"Alpaca paper account — owned by {owner}")):
             if not alpaca.get("available"):
                 st.warning(_md(f"Unavailable: {alpaca.get('error')}"), icon=":material/cloud_off:")
             else:
                 st.markdown(
                     f"Equity {money(alpaca.get('equity'))} · cash {money(alpaca.get('cash'))} · "
                     f"{len(alpaca.get('positions') or {})} positions · {alpaca.get('open_orders', 0)} open orders. "
-                    "The Brain makes no decisions for this account."
+                    + (
+                        "The Brain manages this account; its orders go through the trading service."
+                        if "Brain" in owner
+                        else "The Brain makes no decisions for this account."
+                    )
                 )
     with right:
         st.subheader("Data quality")
@@ -436,20 +535,34 @@ def _fit(fit: dict[str, Any]) -> str:
 
 
 def _execution(d: dict[str, Any]) -> str:
-    fill = (d.get("execution") or {}).get("book")
+    ex = d.get("execution") or {}
+    fill = ex.get("book")
     if fill:
         return (
             f"paper book: {fill['side']} {fill['qty']:g} @ ${fill['fill_price']:,.2f} "
             f"({fill['slippage_bps']:+.1f}bp) — not sent to Alpaca"
         )
-    return "not sent (the Brain never sends orders)"
+    if ex.get("duplicate_prevented"):
+        return f"not resent: {ex.get('client_order_id')} was already sent in this slot"
+    if ex.get("sent"):
+        filled = (
+            f", filled {ex['filled_qty']:g} @ ${ex['filled_avg_price']:,.2f}"
+            if ex.get("filled_qty") and ex.get("filled_avg_price")
+            else ""
+        )
+        return f"Alpaca paper: {ex.get('stage') or ex.get('status')}{filled} ({ex.get('client_order_id')})"
+    if ex.get("stage") == "risk_rejected":
+        return f"trading service: risk engine rejected ({ex.get('risk')})"
+    reason = str(ex.get("reason") or "not sent")
+    return reason if reason.startswith("not sent") else f"not sent: {reason}"
 
 
 def _book() -> None:
     st.markdown(
         "**The Brain's paper book** — a hypothetical portfolio the Brain manages. Every trade the risk engine "
         "allows is simulated at the proposed price plus half the believed spread plus slippage, less fees. "
-        "Nothing here reaches a broker; the Alpaca paper account belongs to the trading strategy."
+        "Nothing here reaches a broker. It is the Brain's portfolio only while it does not own the Alpaca paper "
+        "account (QP_BRAIN_MODE other than paper_execution)."
     )
     book = guarded(lambda: api().get(f"{BASE}/book"), "paper book")
     if book is None:
@@ -895,7 +1008,9 @@ def _operations() -> None:
     st.markdown(
         "While the server runs, the **supervisor** decides what the Brain does: full cycles during the session, a "
         "quote monitor, focused cycles when events happen (rate-limited), learning after the close and research at "
-        "weekends. It is analysis only — the Brain never sends orders."
+        "weekends. When the Brain owns the Alpaca paper account (paper_execution) its cycles' decisions are "
+        "executed by the trading service, as scheduled cycles (armed by hand once); otherwise it is analysis only "
+        "— the Brain never sends orders."
     )
     sup = guarded(lambda: api().get(f"{BASE}/supervisor"), "supervisor")
     if sup is not None:
@@ -1070,11 +1185,14 @@ def _history(cycles: list[dict[str, Any]]) -> None:
 def render() -> None:
     st.title("QuantPulse Brain", anchor=False)
     st.caption("Specialist agents · consensus · proposals checked by the risk engine · Alpaca PAPER only")
-    _layers_banner()
     status = guarded(lambda: api().get(f"{BASE}/status"), "brain status")
     if status is None:
         return
-    _status(status)
+    ex = guarded(lambda: api().get(f"{BASE}/execution"), "Brain execution")
+    if ex is not None:
+        _execution_panel(ex)
+    _layers_banner(bool(status.get("owns_account")))
+    _status(status, ex)
     _run_controls()
     cycles = guarded(lambda: api().get(f"{BASE}/cycles", limit=50), "cycle history") or []
     if not cycles:

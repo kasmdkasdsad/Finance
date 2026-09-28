@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 PREFIX = "qp"
 STRATEGY = "quantpulse"
+BRAIN = "brain"  # orders the Brain decided on (sent through the trading service like every other)
+BRAIN_SLOT = "brain"  # Brain client order ids: qp-brain-<slot>-<SYMBOL>-<b|s>
 EXTERNAL = "external"
 PENDING_SUBMIT = "pending_submit"
 SUBMIT_UNKNOWN = "submit_unknown"
@@ -56,6 +58,7 @@ SUBMIT_FAILED = "submit_failed"
 UNRESOLVED = frozenset({PENDING_SUBMIT, SUBMIT_UNKNOWN})
 FINAL = TERMINAL_STATUSES | {SUBMIT_FAILED}
 UNKNOWN_GRACE = timedelta(minutes=2)
+DUPLICATE_NOTE = "an order with this client order id was already sent: not resending"
 RECONCILE_LOOKBACK = timedelta(days=7)
 EVENT_FOR_STATUS = {
     "partially_filled": "order_partially_filled",
@@ -115,6 +118,17 @@ def client_order_id(slot: str, symbol: str, side: str) -> str:
 
 def is_ours(cid: str) -> bool:
     return cid.startswith(f"{PREFIX}-")
+
+
+def is_brain(cid: str) -> bool:
+    return cid.startswith(f"{PREFIX}-{BRAIN_SLOT}-")
+
+
+def strategy_of(cid: str) -> str:
+    """Who placed an order, from its client order id alone (for orders found on Alpaca but not locally)."""
+    if is_brain(cid):
+        return BRAIN
+    return STRATEGY if is_ours(cid) else EXTERNAL
 
 
 @dataclass
@@ -213,7 +227,7 @@ class OrderManager:
                 existing = await repo.get_broker_order(s, cid)
                 if existing is not None:
                     base.status, base.duplicate = existing.status, True
-                    base.error = "an order with this client order id was already sent: not resending"
+                    base.error = DUPLICATE_NOTE
                     await repo.add_trading_event(
                         s,
                         "duplicate_prevented",
@@ -437,7 +451,7 @@ class OrderManager:
             for cid, o in remote.items():
                 if cid in local or await repo.get_broker_order(s, cid) is not None:
                     continue
-                strategy = STRATEGY if is_ours(cid) else EXTERNAL
+                strategy = strategy_of(cid)
                 row = BrokerOrderRow(
                     client_order_id=cid,
                     symbol=o.symbol,
@@ -485,13 +499,15 @@ class OrderManager:
                 )
         return canceled
 
-    async def last_trades(self, since: datetime) -> dict[str, tuple[datetime, str]]:
+    async def last_trades(
+        self, since: datetime, strategies: Sequence[str] = (STRATEGY,)
+    ) -> dict[str, tuple[datetime, str]]:
         """When QuantPulse last sent an order per symbol, and its side (for the anti-churn cooldown)."""
         async with self._db.session() as s:
             rows = await repo.broker_orders(s, 2000, since=since)
         out: dict[str, tuple[datetime, str]] = {}
         for r in rows:
-            if r.strategy != STRATEGY or r.status in (SUBMIT_FAILED, "rejected"):
+            if r.strategy not in strategies or r.status in (SUBMIT_FAILED, "rejected"):
                 continue
             at = r.submitted_at or r.created_at
             if r.symbol not in out or at > out[r.symbol][0]:

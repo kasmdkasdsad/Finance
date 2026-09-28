@@ -1,8 +1,10 @@
 """The QuantPulse brain: agents, cycles (what it saw, which agents it ran, their findings, the consensus and
-the proposed actions with the risk engine's verdict) and memory.
+the decisions with the risk engine's verdict), execution and memory.
 
-The brain never sends orders. ``POST /brain/run`` runs one analysis cycle; its proposals are checked by the
-deterministic risk engine and recorded — nothing reaches the Alpaca paper account.
+``POST /brain/run`` runs one cycle. With ``QP_BRAIN_MODE=paper_execution`` the Brain owns the Alpaca
+**paper** account and its decisions are executed by the trading service (reconciliation, fresh quotes, the
+risk engine, the order manager and every trading switch); ``POST /brain/kill-switch`` stops new Brain
+orders at once. In the other modes nothing reaches Alpaca.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from quantpulse.schemas.brain import (
     SupervisorIn,
 )
 from quantpulse.schemas.jobs import JobOut
+from quantpulse.schemas.trading import KillSwitchIn, KillSwitchOut
 from quantpulse.services.container import Container
 
 router = APIRouter(prefix="/brain", tags=["brain"])
@@ -91,7 +94,7 @@ async def toggle_agent(
     response_model=BrainCycleOut,
     responses=RUNNING,  # type: ignore[arg-type]
     dependencies=ControlAuth,
-    summary="Run one brain cycle now (analysis and proposals only — never sends an order)",
+    summary="Run one brain cycle now (in paper_execution its decisions go to the trading service)",
 )
 async def run(
     body: BrainRunIn | None = None,
@@ -181,6 +184,26 @@ async def supervisor(c: Container = ContainerDep) -> dict[str, Any]:
 @router.post("/supervisor", dependencies=ControlAuth, summary="Pause or resume the supervisor")
 async def pause_supervisor(body: SupervisorIn, c: Container = ContainerDep) -> dict[str, Any]:
     return await c.brain.supervisor.set_paused(body.paused)
+
+
+@router.get("/execution", summary="Who owns the account, the Brain kill switch, what would stop Brain orders")
+async def execution(c: Container = ContainerDep) -> dict[str, Any]:
+    return await c.brain.execution_status()
+
+
+@router.get("/kill-switch", response_model=KillSwitchOut, summary="The Brain kill switch")
+async def brain_kill_switch(c: Container = ContainerDep) -> KillSwitchOut:
+    return await c.trading.brain_kill_switch()
+
+
+@router.post(
+    "/kill-switch",
+    response_model=KillSwitchOut,
+    dependencies=ControlAuth,
+    summary="Stop new Brain-originated orders immediately (or allow them again)",
+)
+async def set_brain_kill_switch(body: KillSwitchIn, c: Container = ContainerDep) -> KillSwitchOut:
+    return await c.trading.set_brain_kill_switch(body.active, body.reason, body.cancel_open_orders)
 
 
 @router.get("/book", summary="The Brain's paper book: positions, simulated fills, equity curve, performance")

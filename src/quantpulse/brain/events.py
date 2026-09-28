@@ -241,6 +241,7 @@ TRADING_KINDS = {
     "risk_rejected": EventType.RISK_LIMIT_TRIGGERED,
     "daily_loss_limit_reached": EventType.RISK_LIMIT_TRIGGERED,
     "kill_switch_activated": EventType.RISK_LIMIT_TRIGGERED,
+    "brain_kill_switch_activated": EventType.RISK_LIMIT_TRIGGERED,
 }
 
 

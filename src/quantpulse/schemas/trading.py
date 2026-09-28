@@ -100,6 +100,14 @@ class TradingStatus(StrictModel):
         default_factory=list, description="Why orders are not sent (empty when can_submit)"
     )
     kill_switch: KillSwitchOut
+    owner: Literal["brain", "strategy"] = Field(
+        "strategy",
+        description="Who manages the account: the Brain (QP_BRAIN_MODE=paper_execution) or the strategy",
+    )
+    owner_note: str = ""
+    brain_kill_switch: KillSwitchOut | None = Field(
+        None, description="The Brain's own kill switch (refuses every new Brain-originated order)"
+    )
     scheduler_enabled: bool
     scheduler_armed: bool = Field(
         True,

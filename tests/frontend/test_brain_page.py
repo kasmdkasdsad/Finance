@@ -46,6 +46,7 @@ def brain_server(tmp_path_factory):
         brain_use_stock_model=False,
         brain_options_analysis=False,
         brain_catalyst_analysis=False,
+        brain_mode="paper_execution",  # the Brain owns the account; QP_ALPACA_TRADING_ENABLED stays false
     )
     clock = FakeClock(NOW)
     fake = FakeAlpacaPaper(clock=clock)
@@ -79,7 +80,11 @@ def brain_server(tmp_path_factory):
 def test_empty_brain_explains_itself(api_server):
     at = page("brain", api_server).run()
     assert_clean(at)
-    assert "never sends an order" in _texts(at)
+    text = _texts(at)
+    assert (
+        "the trading service executes the Brain's decisions" in text and "The Brain has not run yet" in text
+    )
+    assert any("orders are not sent right now" in w.value for w in at.warning)  # no Alpaca keys
 
 
 def test_every_layer_is_shown_and_kept_apart(brain_server):
@@ -97,13 +102,9 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     consensus = next(f for f in frames if "disagreement" in f.columns)
     assert {"supporting", "neutral", "opposing", "confidence", "data"} <= set(consensus.columns)
     actions = next(f for f in frames if "④ execution" in f.columns)
-    assert all(
-        e == "not sent (the Brain never sends orders)"
-        or (e.startswith("paper book:") and "not sent to Alpaca" in e)
-        for e in actions["④ execution"]
-    )
+    assert all(e.startswith("not sent") or e == "no trade" for e in actions["④ execution"])
     assert set(actions["③ risk preview"]) <= {
-        "Risk engine: would allow (recommendation only)",
+        "Risk engine: would allow",
         "Risk engine: rejected",
         "Blocked by a data veto",
         "No trade proposed",
@@ -118,13 +119,14 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
         "Bear case" in m.value for m in at.markdown
     )
     assert any("matured predictions graded against real closing prices" in m.value for m in at.markdown)
-    assert any("the Brain never sends orders" in m.value for m in at.markdown if "supervisor" in m.value)
+    assert any("executed by the trading service" in m.value for m in at.markdown if "supervisor" in m.value)
     assert any("only a person can promote" in m.value for m in at.markdown)
     assert any("Nothing is applied automatically" in m.value for m in at.markdown)
     assert any("Every analysis is deterministic" in i.value for i in at.info)  # no language model configured
     assert "Language models: not in use" in text
     assert any("The Brain's paper book" in m.value for m in at.markdown)  # its own, hypothetical portfolio
-    assert any("owned by the trading strategy" in e.label for e in at.expander)
+    assert any("owned by the Brain" in e.label for e in at.expander)
+    assert any(b.label == "STOP BRAIN ORDERS" for b in at.button)  # always one click away
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
     assert "AgentCompleted" in set(events["event"])
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}
@@ -133,8 +135,20 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
 def test_running_a_cycle_from_the_page_sends_no_order(brain_server):
     url, fake = brain_server
     at = page("brain", url).run()
-    at.text_input[0].input("DNA")
-    at.button[0].click().run()
+    next(t for t in at.text_input if t.label.startswith("Also study")).input("DNA")
+    next(b for b in at.button if b.label == "Run a cycle now").click().run()
     assert_clean(at)
     assert any("0 orders sent" in s.value for s in at.success)
+    assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}
+
+
+def test_the_brain_kill_switch_is_one_click_away(brain_server):
+    url, fake = brain_server
+    at = page("brain", url).run()
+    next(b for b in at.button if b.label == "STOP BRAIN ORDERS").click().run()
+    assert not at.exception
+    assert [e.value for e in at.error] == ["BRAIN KILL SWITCH ON — no new Brain orders (runtime)."]
+    assert httpx.get(f"{url}/api/v1/brain/kill-switch").json()["active"]
+    next(b for b in at.button if b.label == "Allow Brain orders again").click().run()
+    assert not httpx.get(f"{url}/api/v1/brain/kill-switch").json()["active"]
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}

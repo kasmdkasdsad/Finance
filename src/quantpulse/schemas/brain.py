@@ -118,6 +118,7 @@ class BrainCycleOut(BrainCycleSummaryOut):
 class BrainStatusOut(StrictModel):
     paper_only: bool
     mode: str
+    owns_account: bool = False
     orders: str
     agents: dict[str, int]
     running: bool

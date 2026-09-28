@@ -1089,13 +1089,16 @@ Commands are PowerShell (Windows); `curl` works the same elsewhere. If `QP_API_T
 10. Re-enable the scheduler (`QP_TRADING_SCHEDULER_ENABLED=true`, restart) when you want it to trade on
     its own.
 
-## The Brain (multi-agent analysis)
+## The Brain (multi-agent portfolio manager, Alpaca PAPER only)
 
 The brain (`src/quantpulse/brain/`) is a set of small, specialised agents that look at the market and the
-Alpaca paper portfolio, argue from evidence, and propose portfolio actions. **It never sends an order.**
-Every trade it proposes is previewed by the same deterministic risk engine that guards real orders
-(`services/trading_risk.RiskBook`), and the verdict is recorded. The brain has no broker access beyond a
-read-only view (account, positions, open orders, clock): every Alpaca request it makes is a `GET`.
+Alpaca paper portfolio, argue from evidence, and decide portfolio actions. By default
+(`QP_BRAIN_MODE=paper_execution`) **the Brain owns the Alpaca paper account**: its decisions are executed —
+by the trading service, never by the Brain itself — through the same reconciliation, fresh quotes, risk
+engine (`services/trading_risk.RiskBook`), order manager and trading switches as every order. Nothing is
+sent while `QP_ALPACA_TRADING_ENABLED=false` or `QP_TRADING_DRY_RUN=true` (the defaults), and the Brain
+kill switch stops new Brain orders at once. The Brain itself has no broker access beyond a read-only view
+(account, positions, open orders, clock). There is no path to a live-money account.
 
 **Status (built and tested):** the agent interface, registry and orchestrator; sixteen deterministic
 agents and one optional model-backed agent; working memory; opportunity detection; consensus with visible
@@ -1425,9 +1428,12 @@ market session and by event, and never runs every agent all the time:
 
 Agents not needed are recorded as skipped "not needed for a … cycle".
 
-The supervisor is on by default (`QP_BRAIN_SUPERVISOR_ENABLED=true`): it only analyses and never sends an
-order. It can be paused and resumed at runtime (`POST /brain/supervisor {"paused": true}` or the page),
-and its state survives restarts.
+The supervisor is on by default (`QP_BRAIN_SUPERVISOR_ENABLED=true`). When the Brain owns the account its
+cycles' decisions are executed as **scheduled** cycles: they send nothing until paper execution has been
+armed by hand once (a manual Brain cycle with paper execution on, a manual strategy cycle, or the confirmed
+test order — `QP_TRADING_SCHEDULER_REQUIRES_ARMING`). After a restart its first tick closes the cycles the
+restart interrupted and reconciles with Alpaca. It can be paused and resumed at runtime
+(`POST /brain/supervisor {"paused": true}` or the page), and its state survives restarts.
 
 ### Strategy lab
 
@@ -1598,23 +1604,45 @@ data used and missing, data quality, invalidation and veto. A model-backed agent
 
 ### Portfolio ownership
 
-There are two portfolios, and each has exactly one owner:
+The Alpaca paper account has exactly one owner at a time, chosen by `QP_BRAIN_MODE`:
 
-| Portfolio | Owner | Who sets its targets | Who can trade it |
+| `QP_BRAIN_MODE` | Alpaca paper account owned by | Who sets its targets | The other one |
 |---|---|---|---|
-| **Alpaca paper account** | the trading strategy (`services/trading.py`) | the strategy's signals and portfolio construction | only the trading service, through its risk engine, live-data and spread checks, trading controls and order manager |
-| **Brain paper book** (hypothetical) | the Brain | the Brain's decisions | nobody: trades are simulated in QuantPulse's database |
+| `paper_execution` (default) | **the Brain** | the Brain's decisions | the strategy runs as a **dry run only** (its cycles plan and are recorded; nothing is sent, manual or scheduled) |
+| `paper_recommendation`, `dry_run`, `research_only` | the trading strategy | the strategy's signals and portfolio construction | the Brain proposes only, simulated in its **paper book** |
 
-The Brain *reads* the Alpaca account (as context, and to check the broker's clock and trading controls)
-and never decides anything for it. Its decisions (buy, increase, reduce, close, rebalance, de-risk) are
-made for its own book. They are previewed by the **same** deterministic risk engine and limits that guard
-real orders (`RiskBook` with `RiskLimits` from the `QP_TRADING_*` settings: position and order size, cash
-reserve, daily loss, kill switch, live data, spread). There is one risk layer, not a second one.
+Either way **only the trading service sends orders**, and there is one risk layer, not two. When the
+Brain owns the account, `TradingService.run_brain` executes its decisions exactly as a strategy cycle
+would: reconcile with Alpaca, re-read the account, price every order from **fresh** quotes (the
+consolidated check for buys; a protective exit may fall back to Alpaca's own mark, as close-all does, so a
+data outage cannot trap a position), send each through `RiskBook` (position and order size, exposure,
+positions count, cash reserve, daily loss, kill switch, live data, quote age, spread, liquidity) and the
+order manager — sells first, then buys re-checked against the cash actually available. The strategy's
+anti-churn cooldown and "never a symbol with a working or unresolved order" rules apply too, and the
+daily-loss policy (`QP_TRADING_DAILY_LOSS_ACTION`) is honoured. Each Brain execution is a recorded trading
+cycle (`trigger` `brain:manual` or `brain:scheduled`) with every trade, risk check, order, fill and event
+on the *Paper Trading* page; Brain orders are tagged `brain` in the order records.
 
-Letting the Brain manage the Alpaca paper account would mean deciding who owns that account's targets:
-the strategy, the Brain, or the Brain feeding the strategy. Any such orders would still have to go
-through the trading service's existing controls. That decision, and the first human-confirmed
-Brain-originated paper order, are yours; nothing in this release makes them.
+**What stops Brain orders** (`GET /brain/execution`, the Brain page's top panel):
+
+* **nothing is sent** — another mode; the market closed; the **Brain kill switch** (`POST
+  /brain/kill-switch`, the page's *STOP BRAIN ORDERS* button, or `QP_BRAIN_KILL_SWITCH=true`, which only
+  the setting can release; activating it also cancels the Brain's working orders); every reason the
+  trading service would not send (paper keys, `QP_ALPACA_TRADING_ENABLED`, `QP_TRADING_DRY_RUN`, the
+  trading kill switch, arming for scheduled cycles); Alpaca unavailable; the SDK client not pointing at
+  `https://paper-api.alpaca.markets` (checked before every Brain cycle: the cycle fails closed);
+* **no new positions or increases** (exits and trims still go) — the daily loss limit; **TRADING BLOCKED —
+  DATA QUALITY INSUFFICIENT** (the data-quality agent's market veto, e.g. under half the universe has a
+  usable live quote, or a fail-closed check); this computer's clock more than 10 s off Alpaca's; an account
+  Alpaca reports blocked, short positions, non-positive equity, or positions that do not add up to the
+  account; exposure above the limits;
+* **per decision** — a buy needs the risk preview's approval and no veto; a discretionary sell needs no
+  veto; a protective exit (at its stop) is always handed on and the risk engine decides.
+
+**Never twice.** Brain client order ids are `qp-brain-<slot>-<SYMBOL>-<b|s>`, the slot being New York time
+floored to `QP_BRAIN_CYCLE_MINUTES`: however many cycles or restarts happen in a slot, at most one buy and
+one sell per symbol can be sent in it (a repeat is refused by the order manager's write-ahead record and
+recorded as `duplicate_prevented`).
 
 ### The paper book
 
@@ -1644,9 +1672,9 @@ Brain-originated paper order, are yours; nothing in this release makes them.
 
 * `research_only`: analysis, consensus, predictions and memory only; no proposed actions.
 * `dry_run`: proposed actions previewed by the risk engine, and simulated in the paper book.
-* `paper_recommendation` (default): the same, labelled as recommendations.
-
-There is no execution mode: the brain cannot place orders.
+* `paper_recommendation`: the same, labelled as recommendations (the strategy owns the Alpaca account).
+* `paper_execution` (default): the Brain owns the Alpaca **paper** account and its decisions are executed
+  by the trading service (see *Portfolio ownership*). There is no live mode.
 
 ### API
 
@@ -1655,7 +1683,9 @@ There is no execution mode: the brain cannot place orders.
 | `GET /brain/status` | Mode, agents registered/enabled, last cycle, open predictions, learning status |
 | `GET /brain/agents` · `/agents/{id}` | Agents with their spec, run statistics and measured performance (empty until predictions are evaluated) |
 | `POST /brain/agents/{id}` `{"enabled": false}` | Switch an agent off or on |
-| `POST /brain/run?wait=` `{"symbols": ["NVDA"], "kind": "full"}` (`full`, `portfolio`, `event`, `deep`) | Run one cycle now (202 with progress if it takes longer than `wait`); never sends an order |
+| `POST /brain/run?wait=` `{"symbols": ["NVDA"], "kind": "full"}` (`full`, `portfolio`, `event`, `deep`) | Run one cycle now (202 with progress if it takes longer than `wait`); in `paper_execution` its decisions go to the trading service (a manual cycle: no arming needed) |
+| `GET /brain/execution` | Who owns the account, both kill switches, what would stop Brain orders (manual and scheduled), the last cycle's entry halts and orders sent |
+| `GET /brain/kill-switch` · `POST /brain/kill-switch {"active": true, "reason": "…", "cancel_open_orders": true}` | The Brain kill switch: stop new Brain orders at once (or allow them again) |
 | `GET /brain/cycles` · `/cycles/{id}` | Cycle history · one cycle in full (runs, opinions, consensus, decisions, predictions recorded) |
 | `GET /brain/memory?tier=&kind=&subject=&text=` | Structured memory, newest first |
 | `GET /brain/opportunities?kind=&status=` | Detected opportunities and their pipeline trace, newest first |
@@ -1848,11 +1878,16 @@ tests/                   unit · providers · integration · frontend · fixture
   * Cycles need the API process to be running. Performance statistics need weeks of recorded cycles
     before they mean anything.
 * **The Brain:**
-  * It never trades. Its decisions are simulated in its own paper book. There is no hand-off from a
-    Brain decision to the Alpaca paper account: who owns that account's targets, and whether a person
-    confirms Brain-originated paper orders, is still to be decided (see *Portfolio ownership*).
-  * The paper book's fills are modelled (spread, slippage, fees); real fills can differ, especially in
-    thin names or fast markets.
+  * It trades the Alpaca **paper** account only (simulated money), and only through the trading service;
+    with the default `.env` (`QP_ALPACA_TRADING_ENABLED=false`, `QP_TRADING_DRY_RUN=true`) nothing is sent.
+    Its performance is not established: track records start empty and it has no live-money history.
+  * With the free IEX feed many quotes are stale by design (one exchange's last trade), so the risk engine
+    refuses many buys and **TRADING BLOCKED — DATA QUALITY INSUFFICIENT** can halt new positions. The fix
+    is real-time SIP data (a paid Alpaca plan), not a looser quote-age limit — that decision is yours.
+  * Stops and thesis checks run at each cycle (every 30 minutes by default, or on a monitored price move),
+    not as resting stop orders at Alpaca, so a gap can fill well beyond the stop.
+  * In the modes where the strategy owns the account, the paper book's fills are modelled (spread,
+    slippage, fees); real fills can differ, especially in thin names or fast markets.
   * Track records start empty. Every agent is *unproven* (weight 1.0) until its calls are graded, which
     takes weeks; thresholds such as `QP_BRAIN_MIN_CONFIDENCE` are starting values until calibration
     confirms or changes them.

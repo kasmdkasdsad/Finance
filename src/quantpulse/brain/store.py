@@ -183,6 +183,22 @@ class BrainStore:
             await s.flush()
             return row.id
 
+    async def close_interrupted(self, before: datetime, now: datetime) -> list[int]:
+        """Cycles still marked running from before this process started were cut short by a restart: mark
+        them failed (any order they handed on keeps its client id and is settled by reconciliation)."""
+        async with self._db.session() as s:
+            rows = (
+                await s.scalars(
+                    select(BrainCycleRow).where(
+                        BrainCycleRow.status == "running", BrainCycleRow.started_at < before
+                    )
+                )
+            ).all()
+            for row in rows:
+                row.status, row.finished_at = "failed", now
+                row.error = "interrupted by a restart; orders it handed on are reconciled with Alpaca"
+            return [r.id for r in rows]
+
     async def finish_cycle(self, cycle_id: int, now: datetime, **fields: Any) -> None:
         async with self._db.session() as s:
             row = await s.get(BrainCycleRow, cycle_id)
@@ -327,7 +343,15 @@ class BrainStore:
                     },
                     risk_approved=p.risk_approved,
                     risk=p.risk,
-                    execution={"sent": False, "reason": "the brain never sends orders itself"},
+                    execution=p.execution
+                    or {
+                        "sent": False,
+                        "reason": "no trade"
+                        if not p.is_trade
+                        else "pending: handed to the trading service"
+                        if mode == "paper_execution"
+                        else f"proposals only ({mode}): nothing is sent to Alpaca",
+                    },
                     outcome={},
                     created_at=now,
                 )
@@ -335,6 +359,17 @@ class BrainStore:
                 await s.flush()
                 ids[p.subject] = row.id
         return ids
+
+    async def record_execution(self, ids: dict[str, int], proposals: Sequence[Proposal]) -> None:
+        """What the trading service did with each decision (paper_execution): status and order details."""
+        async with self._db.session() as s:
+            for p in proposals:
+                if not p.execution:
+                    continue
+                row = await s.get(BrainDecisionRow, ids.get(p.subject, -1))
+                if row is not None:
+                    row.status = p.status
+                    row.execution = dict(p.execution)
 
     async def record_book_fills(self, ids: dict[str, int], fills: Sequence[Any]) -> None:
         """Note on each decision how the Brain's paper book simulated it (never a broker order)."""

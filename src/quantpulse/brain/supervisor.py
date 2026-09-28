@@ -21,7 +21,13 @@ weekend, holiday   once a day: a learning pass; a *deep* research cycle; the str
 Events turn into wake-ups: a price move, a volume spike, a news item or earnings approaching for a
 holding → an *event* cycle on that symbol; a position, portfolio or order change or a risk limit → a
 *portfolio* review; a regime change → a *full* cycle. Wake-ups for the same thing are merged, and event
-cycles only run while the market is open. The brain never sends orders, so none of this can trade.
+cycles only run while the market is open.
+
+When the Brain owns the Alpaca paper account (``QP_BRAIN_MODE=paper_execution``) its cycles' decisions are
+executed by the trading service — as *scheduled* cycles, so they send nothing until paper execution has
+been armed by hand once (``QP_TRADING_SCHEDULER_REQUIRES_ARMING``). After a restart the first tick closes
+cycles the restart interrupted and reconciles with Alpaca before anything else; orders already sent keep
+their client ids, so nothing is sent twice.
 
 ``QP_BRAIN_SUPERVISOR_ENABLED`` turns it on or off at start-up; it can be paused and resumed at runtime
 (``POST /brain/supervisor``), and the state survives restarts.
@@ -86,6 +92,8 @@ class Supervisor:
         self._event_cycles: deque[datetime] = deque()
         self._daily_vol: dict[str, float] = {}
         self.log: deque[dict[str, Any]] = deque(maxlen=200)
+        self._booted_at = clock.now()
+        self._recovered = False
         bus.subscribe([*SYMBOL_EVENTS, *PORTFOLIO_EVENTS, EventType.MARKET_REGIME_CHANGED], self._on_event)
 
     # ------------------------------------------------------------------ state
@@ -173,6 +181,12 @@ class Supervisor:
                 )
             last[task] = now.isoformat()
 
+        if (
+            not self._recovered
+        ):  # retried every tick until it works (every Brain execution reconciles first too)
+            await run("startup_recovery", self._recover())
+            self._recovered = "startup_recovery" in done
+
         trading_events = await self._bridge.poll()
         if trading_events:
             await self._bus.publish(trading_events)
@@ -217,6 +231,17 @@ class Supervisor:
             self._event_cycles.append(now)
             label = f"{wake.kind}:{','.join(wake.symbols) or '-'}"
             await run(label, self._cycle(wake.kind, wake.symbols, wake.reason))
+
+    async def _recover(self) -> dict[str, Any]:
+        """After a restart: close the Brain cycles it interrupted and, when the Brain owns the account,
+        reconcile with Alpaca (which also closes interrupted trading cycles) before any new decision."""
+        closed = await self._brain.store.close_interrupted(self._booted_at, self._clock.now())
+        out: dict[str, Any] = {"interrupted_cycles": len(closed)}
+        trading = self._brain.trading
+        if self._s.brain_owns_account and trading.broker.configured():
+            report = await trading.reconcile("startup")
+            out.update(open_orders=report.open_orders, positions=report.positions)
+        return out
 
     async def _improve(self) -> dict[str, Any]:
         """Look at the record and write improvement proposals (never applied automatically)."""
