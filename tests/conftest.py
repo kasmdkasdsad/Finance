@@ -5,6 +5,8 @@ import requests
 
 from quantpulse.db import migrate
 from quantpulse.db.session import Database
+from tests import lengths
+from tests.pg import database_url
 
 # Variables that could point the test run at a real (paper) account or change trading behaviour.
 ACCOUNT_ENV_PREFIXES = ("QP_ALPACA", "APCA_", "ALPACA_", "QP_TRADING", "QP_BRAIN")
@@ -31,9 +33,15 @@ def _isolated_from_real_accounts():
     mp.undo()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _column_lengths_like_postgres():
+    """Strings longer than their VARCHAR column fail here, as they would on PostgreSQL in the cloud."""
+    lengths.install()
+
+
 @pytest.fixture
 def db_url(tmp_path):
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+    url = database_url(tmp_path / "test.db")  # SQLite, or PostgreSQL with QP_TEST_POSTGRES_URL
     migrate.upgrade(url)
     return url
 

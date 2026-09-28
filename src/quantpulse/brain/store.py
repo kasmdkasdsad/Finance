@@ -181,7 +181,7 @@ class BrainStore:
     async def start_cycle(self, *, kind: str, trigger: str, session: str, mode: str, now: datetime) -> int:
         async with self._db.session() as s:
             row = BrainCycleRow(
-                kind=kind, trigger=trigger, session=session, mode=mode, status="running", started_at=now
+                kind=kind, trigger=trigger[:96], session=session, mode=mode, status="running", started_at=now
             )
             s.add(row)
             await s.flush()

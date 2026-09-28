@@ -9,6 +9,7 @@ from quantpulse.config import Settings
 from quantpulse.core.clock import FakeClock
 from quantpulse.core.http import HttpClient
 from quantpulse.services.container import Container
+from tests.pg import database_url
 
 # Friday 2026-09-25 10:00 America/New_York — NYSE regular session.
 NOW = datetime(2026, 9, 25, 14, 0, tzinfo=UTC)
@@ -17,7 +18,7 @@ NOW = datetime(2026, 9, 25, 14, 0, tzinfo=UTC)
 def make_settings(tmp_path, **overrides) -> Settings:
     base = dict(
         _env_file=None,
-        database_url=f"sqlite+aiosqlite:///{tmp_path / 'api.db'}",
+        database_url=database_url(tmp_path / "api.db"),  # SQLite, or PostgreSQL with QP_TEST_POSTGRES_URL
         polling_enabled=False,
         enable_live_data=False,
         market_providers=["yahoo"],

@@ -32,6 +32,7 @@ from quantpulse.services.order_manager import SUBMIT_FAILED
 from quantpulse.services.trading_risk import OrderIntent
 from tests.fakes.alpaca_paper import FakeAlpacaPaper
 from tests.fakes.market import TrendFeed
+from tests.pg import POSTGRES
 
 from .conftest import NOW, _client, make_settings
 from .test_trading import BASE, KEY, PAPER, SECRET, buys, trading_client
@@ -531,7 +532,10 @@ async def test_status_reports_where_the_switches_came_from(tmp_path):
         sources = {x["variable"]: x for x in cfg["sources"]}
         assert sources["QP_ALPACA_API_KEY_ID"]["value"] == "set"
         assert sources["QP_TRADING_DRY_RUN"]["value"] == "false"
-        assert cfg["database"].endswith("api.db")
+        if POSTGRES:  # only the driver is shown: a PostgreSQL URL carries a password
+            assert cfg["database"] == "postgresql+asyncpg"
+        else:
+            assert cfg["database"].endswith("api.db")
 
 
 async def test_order_ids_and_stages_survive_a_restart_of_the_view(tmp_path):

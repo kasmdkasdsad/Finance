@@ -24,6 +24,8 @@ dependencies = [
     "alpaca-py>=0.40",
     "tzdata>=2024.1",
     "email-validator>=2.0",
+    "asyncpg>=0.29",  # PostgreSQL (the cloud deployment's database)
+    "psycopg[binary]>=3.2",  # PostgreSQL for migrations (Alembic runs synchronously)
 ]
 
 [project.optional-dependencies]
@@ -42,6 +44,7 @@ dev = [
 [project.scripts]
 quantpulse-api = "quantpulse.cli:run_api"
 quantpulse-migrate = "quantpulse.cli:run_migrations"
+quantpulse-transfer = "quantpulse.cli:run_transfer"
 
 [tool.setuptools.packages.find]
 where = ["src"]

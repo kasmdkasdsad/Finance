@@ -32,3 +32,20 @@ def run_migrations() -> None:
     else:
         migrate.upgrade(url, args.revision)
     print(f"database at revision {migrate.current_revision(url)} (head {migrate.head_revision()})")
+
+
+def run_transfer() -> None:
+    """Copy the whole database (e.g. the PC's SQLite file) into another, empty one (the cloud's PostgreSQL)."""
+    from quantpulse.db.transfer import TransferError, transfer
+
+    parser = argparse.ArgumentParser(description="Copy every QuantPulse table into an empty database")
+    parser.add_argument("--source", required=True, help="e.g. sqlite+aiosqlite:///data/quantpulse.db")
+    parser.add_argument(
+        "--target", required=True, help="e.g. postgresql+asyncpg://user:password@host/quantpulse"
+    )
+    args = parser.parse_args()
+    try:
+        out = transfer(args.source, args.target)
+    except TransferError as exc:
+        raise SystemExit(f"transfer refused: {exc}") from None
+    print(f"copied {out['rows']} row(s) across {len(out['counts'])} non-empty table(s); row counts verified")

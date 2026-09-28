@@ -471,7 +471,7 @@ class ReferenceBlobRow(Base):
 
     __tablename__ = "reference_blobs"
 
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     provider: Mapped[str] = mapped_column(String(32))
     fetched_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
@@ -619,7 +619,7 @@ class BrainCycleRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     kind: Mapped[str] = mapped_column(String(24))
-    trigger: Mapped[str] = mapped_column(String(16))
+    trigger: Mapped[str] = mapped_column(String(96))  # e.g. "supervisor: PriceMoveDetected"
     session: Mapped[str] = mapped_column(String(16))
     mode: Mapped[str] = mapped_column(String(24))
     status: Mapped[str] = mapped_column(String(12))

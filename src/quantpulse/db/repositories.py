@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 
 from sqlalchemy import Table, delete, func, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +62,15 @@ from quantpulse.schemas.market import Bar, PriceHistory, Quote
 from quantpulse.schemas.options import OptionChain, OptionContract, YieldCurve, YieldPoint
 from quantpulse.schemas.reference import CompanyEvents, CompanyProfile, FrameFact
 from quantpulse.schemas.sports import Game, PowerRating
+
+
+def _insert(session: AsyncSession, table: Any) -> Any:
+    """An INSERT with ``ON CONFLICT`` support for the connected database: SQLite locally, PostgreSQL in the
+    cloud. Both dialects share the same ``on_conflict_do_update`` / ``on_conflict_do_nothing`` interface."""
+    if session.get_bind().dialect.name == "postgresql":
+        return postgresql_insert(table)
+    return sqlite_insert(table)
+
 
 STATEMENT_FIELDS = [
     name
@@ -128,7 +138,7 @@ async def upsert_bars(session: AsyncSession, history: PriceHistory, provider: st
     ]
     if not rows:
         return 0
-    stmt = sqlite_insert(table)
+    stmt = _insert(session, table)
     stmt = stmt.on_conflict_do_update(
         index_elements=["symbol", "interval", "ts"],
         set_={
@@ -221,7 +231,7 @@ async def upsert_curve(session: AsyncSession, curve: YieldCurve, provider: str) 
         }
         for p in curve.points
     ]
-    stmt = sqlite_insert(table)
+    stmt = _insert(session, table)
     stmt = stmt.on_conflict_do_update(
         index_elements=["curve_date", "tenor"],
         set_={c: stmt.excluded[c] for c in ("years", "rate", "provider", "ingested_at")},
@@ -274,7 +284,7 @@ async def insert_option_snapshot(session: AsyncSession, chain: OptionChain, prov
         }
         for c in chain.contracts
     ]
-    await session.execute(sqlite_insert(table).on_conflict_do_nothing(), rows)
+    await session.execute(_insert(session, table).on_conflict_do_nothing(), rows)
     return len(rows)
 
 
@@ -347,7 +357,7 @@ async def upsert_fundamentals(session: AsyncSession, data: CompanyFundamentals, 
             row = st.model_dump()
             row.update({"symbol": data.symbol, "provider": provider, "ingested_at": now})
             rows.append(row)
-        stmt = sqlite_insert(table)
+        stmt = _insert(session, table)
         update_cols = [
             *STATEMENT_FIELDS,
             "period_end",
@@ -378,7 +388,7 @@ async def upsert_fundamentals(session: AsyncSession, data: CompanyFundamentals, 
             for f in data.recent_filings
         ]
         await session.execute(
-            sqlite_insert(ftable).on_conflict_do_nothing(index_elements=["accession"]), frows
+            _insert(session, ftable).on_conflict_do_nothing(index_elements=["accession"]), frows
         )
     return len(data.statements)
 
@@ -606,7 +616,7 @@ async def upsert_fuel_prices(
     ]
     if not rows:
         return 0
-    stmt = sqlite_insert(table)
+    stmt = _insert(session, table)
     stmt = stmt.on_conflict_do_update(
         index_elements=["region", "grade", "period"],
         set_={c: stmt.excluded[c] for c in ("price", "region_name", "series_id", "provider", "ingested_at")},
@@ -656,7 +666,7 @@ async def upsert_games(session: AsyncSession, games: Sequence[Game]) -> int:
         }
         for g in games
     ]
-    stmt = sqlite_insert(table)
+    stmt = _insert(session, table)
     stmt = stmt.on_conflict_do_update(
         index_elements=["event_id"],
         set_={
@@ -706,7 +716,7 @@ async def save_ratings(
         }
         for r in ratings
     ]
-    stmt = sqlite_insert(table)
+    stmt = _insert(session, table)
     stmt = stmt.on_conflict_do_update(
         index_elements=["league", "season", "team_id"],
         set_={
@@ -877,7 +887,7 @@ async def insert_predictions(session: AsyncSession, rows: Sequence[Mapping[str, 
     if not rows:
         return 0
     table = cast(Table, PredictionRow.__table__)
-    stmt = sqlite_insert(table).on_conflict_do_nothing(
+    stmt = _insert(session, table).on_conflict_do_nothing(
         index_elements=["symbol", "source", "horizon_days", "made_on"]
     )
     inserted = 0
@@ -896,7 +906,7 @@ async def insert_predictions_bulk(session: AsyncSession, rows: Sequence[Mapping[
         return 0
     table = cast(Table, PredictionRow.__table__)
     stmt = (
-        sqlite_insert(table)
+        _insert(session, table)
         .on_conflict_do_nothing(index_elements=["symbol", "source", "horizon_days", "made_on"])
         .returning(table.c.id)
     )
@@ -1027,7 +1037,7 @@ async def save_company_events(session: AsyncSession, events: CompanyEvents, prov
     )
     table = cast(Table, EarningsEventRow.__table__)
     if events.earnings:
-        stmt = sqlite_insert(table).on_conflict_do_nothing(index_elements=["symbol", "announced_at"])
+        stmt = _insert(session, table).on_conflict_do_nothing(index_elements=["symbol", "announced_at"])
         await session.execute(stmt, [{"symbol": p.symbol, "announced_at": at} for at in events.earnings])
     await session.flush()
 
@@ -1096,7 +1106,7 @@ async def save_frame(session: AsyncSession, tag: str, frame: str, facts: Sequenc
         }
         for f in facts
     ]
-    stmt = sqlite_insert(table)
+    stmt = _insert(session, table)
     stmt = stmt.on_conflict_do_update(
         index_elements=["tag", "frame", "cik"],
         set_={c: stmt.excluded[c] for c in ("period_start", "period_end", "value", "accn")},
@@ -1144,7 +1154,7 @@ async def get_trading_state(session: AsyncSession, key: str) -> dict[str, Any] |
 
 
 async def put_trading_state(session: AsyncSession, key: str, value: Mapping[str, Any], now: datetime) -> None:
-    stmt = sqlite_insert(TradingStateRow).values(key=key, value=dict(value), updated_at=now)
+    stmt = _insert(session, TradingStateRow).values(key=key, value=dict(value), updated_at=now)
     stmt = stmt.on_conflict_do_update(
         index_elements=["key"], set_={"value": stmt.excluded.value, "updated_at": stmt.excluded.updated_at}
     )
