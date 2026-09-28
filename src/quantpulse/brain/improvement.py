@@ -9,7 +9,10 @@ through
     PROPOSE → VERSION → TEST → BACKTEST → WALK-FORWARD → PAPER EVALUATION → COMPARE → PROMOTE ONLY IF VALIDATED
 
 (the strategy lab implements that pipeline for strategies; agent versions are compared on graded calls,
-because every version keeps its own track record). Risk controls are never a subject of proposals.
+because every version keeps its own track record). Risk controls are never a subject of proposals, and
+this is enforced, not only intended: a proposal that names a protected control (:data:`PROTECTED`: loss,
+position and order limits, the kill switches, the data-quality requirements, the paper-only settings, the
+execution safety switches) is withheld before it is stored (:func:`withheld`).
 
 What it looks for:
 
@@ -69,6 +72,23 @@ AGENT_PLAN = [
     "Promote the new version only if it is better on graded calls; otherwise reject and keep the old one.",
 ]
 LOOKBACK = timedelta(days=30)
+# Settings no proposal may touch. The Brain may say that data is the problem (a SIP subscription), never that
+# a limit should move.
+PROTECTED = (
+    "QP_TRADING_MAX_",
+    "QP_TRADING_MIN_",
+    "QP_TRADING_REQUIRE_LIVE_DATA",
+    "QP_TRADING_DAILY_LOSS",
+    "QP_TRADING_CASH_BUFFER",
+    "QP_TRADING_KILL_SWITCH",
+    "QP_TRADING_DRY_RUN",
+    "QP_TRADING_SCHEDULER_REQUIRES_ARMING",
+    "QP_TRADING_ALLOW_SHORTS",
+    "QP_ALPACA_PAPER",
+    "QP_ALPACA_TRADING_ENABLED",
+    "QP_BRAIN_KILL_SWITCH",
+    "QP_BRAIN_MODE",
+)
 STATUSES = ("proposed", "testing", "validated", "rejected", "applied")
 
 
@@ -87,6 +107,12 @@ def _p(
             "pipeline": PIPELINE,
         },
     }
+
+
+def withheld(proposal: dict[str, Any]) -> str | None:
+    """The protected control a proposal would touch (``None``: it touches none)."""
+    text = repr(proposal).upper()
+    return next((name for name in PROTECTED if name in text), None)
 
 
 def _where(slice_: str) -> str:
@@ -128,6 +154,8 @@ class ImprovementEngine:
                 ).all()
             }
             for f in found:
+                if withheld(f) is not None:  # never stored, never shown as a suggestion
+                    continue
                 key = (f["kind"], f["target"], f["title"])
                 row = open_rows.get(key)
                 if row is None:

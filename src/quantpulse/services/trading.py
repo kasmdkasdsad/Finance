@@ -383,6 +383,16 @@ class TradingService:
                 out.append(
                     f"QP_BRAIN_MODE={s.brain_mode}: the Brain does not manage the Alpaca paper account"
                 )
+            # an ambiguous environment fails closed: the running switches must be the ones in .env, and the
+            # key must look like a paper key (Alpaca's paper keys start with PK)
+            drift = env_file_drift(s)
+            if drift:
+                out.append(
+                    "the .env file changed since the API started (" + "; ".join(drift)[:200] + "): restart it"
+                )
+            key = s.alpaca_api_key_id.get_secret_value() if s.alpaca_api_key_id is not None else None
+            if key and not key.startswith("PK"):
+                out.append("the Alpaca key does not look like a paper key (paper keys start with PK)")
             brain_kill = await self.brain_kill_switch()
             if brain_kill.active:
                 where = "QP_BRAIN_KILL_SWITCH=true" if brain_kill.source == "env" else "dashboard/API"

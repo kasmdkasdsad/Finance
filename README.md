@@ -1557,7 +1557,10 @@ validates up to two. It never promotes.
 
 After each learning pass (and on demand, `POST /brain/improvements/review`) the brain reviews its own
 record and writes **improvement proposals**. Each one has a problem, the evidence, a proposed change,
-an expected improvement, and a validation plan. It looks for:
+an expected improvement, and a validation plan. A proposal can never weaken a guardrail, and this is
+enforced: one that names a protected control — the loss, position and order limits, the kill switches, the
+data-quality requirements (`QP_TRADING_REQUIRE_LIVE_DATA`, the quote-age and spread limits), the paper-only
+and execution switches, the Brain's mode — is withheld before it is stored. It looks for:
 
 * weak agents (a significant *evidence of harm* verdict on enough independent calls);
 * agents that fail in one regime or volatility environment (a routing proposal);
@@ -1678,7 +1681,9 @@ on the *Paper Trading* page; Brain orders are tagged `brain` in the order record
   the setting can release; activating it also cancels the Brain's working orders); every reason the
   trading service would not send (paper keys, `QP_ALPACA_TRADING_ENABLED`, `QP_TRADING_DRY_RUN`, the
   trading kill switch, arming for scheduled cycles); Alpaca unavailable; the SDK client not pointing at
-  `https://paper-api.alpaca.markets` (checked before every Brain cycle: the cycle fails closed);
+  `https://paper-api.alpaca.markets` (checked before every Brain cycle: the cycle fails closed); an
+  ambiguous environment — the `.env` file changed since the API started (restart it), or a key that does
+  not look like a paper key (Alpaca's paper keys start with `PK`; the key itself is never shown);
 * **no new positions or increases** (exits and trims still go) — the daily loss limit; **TRADING BLOCKED —
   DATA QUALITY INSUFFICIENT** (the data-quality agent's market veto, e.g. under half the universe has a
   usable live quote, or a fail-closed check); this computer's clock more than 10 s off Alpaca's; an account

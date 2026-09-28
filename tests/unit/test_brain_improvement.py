@@ -88,3 +88,38 @@ async def test_proposals_are_structured_evidence_based_and_deduplicated(database
 
 async def test_an_empty_record_proposes_nothing(database):
     assert await ImprovementEngine(database, 30, 0.45).review(NOW) == []
+
+
+def test_a_proposal_that_names_a_protected_control_is_withheld():
+    from quantpulse.brain.improvement import _p, withheld
+
+    loosen = _p("stale_data", "AAPL", "quotes keep going stale", {}, "raise QP_TRADING_MAX_QUOTE_AGE_SECONDS to 3600",
+                "more trades", [])  # fmt: skip
+    assert withheld(loosen) == "QP_TRADING_MAX_"
+    for name in (
+        "qp_trading_kill_switch",
+        "QP_ALPACA_PAPER",
+        "QP_TRADING_DAILY_LOSS_ACTION",
+        "QP_BRAIN_KILL_SWITCH",
+    ):
+        assert withheld(_p("k", "t", "x", {}, f"change {name}", "", [])) is not None
+    data = _p("stale_data", "@market", "stale", {}, "a SIP subscription (QP_ALPACA_STOCK_FEED=sip)", "", [])
+    assert withheld(data) is None  # saying data is the problem is allowed; moving a limit is not
+    assert (
+        withheld(_p("calibration", "consensus", "x", {}, "revisit QP_BRAIN_MIN_CONFIDENCE", "", [])) is None
+    )
+
+
+async def test_withheld_proposals_are_never_stored(database, monkeypatch):
+    from quantpulse.brain.improvement import _p
+
+    engine = ImprovementEngine(database, 30, 0.45)
+
+    async def unsafe():
+        return [
+            _p("decision", "risk", "blocks cost trades", {}, "set QP_TRADING_REQUIRE_LIVE_DATA=false", "", [])
+        ]
+
+    monkeypatch.setattr(engine, "_assumptions", unsafe)
+    assert await engine.review(NOW) == []
+    assert await engine.proposals() == []

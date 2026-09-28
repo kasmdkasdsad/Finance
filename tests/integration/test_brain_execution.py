@@ -308,3 +308,18 @@ async def test_an_unexpected_position_halts_new_positions_until_it_is_adopted(tm
             "MIDC": "adopted"
         }
         assert posts(fake) == []
+
+
+async def test_a_key_that_is_not_a_paper_key_fails_closed(tmp_path, monkeypatch):
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, alpaca_api_key_id="AKNOTAPAPERKEY", **OWNS, **ENABLED):
+        price = api.feed.live_price("DNA")
+        api.fake.hold("DNA", 10, price / 0.85, price)  # even a protective exit waits
+        cycle = await run_cycle(api)
+        assert cycle["summary"]["orders_sent"] == 0 and posts(api.fake) == []
+        trades = [d for d in cycle["decisions"] if d["quantity"]]
+        assert trades and all("does not look like a paper key" in d["execution"]["reason"] for d in trades)
+        ex = (await api.get(f"{API}/execution")).json()
+        assert any("paper key" in b for b in ex["blockers_manual"])
+        assert "AKNOTAPAPERKEY" not in str(ex)  # the key itself is never shown
