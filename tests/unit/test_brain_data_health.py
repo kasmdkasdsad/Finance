@@ -116,6 +116,8 @@ def test_the_report_names_the_cause():
                 "stock_feed": "iex",
                 "stock_feed_error": None,
                 "refused_feeds": {"sip": "2026-09-25T14:00:00+00:00"},
+                "history_feed": "iex",
+                "history_feed_refused": 403,
             }
         ],
         skew_seconds=0.3,
@@ -124,6 +126,7 @@ def test_the_report_names_the_cause():
     assert not report["healthy"] and report["usable"] == 1 and report["counts"]["stale"] == 6
     causes = " ".join(report["causes"])
     assert "Real-time SIP is not in this subscription" in causes
+    assert "refused all-exchange (SIP) price history (HTTP 403)" in causes
     assert "6 of 7 IEX-priced symbols" in causes and "not a longer quote-age limit" in causes
     assert "clock" not in report["headline"]  # 0.3s is within tolerance
 

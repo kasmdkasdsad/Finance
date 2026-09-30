@@ -238,7 +238,7 @@ Easter algorithm, 1 pm early closes, and known special closures.
 |---|---|---|---|
 | **Yahoo Finance** | Quotes, OHLCV (split- and dividend-adjusted), dividends, option chains, analyst trend | none | Chart data is keyless. Quote batches, options and `quoteSummary` use Yahoo's cookie and crumb handshake, done automatically. Yahoo aggressively rate-limits cloud and datacenter IPs (HTTP 429); expect failover there. |
 | **Polygon.io** | Real-time snapshot quotes, aggregates, option-chain snapshots with OI and IV | `QP_POLYGON_API_KEY` | Endpoint access depends on your plan. A 403 `NOT_AUTHORIZED` fails over instead of mislabelling delayed data. `QP_POLYGON_BASE_URL` is configurable. |
-| **Alpaca Market Data** | Snapshots, bars (all adjustments), **multi-symbol bars** for whole universes, option snapshots | `QP_ALPACA_API_KEY_ID` + `QP_ALPACA_API_SECRET_KEY` | IEX and `indicative` feeds by default. Option snapshots carry no open interest. With Alpaca configured the stock model covers the S&P 500 (`QP_MODEL_UNIVERSE=auto`): 50 symbols per paginated request. |
+| **Alpaca Market Data** | Snapshots, bars (all adjustments), **multi-symbol bars** for whole universes, option snapshots | `QP_ALPACA_API_KEY_ID` + `QP_ALPACA_API_SECRET_KEY` | IEX and `indicative` feeds by default; bars come from the all-exchange SIP feed even then (free once 15 minutes old). Option snapshots carry no open interest. With Alpaca configured the stock model covers the S&P 500 (`QP_MODEL_UNIVERSE=auto`): 50 symbols per paginated request. |
 | **U.S. Treasury** | Daily par yield curve | none | Keyless CSV feed. It is slow (often 15-20 s), so it uses a 45 s timeout and is polled hourly. |
 | **SEC EDGAR** | XBRL company facts, recent filings, ticker→CIK map; SIC industries and **earnings-release times** (8-K item 2.02) from submissions; cross-company **XBRL frames** for point-in-time fundamentals | none | You **must** set `QP_SEC_USER_AGENT` to a name and contact email (SEC fair-access policy). Rate-limited to 8 req/s. Profiles and frames are kept in the warehouse and refreshed weekly. |
 | **Wikipedia** | S&P 500 constituents and the dated history of index changes (point-in-time membership) | none | Refreshed weekly. A snapshot of both tables ships with QuantPulse and is used (labelled STALE) when Wikipedia is unreachable. |
@@ -954,6 +954,12 @@ one-sided or 5–10% wide (the source of "spreads" such as 1,000 bp on large cap
   allows it. It uses the real-time SIP feed, or else Alpaca's 15-minute-delayed SIP feed (a spread from
   15 minutes ago is a fair measure of a stock's liquidity; the order price still comes from the live
   quote). Without either, the IEX spread is used as is, and wide names are simply not bought;
+* **price history** (daily bars: volume, highs, lows) comes from the consolidated SIP bars even on the free
+  plan, which may read them once they are 15 minutes old: IEX bars hold only IEX's own few percent of the
+  volume, which the $25M-a-day liquidity floor and the 1%-of-volume position cap would misread. Today's bar
+  is read up to 16 minutes ago (the live snapshot carries the current price); intraday charts stay on IEX
+  in real time. Stored IEX-only histories are downloaded again in full once, never mixed with SIP bars; if
+  Alpaca refuses SIP history, IEX bars are used and data health says so (`history_feed`);
 * a live price more than 25% from the last close, or stored history that disagrees with the vendor's
   previous close by more than 15%, blocks new buys in that name (exits are never blocked);
 * the 30 bp limit itself is unchanged. `GET /trading/diagnostics?symbols=DELL,MPC` shows each quote's
@@ -2273,7 +2279,8 @@ tests/                   unit · providers · integration · frontend · fixture
     execution, and a strategy that works on paper may not work with money. Nothing here is advice.
   * The free Alpaca plan's quotes come from IEX (a few percent of US volume). The spread check and the
     marketable-limit prices use the IEX bid/ask, which can be wider than the national best. With a paid
-    plan, set `QP_ALPACA_STOCK_FEED=sip`.
+    plan, set `QP_ALPACA_STOCK_FEED=sip`. Daily bars (volume, highs, lows) already come from SIP for free;
+    Alpaca's paper fills are matched against the national best bid and offer whatever the data plan.
   * Stops are evaluated at every cycle (every 30 minutes by default), not held as resting stop orders
     at Alpaca, so a gap can fill well beyond the 8% level.
   * The stock model and fundamentals are as of the last close; only the momentum, trend, volume and VWAP

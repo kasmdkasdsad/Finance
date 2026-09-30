@@ -8,15 +8,20 @@ IEX is a single exchange: its bid/ask is IEX's own book, not the national best b
 wider than the market (or one-sided) for names IEX trades thinly. :meth:`Alpaca.consolidated_quotes`
 reads the consolidated (SIP) quote instead — real time with a subscription that allows it, else the
 15-minute-delayed SIP feed — so spreads can be measured across all exchanges.
+
+IEX bars carry only IEX's own trades: their volume is a few percent of the market's. The free plan may read
+consolidated (SIP) bars once they are 15 minutes old, so on the IEX feed histories are read from SIP with the
+end held back that far (:meth:`Alpaca._bars_window`) — full-market volume, highs and lows at no cost.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from functools import partial
+from typing import Any, TypeVar
 
 from pydantic import Field
 
@@ -34,6 +39,7 @@ from quantpulse.schemas.market import Bar, Interval, PriceHistory, Quote
 from quantpulse.schemas.options import OptionChain, OptionContract
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 NAME = "alpaca"
 # Consolidated (all-exchange) quote feeds, best first; a feed the subscription refuses is skipped for a while.
@@ -50,6 +56,10 @@ TIMEFRAME: dict[str, str] = {
     "1wk": "1Week",
     "1mo": "1Month",
 }
+INTRADAY = frozenset({"1m", "5m", "15m", "30m", "1h"})
+# Without a subscription, SIP bars may be read up to 15 minutes ago (one minute of margin here).
+SIP_HISTORY_DELAY = timedelta(minutes=16)
+FEED_REFUSED = (403, 422)  # the subscription (or plan) does not allow the requested feed
 MAX_PAGES = 10
 BATCH_SYMBOLS = 50  # symbols per multi-symbol bars request (a page holds at most 10,000 bars)
 BATCH_MAX_PAGES = 200
@@ -148,6 +158,7 @@ class Alpaca:
         self._options_feed = options_feed
         self._refused_feeds: dict[str, datetime] = {}  # consolidated feed -> when the subscription refused it
         self._feed_errors: dict[str, tuple[int | None, datetime]] = {}  # feed -> (HTTP status, when)
+        self._sip_history_refused: int | None = None  # HTTP status of the refusal (kept for this process)
 
     def configured(self) -> bool:
         return bool(self._key_id and self._secret)
@@ -188,6 +199,38 @@ class Alpaca:
     def stock_feed(self) -> str:
         return self._stock_feed
 
+    @property
+    def history_feed(self) -> str:
+        """The feed daily histories come from: the configured one, or on the free IEX feed the consolidated
+        (SIP) history, unless the subscription refused it."""
+        if self._stock_feed != "iex" or self._sip_history_refused is not None:
+            return self._stock_feed
+        return "sip"
+
+    def _bars_window(self, interval: str, start: datetime, end: datetime) -> tuple[str, datetime]:
+        """The feed and end of a bars request. Daily (and longer) bars on the free plan are read from SIP up
+        to 16 minutes ago: today's bar is then that far behind, while the live snapshot carries the current
+        price. An intraday request reads SIP only when its whole window is already that old, so live charts
+        stay real time on IEX."""
+        feed = self.history_feed
+        if feed == self._stock_feed:
+            return feed, end
+        latest = datetime.now(UTC) - SIP_HISTORY_DELAY
+        if end <= latest:
+            return feed, end
+        if interval in INTRADAY or start >= latest:
+            return self._stock_feed, end
+        return feed, latest
+
+    def _refuse_sip_history(self, status: int | None) -> None:
+        if self._sip_history_refused is None:
+            logger.warning(
+                "Alpaca refused consolidated (SIP) history (HTTP %s): reading IEX bars, whose volume is IEX's own "
+                "few percent of the market's",
+                status,
+            )
+        self._sip_history_refused = status
+
     def feed_status(self) -> dict[str, Any]:
         """Which feeds this installation reads and which the subscription refused (never credentials)."""
         error = self._feed_errors.get(self._stock_feed)
@@ -195,6 +238,8 @@ class Alpaca:
             "provider": NAME,
             "stock_feed": self._stock_feed,
             "stock_feed_error": {"status": error[0], "at": error[1].isoformat()} if error else None,
+            "history_feed": self.history_feed,
+            "history_feed_refused": self._sip_history_refused,
             "consolidated_feeds": list(CONSOLIDATED_FEEDS),
             "refused_feeds": {f: t.isoformat() for f, t in self._refused_feeds.items()},
         }
@@ -249,14 +294,38 @@ class Alpaca:
         require(symbol in quotes, NAME, f"no snapshot for {symbol}")
         return quotes[symbol]
 
+    async def _feed_fallback(
+        self, interval: str, start: datetime, end: datetime, fetch: Callable[[str, datetime], Awaitable[T]]
+    ) -> T:
+        """``fetch(feed, end)`` on the feed :meth:`_bars_window` picks; when that is SIP and the subscription
+        refuses it, again on the configured feed (the refusal is remembered once that feed has answered, so
+        an error that is not the feed's never switches it)."""
+        feed, until = self._bars_window(interval, start, end)
+        try:
+            return await fetch(feed, until)
+        except ProviderHTTPError as exc:
+            if feed == self._stock_feed or exc.status_code not in FEED_REFUSED:
+                raise
+            status = exc.status_code
+        out = await fetch(self._stock_feed, end)
+        self._refuse_sip_history(status)
+        return out
+
     async def history(self, symbol: str, interval: Interval, start: datetime, end: datetime) -> PriceHistory:
+        return await self._feed_fallback(
+            interval, start, end, partial(self._history, symbol, interval, start)
+        )
+
+    async def _history(
+        self, symbol: str, interval: Interval, start: datetime, feed: str, end: datetime
+    ) -> PriceHistory:
         params: dict[str, object] = {
             "timeframe": TIMEFRAME[interval],
             "start": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "end": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "limit": 10000,
             "adjustment": "all",
-            "feed": self._stock_feed,
+            "feed": feed,
             "sort": "asc",
         }
         bars: list[Bar] = []
@@ -286,37 +355,45 @@ class Alpaca:
         out: dict[str, PriceHistory] = {}
         for i in range(0, len(symbols), BATCH_SYMBOLS):
             chunk = list(symbols[i : i + BATCH_SYMBOLS])
-            ours = {vendor_symbol(s): s for s in chunk}
-            params: dict[str, object] = {
-                "symbols": ",".join(ours),
-                "timeframe": TIMEFRAME[interval],
-                "start": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-                "end": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-                "limit": 10000,
-                "adjustment": "all",
-                "feed": self._stock_feed,
-                "sort": "asc",
-            }
-            collected: dict[str, list[Bar]] = {}
-            for _ in range(BATCH_MAX_PAGES):
-                payload = await self._http.get_json(
-                    NAME, f"{self._base}/v2/stocks/bars", params=params, headers=self._headers()
-                )
-                page = parse_wire(NAME, _MultiBarsResponse, payload)
-                for vendor, rows in (page.bars or {}).items():
-                    symbol = ours.get(vendor.upper(), vendor.upper())
-                    bucket = collected.setdefault(symbol, [])
-                    for b in rows or []:
-                        bar = Bar.sanitized(b.t, b.o, b.h, b.l, b.c, b.v)
-                        if bar is not None:
-                            bucket.append(bar)
-                if not page.next_page_token:
-                    break
-                params["page_token"] = page.next_page_token
-            for symbol, bars in collected.items():
-                if bars:
-                    out[symbol] = PriceHistory(symbol=symbol, interval=interval, bars=bars)
+            batch = partial(self._histories_batch, chunk, interval, start)
+            out.update(await self._feed_fallback(interval, start, end, batch))
         return out
+
+    async def _histories_batch(
+        self, chunk: Sequence[str], interval: Interval, start: datetime, feed: str, end: datetime
+    ) -> dict[str, PriceHistory]:
+        ours = {vendor_symbol(s): s for s in chunk}
+        params: dict[str, object] = {
+            "symbols": ",".join(ours),
+            "timeframe": TIMEFRAME[interval],
+            "start": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "end": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "limit": 10000,
+            "adjustment": "all",
+            "feed": feed,
+            "sort": "asc",
+        }
+        collected: dict[str, list[Bar]] = {}
+        for _ in range(BATCH_MAX_PAGES):
+            payload = await self._http.get_json(
+                NAME, f"{self._base}/v2/stocks/bars", params=params, headers=self._headers()
+            )
+            page = parse_wire(NAME, _MultiBarsResponse, payload)
+            for vendor, rows in (page.bars or {}).items():
+                symbol = ours.get(vendor.upper(), vendor.upper())
+                bucket = collected.setdefault(symbol, [])
+                for b in rows or []:
+                    bar = Bar.sanitized(b.t, b.o, b.h, b.l, b.c, b.v)
+                    if bar is not None:
+                        bucket.append(bar)
+            if not page.next_page_token:
+                break
+            params["page_token"] = page.next_page_token
+        return {
+            symbol: PriceHistory(symbol=symbol, interval=interval, bars=bars)
+            for symbol, bars in collected.items()
+            if bars
+        }
 
     async def option_chain(
         self, symbol: str, expirations: Sequence[date] | None, max_expirations: int = 8

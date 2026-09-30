@@ -28,6 +28,7 @@ class BulkFeed:
 
     def __init__(self, clock, known):
         self.clock, self.known, self.calls, self.factor = clock, set(known), [], {}
+        self.volume = 1.0  # IEX-only bars carry a few percent of the market's volume
 
     def configured(self):
         return True
@@ -42,7 +43,13 @@ class BulkFeed:
             f = self.factor.get(s, 1.0)
             bars = [
                 b.model_copy(
-                    update={"open": b.open * f, "high": b.high * f, "low": b.low * f, "close": b.close * f}
+                    update={
+                        "open": b.open * f,
+                        "high": b.high * f,
+                        "low": b.low * f,
+                        "close": b.close * f,
+                        "volume": b.volume * self.volume,
+                    }
                 )
                 for b in _full(s).bars
                 if start <= b.timestamp <= min(end, now)
@@ -136,6 +143,36 @@ async def test_panel_is_incremental_and_honest(tmp_path, mock_net):
         assert any(
             call[0] == ("AAA",) and call[1] == clock.now() - timedelta(days=1825) for call in bulk.calls
         )
+
+
+async def test_bars_from_another_feed_are_downloaded_again_not_continued(tmp_path, mock_net):
+    """The free plan's IEX bars carry a few percent of the market's volume. When the bulk vendor's feed
+    changes (to all-exchange SIP bars), stored histories are downloaded again in full rather than continued
+    with bars twenty times larger."""
+    clock = FakeClock(FRIDAY)
+    universe = ["AAA", "BBB"]
+    async for api in _client(make_settings(tmp_path, enable_live_data=True), clock):
+        market = api.container.market
+        bulk = BulkFeed(clock, set(universe))
+        bulk.history_feed, bulk.volume = "iex", 0.05
+        market._providers[:] = [bulk]
+        friday = await market.daily_panel(universe, 1825)
+
+        clock.advance((datetime(2026, 9, 28, 21, 0, tzinfo=UTC) - FRIDAY).total_seconds())
+        bulk.history_feed, bulk.volume = "sip", 1.0
+        n = len(bulk.calls)
+        monday = await market.daily_panel(universe, 1825)
+        assert bulk.calls[n:] == [(("AAA", "BBB"), clock.now() - timedelta(days=1825))]
+        old_day = datetime(2023, 3, 1)
+        assert monday.frames["AAA"].loc[old_day, "volume"] == pytest.approx(
+            friday.frames["AAA"].loc[old_day, "volume"] * 20
+        )
+
+        # The next session continues the new feed's history with a tail only.
+        clock.advance(24 * 3600)
+        n = len(bulk.calls)
+        await market.daily_panel(universe, 1825)
+        assert len(bulk.calls) == n + 1 and bulk.calls[-1][1] >= clock.now() - timedelta(days=12)
 
 
 async def test_panel_offline_is_synthetic(tmp_path, clock):

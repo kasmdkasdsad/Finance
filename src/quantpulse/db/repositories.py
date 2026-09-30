@@ -106,13 +106,16 @@ async def recent_ingestions(session: AsyncSession, limit: int = 50) -> list[Inge
 REVISION_WINDOW = timedelta(days=7)
 
 
-async def upsert_bars(session: AsyncSession, history: PriceHistory, provider: str) -> int:
+async def upsert_bars(
+    session: AsyncSession, history: PriceHistory, provider: str, *, rewrite: bool = False
+) -> int:
     """Store bars, writing only what is new.
 
     Bars from ``REVISION_WINDOW`` before the latest stored bar onwards are always rewritten (vendors revise
     recent bars), and so are bars older than the earliest stored one (a longer download backfilling
     history). If the stored closes in the overlap no longer match the vendor's, the history has been
-    re-adjusted (a split or dividend adjustment) and every bar is rewritten."""
+    re-adjusted (a split or dividend adjustment) and every bar is rewritten. ``rewrite`` rewrites every bar
+    regardless (a history downloaded again from another feed, whose volumes differ while closes may not)."""
     if not history.bars:
         return 0
     table = cast(Table, PriceBarRow.__table__)
@@ -123,7 +126,7 @@ async def upsert_bars(session: AsyncSession, history: PriceHistory, provider: st
         await session.execute(select(func.min(PriceBarRow.ts), func.max(PriceBarRow.ts)).where(*key))
     ).one()
     earliest, latest = span[0], span[1]
-    if latest is not None:
+    if latest is not None and not rewrite:
         cutoff = latest - REVISION_WINDOW
         recent = await session.execute(
             select(PriceBarRow.ts, PriceBarRow.close).where(*key, PriceBarRow.ts >= cutoff)

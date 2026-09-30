@@ -271,6 +271,11 @@ def feed_report(
                 f"{str(refused['sip'])[:19]}): spreads are checked on the 15-minute delayed SIP quote or on "
                 "IEX alone."
             )
+        if f.get("history_feed_refused"):
+            causes.append(
+                f"Alpaca refused all-exchange (SIP) price history (HTTP {f['history_feed_refused']}): daily bars "
+                "are IEX's own, whose volume is a few percent of the market's, so liquidity limits read it low."
+            )
     if market_open:
         invalid = counts[QuoteStatus.INVALID_TIMESTAMP.value]
         if invalid:

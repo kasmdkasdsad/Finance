@@ -377,11 +377,12 @@ class MarketService:
             stored_provider[r[0]] = r[7]
         newest = max(last_stored.values(), default=None)
 
-        plan = _plan(symbols, coverage, last_stored, newest, start, now, self._fresh_after(now))
+        batch = self._batch_provider()
+        source = _history_source(batch)
+        plan = _plan(symbols, coverage, last_stored, newest, start, now, self._fresh_after(now), source)
         fetched: dict[str, tuple[PriceHistory, str]] = {}
         failed: dict[str, str] = {}  # the download failed: nothing learned
         empty: dict[str, str] = {}  # every vendor answered, none had bars
-        batch = self._batch_provider()
         single = [p for p in self._providers if batch is None or p.name != batch.name]
         progress_total = max(1, len(plan.full) + len(plan.tail))
         progress_done = 0
@@ -490,7 +491,7 @@ class MarketService:
         for i in range(0, len(items), PERSIST_CHUNK):
             async with self._db.session() as s:
                 for sym, (h, provider) in items[i : i + PERSIST_CHUNK]:
-                    n = await repo.upsert_bars(s, h, provider)
+                    n = await repo.upsert_bars(s, h, provider, rewrite=sym in plan.resourced)
                     await repo.record_ingestion(s, "bars", f"{sym}:1d:panel", provider, n)
         stamp = now.isoformat()
         for sym in [*plan.full, *plan.tail]:
@@ -501,6 +502,9 @@ class MarketService:
                 start.date().isoformat() if sym in plan.full else prior.get("start", start.date().isoformat())
             )
             coverage[sym] = {"start": requested, "checked": stamp}
+            if source is not None:
+                # What the plan expected; a feed that changed during the download differs from it next time.
+                coverage[sym]["source"] = source
         async with self._db.session() as s:
             await repo.put_blob(s, COVERAGE_KEY, coverage, "panel")
             if fetched:
@@ -586,6 +590,18 @@ class _Plan:
     full: list[str]  # download the whole window
     tail: list[str]  # download the last few sessions
     finished: set[str]  # stored history ended long ago: nothing new will come
+    resourced: set[str]  # stored from another vendor or feed: every bar is rewritten
+
+
+def _history_source(provider: object | None) -> str | None:
+    """The bulk vendor and the feed its daily bars now come from (``alpaca:sip``). IEX-only and all-exchange
+    bars differ roughly twentyfold in volume, so stored bars from another source are downloaded again in
+    full rather than continued with new ones."""
+    if provider is None:
+        return None
+    name = str(getattr(provider, "name", "?"))
+    feed = getattr(provider, "history_feed", None)
+    return f"{name}:{feed}" if feed else name
 
 
 def _plan(
@@ -596,14 +612,20 @@ def _plan(
     start: datetime,
     now: datetime,
     fresh_after: datetime,
+    source: str | None = None,
 ) -> _Plan:
     full: list[str] = []
     tail: list[str] = []
     finished: set[str] = set()
+    resourced: set[str] = set()
     for sym in symbols:
         c = coverage.get(sym)
         if c is None or date.fromisoformat(c["start"]) > (start + timedelta(days=5)).date():
             full.append(sym)  # never downloaded for (all of) this window
+            continue
+        if source is not None and c.get("source") != source:
+            full.append(sym)  # stored from another vendor or feed: not comparable with new bars
+            resourced.add(sym)
             continue
         checked = datetime.fromisoformat(c["checked"])
         if sym not in last_stored:
@@ -615,7 +637,7 @@ def _plan(
             continue
         if checked < fresh_after:
             tail.append(sym)
-    return _Plan(full, tail, finished)
+    return _Plan(full, tail, finished, resourced)
 
 
 def _rebased(h: PriceHistory, symbol: str, stored_close: dict[tuple[str, datetime], float]) -> bool:
