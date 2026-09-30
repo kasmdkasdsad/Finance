@@ -64,6 +64,8 @@ from quantpulse.domain.trading_portfolio import (
     StrategyConfig,
     build_plan,
 )
+from quantpulse.options.contracts import ContractError, parse_occ
+from quantpulse.options.data import OptionsMarketDataProvider
 from quantpulse.providers.alpaca_trading import (
     PAPER_URL,
     AlpacaPaperBroker,
@@ -128,7 +130,10 @@ from quantpulse.services.trading_data import (
     TradingInputs,
     assess_quote,
 )
+from quantpulse.services.trading_options import OptionsExecution, closing_intents, option_key
 from quantpulse.services.trading_risk import (
+    OptionLegQuote,
+    OptionOrderIntent,
     OrderIntent,
     QuoteCheck,
     RiskBook,
@@ -242,7 +247,7 @@ class BrainOrder:
     target_weight: float = 0.0
 
 
-class TradingService:
+class TradingService(OptionsExecution):
     def __init__(
         self,
         settings: Settings,
@@ -252,11 +257,14 @@ class TradingService:
         data: TradingDataLoader,
         jobs: JobRegistry,
         lease: Lease | None = None,
+        options_data: OptionsMarketDataProvider | None = None,
     ) -> None:
         self._s = settings
         self._db = db
         self._clock = clock
         self.broker = broker
+        # the options feed the option legs are re-quoted from just before an order (None: no option orders)
+        self.options_data = options_data
         self.lease = lease  # the single-process lease: only its holder sends orders
         self._data = data
         self._jobs = jobs
@@ -1745,10 +1753,21 @@ class TradingService:
         return self._last_reconcile is None or now - self._last_reconcile >= RECONCILE_EVERY
 
     async def _snapshot(self) -> tuple[BrokerAccount, dict[str, BrokerPosition], list[BrokerOrder]]:
+        """The account, its *share* positions and its open orders. Option contracts are left out: the stock
+        logic (targets, stops, flattening, the anti-churn rules) never treats a contract as a stock — options
+        are managed by the options path (:meth:`_snapshot_all`)."""
+        account, stock, _, open_orders = await self._snapshot_all()
+        return account, stock, open_orders
+
+    async def _snapshot_all(
+        self,
+    ) -> tuple[BrokerAccount, dict[str, BrokerPosition], dict[str, BrokerPosition], list[BrokerOrder]]:
         account, positions, open_orders = await asyncio.gather(
             self.broker.account(), self.broker.positions(), self.broker.open_orders()
         )
-        return account, {p.symbol: p for p in positions}, open_orders
+        stock = {p.symbol: p for p in positions if not p.is_option}
+        options = {p.symbol: p for p in positions if p.is_option}
+        return account, stock, options, open_orders
 
     async def _cycle(
         self,
@@ -2094,6 +2113,7 @@ class TradingService:
         brain_cycle_id: int,
         scheduled: bool,
         progress: Progress = _noop,
+        option_orders: Sequence[OptionOrderIntent] = (),
     ) -> CycleOut:
         """Execute the Brain's decisions — through this service only. The cycle reconciles with Alpaca,
         re-reads the account, prices every order from fresh quotes, and sends each through the risk engine
@@ -2123,6 +2143,7 @@ class TradingService:
                 orders=orders,
                 slot=slot,
                 brain_cycle_id=brain_cycle_id,
+                option_orders=option_orders,
             )
 
         return await self._cycle(
@@ -2152,9 +2173,12 @@ class TradingService:
         orders: Sequence[BrainOrder],
         slot: str,
         brain_cycle_id: int,
+        option_orders: Sequence[OptionOrderIntent] = (),
     ) -> dict[str, Any]:
         s = self._s
-        notes: list[str] = [f"Brain cycle {brain_cycle_id}: {len(orders)} decision(s) (order slot {slot})"]
+        notes: list[str] = [
+            f"Brain cycle {brain_cycle_id}: {len(orders) + len(option_orders)} decision(s) (order slot {slot})"
+        ]
         if kill.active:
             notes.append(
                 f"Kill switch ON ({kill.reason or kill.source}): every order is refused; this is a dry run"
@@ -2172,14 +2196,14 @@ class TradingService:
         progress(0.05, "reconciling with Alpaca")
         await self._guard_foreign(await self.orders.reconcile())
         now = self._reconciled()
-        account, positions, open_orders = await self._snapshot()
+        account, positions, opt_positions, open_orders = await self._snapshot_all()
         await self._baseline(account)
         is_open, _ = await self._market()
         if mode == "paper":
             canceled = await self.orders.cancel_stale(open_orders)
             if canceled:
                 await asyncio.sleep(1.0)
-                account, positions, open_orders = await self._snapshot()
+                account, positions, opt_positions, open_orders = await self._snapshot_all()
                 notes.append(f"canceled {len(canceled)} stale unfilled order(s) before trading")
         if not is_open:
             notes.append("The market is closed: orders would be refused (risk check market_open)")
@@ -2189,7 +2213,8 @@ class TradingService:
         progress(0.2, "checking the Brain's decisions against the account")
         cooldown = timedelta(minutes=self.strategy.cooldown_minutes)
         last_traded = await self.orders.last_trades(now - cooldown, strategies=(STRATEGY, BRAIN))
-        working = {o.symbol for o in open_orders if o.is_open} | await self.orders.unresolved_symbols()
+        working = {sym for o in open_orders if o.is_open for sym in (o.symbol, *o.symbols)}
+        working |= await self.orders.unresolved_symbols()
         daily_hit = account.last_equity > 0 and account.day_pl_pct <= -self.limits.max_daily_loss_pct
         if daily_hit:
             await self._daily_loss_event(account)
@@ -2252,6 +2277,14 @@ class TradingService:
                         closes_position=closes,
                     )
                 )
+        # option decisions: never while one of their contracts has a working (or unresolved) order
+        opt_trades: list[OptionOrderIntent] = []
+        for oo in option_orders:
+            busy = sorted({x.symbol for x in oo.legs if x.symbol in working})
+            if busy:
+                skipped[option_key(oo)] = f"an order for {', '.join(busy)} is still working: not sent"
+            else:
+                opt_trades.append(oo)
         for sym, why in skipped.items():
             notes.append(f"{sym}: {why}")
 
@@ -2290,9 +2323,30 @@ class TradingService:
             live[sym] = q
         trades = [_repriced(t, quotes[t.symbol].price) if t.symbol in quotes else t for t in trades]
 
+        # 3b. options: the legs re-quoted now (bid/ask, open interest; IV, delta and vega computed here), the
+        #     underlyings' live prices; on the daily-loss flatten every option position is closed too
+        opt_quotes: dict[str, OptionLegQuote] = {}
+        if opt_trades or opt_positions:
+            opt_quotes, spots, opt_why = await self._option_market(opt_trades, opt_positions, now)
+            if opt_why:
+                for oo in [o for o in opt_trades if o.opening]:
+                    skipped[option_key(oo)] = opt_why
+                opt_trades = [o for o in opt_trades if not o.opening]
+                notes.append(f"options: {opt_why}")
+            if flatten:
+                free = {sym: p for sym, p in opt_positions.items() if sym not in working}
+                opt_trades = [o for o in opt_trades if not o.opening] + closing_intents(
+                    free, opt_quotes, spots, kind="daily_loss_flatten", intent="flatten",
+                    reason=f"daily loss {account.day_pl_pct:+.2%} hit the −{self.limits.max_daily_loss_pct:.0%} "
+                    "limit (QP_TRADING_DAILY_LOSS_ACTION=flatten)",
+                )  # fmt: skip
+        opt_closes = [o for o in opt_trades if not o.opening]
+        opt_opens = [o for o in opt_trades if o.opening]
+
         # 4-5. risk and execution: sells first, then buys against the cash actually available
         progress(0.5, "risk checks" + (" and orders" if mode == "paper" else " (dry run)"))
-        book = RiskBook(self.limits, account, positions, open_orders, is_open, kill.active, quotes, daily_hit)
+        book = RiskBook(self.limits, account, {**positions, **opt_positions}, open_orders, is_open, kill.active,
+                        quotes, daily_hit, option_quotes=opt_quotes, now=now)  # fmt: skip
         trade_rows: list[ProposedTradeOut] = []
         submitted: list[Submission] = []
         sells = [t for t in trades if t.side == "sell"]
@@ -2304,7 +2358,12 @@ class TradingService:
             trade_rows.append(out)
             if sub is not None:
                 submitted.append(sub)
-        if buys:
+        for oo in opt_closes:  # option exits go with the sells
+            out, sub = await self._risk_and_submit_option(oo, book, slot, mode, cycle_id, strategy=BRAIN)
+            trade_rows.append(out)
+            if sub is not None:
+                submitted.append(sub)
+        if buys or opt_opens:
             if mode == "paper" and any(x.submitted for x in submitted):
                 progress(0.7, "waiting for sells to fill")
                 sold = await self.orders.wait_for(
@@ -2317,10 +2376,14 @@ class TradingService:
                         f"({', '.join(sorted(unfilled))}): buys were re-checked against the cash actually "
                         "available (never margin)"
                     )
-                account, positions, open_orders = await self._snapshot()
-                book = RiskBook(
-                    self.limits, account, positions, open_orders, is_open, kill.active, quotes, daily_hit
-                )
+                account, positions, opt_positions, open_orders = await self._snapshot_all()
+                book = RiskBook(self.limits, account, {**positions, **opt_positions}, open_orders, is_open,
+                                kill.active, quotes, daily_hit, option_quotes=opt_quotes, now=now)  # fmt: skip
+            for oo in opt_opens:  # option entries before stock buys (both against the cash actually left)
+                out, sub = await self._risk_and_submit_option(oo, book, slot, mode, cycle_id, strategy=BRAIN)
+                trade_rows.append(out)
+                if sub is not None:
+                    submitted.append(sub)
             for t in buys:
                 out, sub = await self._risk_and_submit(
                     t, book, live.get(t.symbol), slot, mode, cycle_id, strategy=BRAIN
@@ -2350,7 +2413,7 @@ class TradingService:
                 else r
                 for r in trade_rows
             ]
-            account, positions, _ = await self._snapshot()
+            account, positions, opt_positions, _ = await self._snapshot_all()
         return {
             "status": "completed",
             "equity": account.equity,
@@ -2370,7 +2433,7 @@ class TradingService:
                     "weight": p.market_value / account.equity if account.equity > 0 else 0.0,
                     "unrealized_plpc": p.unrealized_plpc,
                 }
-                for p in positions.values()
+                for p in [*positions.values(), *opt_positions.values()]
             ],
             "signals": [],
             "targets": [],
@@ -2378,6 +2441,43 @@ class TradingService:
             "plan": {"gross_target": None, "exits": {}, "skipped": skipped, "brain_cycle_id": brain_cycle_id},
             "notes": notes,
         }
+
+    async def _option_market(
+        self,
+        trades: Sequence[OptionOrderIntent],
+        held: Mapping[str, BrokerPosition],
+        now: datetime,
+    ) -> tuple[dict[str, OptionLegQuote], dict[str, float], str | None]:
+        """Fresh leg quotes and live underlying prices for the option decisions and the contracts held; the
+        reason option entries cannot be judged, if any (closing orders still go to the risk book, which
+        fails any leg without a quote closed)."""
+        roots = set()
+        for sym in held:
+            with contextlib.suppress(ContractError):
+                roots.add(parse_occ(sym).underlying)
+        unders = sorted({o.underlying for o in trades} | roots)
+        if self.options_data is None or not self.options_data.configured():
+            return {}, {}, "no options market data is configured: option entries are not sent"
+        try:
+            live = await self._data.live_quotes(unders, consolidated=False)
+        except Exception as exc:
+            return (
+                {},
+                {},
+                f"underlying prices unavailable ({type(exc).__name__}): option entries are not sent",
+            )
+        spots = {
+            u: q.price
+            for u, q in live.items()
+            if q.price > 0 and q.age_seconds <= self._s.options_max_quote_age_seconds
+        }
+        symbols = {x.symbol for o in trades for x in o.legs} | set(held)
+        try:
+            quotes = await self.option_leg_quotes(sorted(symbols), spots, now)
+        except Exception as exc:
+            return {}, spots, f"option quotes unavailable ({type(exc).__name__}): option entries are not sent"
+        missing = sorted({o.underlying for o in trades if o.opening} - set(spots))
+        return quotes, spots, (f"no fresh price for {', '.join(missing)}" if missing else None)
 
     # ------------------------------------------------------------------ the strategy as a shadow
     async def shadow_plan(

@@ -33,6 +33,18 @@ TradingOrderType = Literal["marketable_limit", "limit", "market"]
 
 # Liquid ETFs the paper-trading strategy ranks next to the stock universe (index, size and sector exposure).
 DEFAULT_TRADING_ETFS = ("SPY", "QQQ", "IWM", "DIA", "XLF", "XLK", "XLE", "SMH")
+# Underlyings whose option chains the Brain reads (deep, liquid chains; a short list keeps data calls few).
+DEFAULT_OPTIONS_UNIVERSE = ("SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "META")
+# Option structures that may reach the paper account without a person enabling them: defined risk only.
+DEFAULT_OPTIONS_STRUCTURES = (
+    "long_call",
+    "long_put",
+    "bull_call_spread",
+    "bear_put_spread",
+    "bull_put_spread",
+    "bear_call_spread",
+    "covered_call",
+)
 # Weights of the opportunity-score components (each component is a cross-sectional z-score).
 DEFAULT_SIGNAL_WEIGHTS: dict[str, float] = {
     "momentum": 0.25,
@@ -666,6 +678,130 @@ class Settings(BaseSettings):
         default=3, ge=0, le=20, description="Focus symbols summarised by the briefing agent per cycle."
     )
 
+    # --- Options (Alpaca PAPER only; defined risk; the same risk engine, order manager and kill switches) -
+    options_enabled: bool = Field(
+        default=True,
+        description="Research options, shadow-trade them on live quotes and let the Brain weigh option "
+        "expressions of its views. Every option order goes through the trading service, the risk engine and "
+        "the order manager exactly like a stock order (paper only).",
+    )
+    options_execution: bool = Field(
+        default=True,
+        description="Send approved option orders to the Alpaca paper account. False: options are researched "
+        "and shadow-traded only (every decision is still recorded and graded).",
+    )
+    options_priority_weight: float = Field(
+        default=0.15,
+        ge=0,
+        le=1,
+        description="How much an option expression is favoured over the equivalent stock trade when both clear "
+        "every check (added to its risk-adjusted score). It never forces an option: one that fails any check, "
+        "or whose expected value per dollar at risk is not positive, is never chosen.",
+    )
+    options_universe: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_OPTIONS_UNIVERSE),
+        description="Underlyings whose chains are read each cycle (liquid names keep spreads tight).",
+    )
+    options_allowed_structures: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_OPTIONS_STRUCTURES),
+        description="Structure families that may be sent to the paper account. Only defined-risk families can "
+        "be listed; naked short options are never executable. Adding a family needs a person (protected).",
+    )
+    options_max_loss_per_trade: float = Field(
+        default=500.0, gt=0, description="Largest possible loss of one new option position, in dollars."
+    )
+    options_max_loss_pct_per_trade: float = Field(
+        default=0.01, gt=0, le=0.1, description="…and as a share of equity (the smaller limit applies)."
+    )
+    options_max_total_risk_pct: float = Field(
+        default=0.06, gt=0, le=0.5, description="The sum of the maximum losses of every option position."
+    )
+    options_max_underlying_risk_pct: float = Field(
+        default=0.02, gt=0, le=0.2, description="The maximum loss of all option positions on one underlying."
+    )
+    options_max_positions: int = Field(default=6, ge=1, le=50, description="Open option structures at most.")
+    options_max_contracts: int = Field(default=10, ge=1, le=200, description="Contracts per leg per order.")
+    options_min_dte: int = Field(
+        default=7, ge=1, le=365, description="No new position closer to expiration (0DTE is research only)."
+    )
+    options_max_dte: int = Field(default=60, ge=1, le=730)
+    options_close_dte: int = Field(
+        default=2,
+        ge=0,
+        le=30,
+        description="Positions are closed (or rolled) at this many days to expiration: never carried into "
+        "expiration, never exercised by QuantPulse.",
+    )
+    options_max_spread_pct: float = Field(
+        default=0.15, gt=0, le=1, description="Widest bid-ask spread of a leg, as a share of its mid."
+    )
+    options_max_quote_age_seconds: float = Field(
+        default=120.0, gt=0, le=3600, description="An option quote older than this is not traded on."
+    )
+    options_min_open_interest: float = Field(default=100.0, ge=0, description="Per leg, for new positions.")
+    options_max_delta_pct: float = Field(
+        default=0.30,
+        gt=0,
+        le=2,
+        description="Net option delta (in dollars of underlying) across the book, as a share of equity.",
+    )
+    options_max_vega_pct: float = Field(
+        default=0.005,
+        gt=0,
+        le=0.1,
+        description="Net option vega (dollars per volatility point) across the book, as a share of equity.",
+    )
+    options_take_profit_pct: float = Field(
+        default=0.5,
+        gt=0,
+        le=1,
+        description="Close a position once it has made this share of its maximum profit.",
+    )
+    options_stop_loss_pct: float = Field(
+        default=0.5,
+        gt=0,
+        le=1,
+        description="Close a position once it has lost this share of its maximum loss.",
+    )
+    options_fee_per_contract: float = Field(
+        default=0.05,
+        ge=0,
+        le=5,
+        description="Assumed fees per contract per side in research and shadow trades.",
+    )
+    options_min_shadow_trades: int = Field(
+        default=10,
+        ge=1,
+        le=500,
+        description="Closed shadow trades (on live quotes) a strategy needs before paper execution at full size.",
+    )
+    options_exploration: bool = Field(
+        default=True,
+        description="A strategy that passed walk-forward and stress validation may trade one contract on the "
+        "paper account (maximum loss capped below) while its shadow record builds, to measure real paper fills. "
+        "Labelled as exploration everywhere; false: only fully validated strategies trade.",
+    )
+    options_exploration_max_loss: float = Field(
+        default=250.0, gt=0, description="Largest possible loss of one exploration trade, in dollars."
+    )
+    options_research_budget_seconds: float = Field(
+        default=180.0, ge=10, le=3600, description="Time the research lab may spend per run (background)."
+    )
+    options_research_time: str = Field(
+        default="16:40", description="HH:MM New York: the daily research run (after the close)."
+    )
+    evolution_enabled: bool = Field(
+        default=True,
+        description="Measure the market daily (volatility, microstructure, options, correlations, liquidity, "
+        "execution, strategies), detect changes, test competing explanations and re-validate what depends on "
+        "what changed.",
+    )
+    evolution_time: str = Field(default="16:50", description="HH:MM New York: the daily evolution scan.")
+    evolution_reference_days: int = Field(
+        default=120, ge=30, le=1000, description="Days of history a recent window is compared against."
+    )
+    evolution_recent_days: int = Field(default=20, ge=5, le=250, description="The recent window, in days.")
+
     # --- Cloud monitoring and alerts (all optional and free; nothing is sent unless a URL is set) ------
     alert_ntfy_url: SecretStr | None = Field(
         default=None,
@@ -718,6 +854,8 @@ class Settings(BaseSettings):
         "picks_universe",
         "picks_recipients",
         "trading_etfs",
+        "options_universe",
+        "options_allowed_structures",
         mode="before",
     )
     @classmethod
@@ -842,7 +980,24 @@ class Settings(BaseSettings):
             )
         return ",".join(dict.fromkeys(symbols))
 
-    @field_validator("watchlist", "picks_universe", "trading_etfs")
+    @field_validator("options_allowed_structures")
+    @classmethod
+    def _defined_risk_structures(cls, value: list[str]) -> list[str]:
+        from quantpulse.options.structures import FAMILIES
+
+        out: list[str] = []
+        for name in (v.strip().lower() for v in value):
+            if not name or name in out:
+                continue
+            family = FAMILIES.get(name)
+            if family is None or name == "stock":
+                raise ValueError(f"unknown option structure {name!r}")
+            if not family.defined_risk:
+                raise ValueError(f"{name} has unlimited risk: it can never be executed")
+            out.append(name)
+        return out
+
+    @field_validator("watchlist", "picks_universe", "trading_etfs", "options_universe")
     @classmethod
     def _normalise_symbols(cls, value: list[str]) -> list[str]:
         out: list[str] = []
@@ -861,7 +1016,13 @@ class Settings(BaseSettings):
         return [adapter.validate_python(v) for v in value]
 
     @field_validator(
-        "picks_send_time", "sandbox_trade_time", "sandbox_mark_time", "predictions_log_time", "trading_time"
+        "picks_send_time",
+        "sandbox_trade_time",
+        "sandbox_mark_time",
+        "predictions_log_time",
+        "trading_time",
+        "options_research_time",
+        "evolution_time",
     )
     @classmethod
     def _validate_time(cls, value: str) -> str:

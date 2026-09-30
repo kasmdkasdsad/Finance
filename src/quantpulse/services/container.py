@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 import httpx
@@ -14,6 +14,7 @@ from quantpulse.config import Settings
 from quantpulse.core import runtime
 from quantpulse.core.cache import TTLCache
 from quantpulse.core.clock import Clock, SystemClock
+from quantpulse.core.errors import ProviderNoData
 from quantpulse.core.gateway import DataGateway
 from quantpulse.core.http import HttpClient
 from quantpulse.core.jobs import JobRegistry
@@ -22,7 +23,9 @@ from quantpulse.core.rate_limit import TokenBucket
 from quantpulse.db import migrate
 from quantpulse.db.session import Database, PoolSettings
 from quantpulse.logging_config import log_event
+from quantpulse.options.data import OptionsMarketDataProvider
 from quantpulse.providers.alpaca import Alpaca
+from quantpulse.providers.alpaca_options import AlpacaOptionsProvider
 from quantpulse.providers.alpaca_trading import AlpacaPaperBroker
 from quantpulse.providers.eia import EIA
 from quantpulse.providers.espn import ESPN
@@ -106,6 +109,7 @@ class Container:
         transport: httpx.AsyncBaseTransport | None = None,
         http: HttpClient | None = None,
         broker: AlpacaPaperBroker | None = None,
+        options_data: OptionsMarketDataProvider | None = None,
     ) -> None:
         self.settings = settings
         self.clock = clock or SystemClock()
@@ -212,14 +216,35 @@ class Container:
             ttl=timedelta(seconds=settings.brain_lease_seconds),
             db_time=isinstance(self.clock, SystemClock),
         )
+        trading_data = TradingDataLoader(
+            settings, self.clock, self.market, self.model, self.options, self.reference
+        )
+
+        async def underlying_quote(symbol: str) -> tuple[float, datetime | None]:
+            q = (await trading_data.live_quotes([symbol], consolidated=False)).get(symbol.upper())
+            if q is None:
+                raise ProviderNoData("alpaca_options", f"no live price for {symbol}")
+            return q.price, q.timestamp
+
+        # option chains and quotes: Alpaca's options data (the free indicative feed unless QP_ALPACA_OPTIONS_FEED
+        # says opra), read with the paper keys; contracts come from the paper trading API
+        self.options_data = options_data or AlpacaOptionsProvider(
+            self.http,
+            _secret(settings.alpaca_api_key_id),
+            _secret(settings.alpaca_api_secret_key),
+            feed=settings.alpaca_options_feed,
+            underlying_quote=underlying_quote,
+            clock=self.clock.now,
+        )
         self.trading = TradingService(
             settings,
             self.db,
             self.clock,
             self.broker,
-            TradingDataLoader(settings, self.clock, self.market, self.model, self.options, self.reference),
+            trading_data,
             self.jobs,
             lease=self.lease,
+            options_data=self.options_data if settings.options_enabled else None,
         )
         # The brain: specialist agents over a read-only view of the paper account. It proposes; the trading
         # service's deterministic risk engine is the only path to an order.

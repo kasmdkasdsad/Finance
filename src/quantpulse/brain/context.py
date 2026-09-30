@@ -81,8 +81,10 @@ class PortfolioState:
     available: bool
     error: str | None = None
     account: BrokerAccount | None = None
-    positions: dict[str, BrokerPosition] = field(default_factory=dict)
+    positions: dict[str, BrokerPosition] = field(default_factory=dict)  # shares only
     open_orders: list[BrokerOrder] = field(default_factory=list)
+    # option contracts held (the Options Brain manages them; the stock agents never see them as stocks)
+    option_positions: dict[str, BrokerPosition] = field(default_factory=dict)
 
     @property
     def equity(self) -> float:
@@ -110,6 +112,10 @@ class PortfolioState:
                     "weight": round(self.weight(s), 4),
                 }
                 for s, p in self.positions.items()
+            },
+            "option_positions": {
+                s: {"qty": p.qty, "market_value": round(p.market_value, 2)}
+                for s, p in self.option_positions.items()
             },
             "open_orders": len(self.open_orders),
         }

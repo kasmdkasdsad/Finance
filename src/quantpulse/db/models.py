@@ -545,10 +545,16 @@ class BrokerOrderRow(Base):
     cycle_id: Mapped[int | None] = mapped_column(
         ForeignKey("trading_cycles.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    symbol: Mapped[str] = mapped_column(String(16))
+    # a stock, an option contract (OCC, 21 characters) or a multi-leg order's record symbol (AAPL:MLEG)
+    symbol: Mapped[str] = mapped_column(String(32))
     side: Mapped[str] = mapped_column(String(4))
     quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
     notional: Mapped[float | None] = mapped_column(Float, nullable=True)
+    asset_class: Mapped[str] = mapped_column(String(12), default="us_equity", server_default="us_equity")
+    order_class: Mapped[str] = mapped_column(String(8), default="simple", server_default="simple")
+    position_intent: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # a multi-leg order's legs: [{symbol, side, ratio_qty, position_intent, filled_qty, filled_avg_price}]
+    legs: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
     order_type: Mapped[str] = mapped_column(String(20))
     time_in_force: Mapped[str] = mapped_column(String(8), default="day")
     limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -579,7 +585,7 @@ class TradingEventRow(Base):
         ForeignKey("trading_cycles.id", ondelete="SET NULL"), nullable=True, index=True
     )
     kind: Mapped[str] = mapped_column(String(40))
-    symbol: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
     client_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     message: Mapped[str] = mapped_column(Text)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -1259,5 +1265,7 @@ class ServiceLeaseRow(Base):
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
-# the options layer (revision 0023) lives in its own module; importing it registers its tables
+# the options layer (revision 0023) and market evolution with the model registry (revision 0024) live in their
+# own modules; importing them registers their tables
+from quantpulse.db import evolution_models as evolution_models  # noqa: E402
 from quantpulse.db import options_models as options_models  # noqa: E402

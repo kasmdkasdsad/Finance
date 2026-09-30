@@ -134,8 +134,9 @@ class Perception:
         return PortfolioState(
             available=True,
             account=account,
-            positions={p.symbol: p for p in positions},
+            positions={p.symbol: p for p in positions if not p.is_option},
             open_orders=[o for o in orders if o.is_open],
+            option_positions={p.symbol: p for p in positions if p.is_option},
         )
 
     async def _market_open(self, now: datetime, errors: dict[str, str]) -> tuple[bool, str, float | None]:

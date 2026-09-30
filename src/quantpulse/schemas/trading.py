@@ -226,6 +226,12 @@ class ProposedTradeOut(StrictModel):
     quote_age_seconds: float | None = None
     quote_source: str | None = None
     submit_latency_ms: float | None = None
+    # options: the record symbol is the contract, or AAPL:MLEG for a multi-leg order (its legs below)
+    asset_class: str = "us_equity"
+    family: str | None = None
+    option_key: str | None = None
+    legs: list[dict[str, Any]] | None = None
+    exploration: bool = False
 
 
 class SignalOut(StrictModel):

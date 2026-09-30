@@ -64,7 +64,7 @@ DATA_URL = "https://data.alpaca.markets"
 MIN_TOKEN = 32
 PLACEHOLDERS = ("change-me", "changeme", "replace", "your-", "your_", "example", "xxxxxxxx", "secret")
 # Protected risk controls: (setting, "max" = may not rise above the shipped default, "min" = may not fall
-# below it, "equal" = must keep it).
+# below it, "equal" = must keep it, "subset" = may drop items but never add one).
 PROTECTED: tuple[tuple[str, str], ...] = (
     ("trading_require_live_data", "equal"),
     ("trading_scheduler_requires_arming", "equal"),
@@ -84,6 +84,23 @@ PROTECTED: tuple[tuple[str, str], ...] = (
     ("trading_min_price", "min"),
     ("trading_min_dollar_volume", "min"),
     ("trading_cash_buffer_pct", "min"),
+    ("options_allowed_structures", "subset"),
+    ("options_max_loss_per_trade", "max"),
+    ("options_max_loss_pct_per_trade", "max"),
+    ("options_max_total_risk_pct", "max"),
+    ("options_max_underlying_risk_pct", "max"),
+    ("options_max_positions", "max"),
+    ("options_max_contracts", "max"),
+    ("options_max_dte", "max"),
+    ("options_max_spread_pct", "max"),
+    ("options_max_quote_age_seconds", "max"),
+    ("options_max_delta_pct", "max"),
+    ("options_max_vega_pct", "max"),
+    ("options_exploration_max_loss", "max"),
+    ("options_stop_loss_pct", "max"),
+    ("options_min_dte", "min"),
+    ("options_close_dte", "min"),
+    ("options_min_open_interest", "min"),
 )
 
 
@@ -299,6 +316,7 @@ def run(settings: Settings, environ: Mapping[str, str] | None = None) -> Report:
             (rule == "equal" and value != shipped)
             or (rule == "max" and value > shipped)
             or (rule == "min" and value < shipped)
+            or (rule == "subset" and not set(value) <= set(shipped))
         ):
             looser.append(f"QP_{name.upper()}={value} (protected: {shipped})")
     add(

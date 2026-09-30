@@ -22,9 +22,10 @@ Reconciliation
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time as _time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -40,10 +41,11 @@ from quantpulse.providers.alpaca_trading import (
     BrokerError,
     BrokerOrder,
     DuplicateClientOrderId,
+    OrderLeg,
     OrderRejected,
     OrderSpec,
 )
-from quantpulse.services.trading_risk import OrderIntent
+from quantpulse.services.trading_risk import OptionOrderIntent, OrderIntent
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +121,16 @@ def client_order_id(slot: str, symbol: str, side: str) -> str:
     return f"{PREFIX}-{slot}-{symbol.upper().replace('.', '_')}-{side[:1].lower()}"
 
 
+def option_client_order_id(slot: str, o: OptionOrderIntent) -> str:
+    """Deterministic id for (cycle slot, the exact legs and quantity, opening or closing): the same option
+    order in the same slot can only ever be sent once, and two different structures never share an id."""
+    legs = "|".join(
+        f"{x.symbol}:{x.side}:{x.ratio}:{x.position_intent}" for x in sorted(o.legs, key=lambda x: x.symbol)
+    )
+    digest = hashlib.sha256(f"{legs}#{o.qty}#{o.opening}".encode()).hexdigest()[:10]
+    return f"{PREFIX}-{slot}-{o.underlying.upper().replace('.', '_')}-o{digest}-{o.side[:1].lower()}"
+
+
 def is_ours(cid: str) -> bool:
     return cid.startswith(f"{PREFIX}-")
 
@@ -178,6 +190,22 @@ def _apply(row: BrokerOrderRow, o: BrokerOrder, now: datetime) -> list[tuple[str
         row.quantity = o.qty
     if o.limit_price is not None:
         row.limit_price = o.limit_price
+    row.asset_class = o.asset_class
+    row.order_class = o.order_class
+    row.position_intent = o.position_intent or row.position_intent
+    if o.legs:
+        row.legs = [
+            {
+                "symbol": x.symbol,
+                "side": x.side,
+                "ratio_qty": x.ratio_qty,
+                "position_intent": x.position_intent,
+                "status": x.status,
+                "filled_qty": x.filled_qty,
+                "filled_avg_price": x.filled_avg_price,
+            }
+            for x in o.legs
+        ]
     row.updated_at = now
     label = f"{row.side.upper()} {row.quantity or 0:g} {row.symbol}"
     if o.status != before_status or o.filled_qty > before_filled + 1e-9:
@@ -271,11 +299,8 @@ class OrderManager:
             return base
 
         # 2. send it once
-        order: BrokerOrder | None = None
-        error: str | None = None
-        status = PENDING_SUBMIT
-        try:
-            spec = OrderSpec(
+        order, status, error = await self._send(
+            lambda: OrderSpec(
                 symbol=intent.symbol,
                 side="buy" if intent.side == "buy" else "sell",
                 qty=None if notional is not None else intent.qty,
@@ -283,22 +308,9 @@ class OrderManager:
                 client_order_id=cid,
                 limit_price=limit_price,
                 notional=notional,
-            )
-            order = await self._broker.submit(spec)
-        except ValueError as exc:  # the order spec itself is invalid: nothing was sent
-            status, error = SUBMIT_FAILED, f"invalid order (never sent): {exc}"
-        except DuplicateClientOrderId:
-            order = await self._lookup(cid)  # an earlier attempt got through: adopt it
-            error = "Alpaca already had this client order id; adopted the existing order"
-        except OrderRejected as exc:
-            status, error = "rejected", str(exc)
-        except BrokerError as exc:
-            if exc.ambiguous:
-                order = await self._lookup(cid)
-                if order is None:
-                    status, error = SUBMIT_UNKNOWN, f"{exc} — left for reconciliation, not resent"
-            else:
-                status, error = SUBMIT_FAILED, str(exc)
+            ),
+            cid,
+        )
         size = f"${notional:,.2f} of" if notional is not None else f"{intent.qty:g}"
 
         # 3. record the outcome
@@ -350,6 +362,149 @@ class OrderManager:
         return Submission(
             cid, intent.symbol, intent.side, status, submitted=order is not None, order=order, error=error
         )
+
+    async def submit_option(
+        self,
+        intent: OptionOrderIntent,
+        *,
+        cid: str,
+        cycle_id: int | None,
+        strategy: str = STRATEGY,
+    ) -> Submission:
+        """Send one risk-approved option order exactly once — the same write-ahead record, the same
+        no-blind-resubmission rule and the same reconciliation as every stock order. Always a DAY limit order
+        in whole contracts; a multi-leg order goes as one ``mleg`` order (its legs fill together or not at
+        all)."""
+        now = self._clock.now()
+        base = Submission(cid, intent.symbol, intent.side, PENDING_SUBMIT, submitted=False)
+        legs_json = [
+            {"symbol": x.symbol, "side": x.side, "ratio_qty": x.ratio, "position_intent": x.position_intent}
+            for x in intent.legs
+        ]
+        single = len(intent.legs) == 1
+        try:
+            async with self._db.session() as s:
+                existing = await repo.get_broker_order(s, cid)
+                if existing is not None:
+                    base.status, base.duplicate, base.error = existing.status, True, DUPLICATE_NOTE
+                    await repo.add_trading_event(s, "duplicate_prevented", f"{cid}: already sent, not resending",
+                                                 now, cycle_id=cycle_id, symbol=intent.symbol, client_order_id=cid)  # fmt: skip
+                    return base
+                s.add(
+                    BrokerOrderRow(
+                        client_order_id=cid,
+                        cycle_id=cycle_id,
+                        symbol=intent.symbol,
+                        side=intent.side,
+                        quantity=float(intent.qty),
+                        notional=round(intent.notional, 2),
+                        asset_class="us_option",
+                        order_class="simple" if single else "mleg",
+                        position_intent=intent.legs[0].position_intent if single else None,
+                        legs=None if single else legs_json,
+                        order_type="limit",
+                        time_in_force="day",
+                        limit_price=intent.limit_price,
+                        status=PENDING_SUBMIT,
+                        filled_quantity=0.0,
+                        strategy=strategy,
+                        kind=intent.kind,
+                        signal_score=intent.score,
+                        reason=intent.reason,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                await s.flush()
+        except IntegrityError:
+            base.duplicate, base.error = True, "a concurrent run already recorded this order: not resending"
+            return base
+
+        def spec() -> OrderSpec:
+            if single:
+                x = intent.legs[0]
+                return OrderSpec(
+                    symbol=x.symbol,
+                    side="buy" if x.side == "buy" else "sell",
+                    qty=float(intent.qty),
+                    order_type="limit",
+                    client_order_id=cid,
+                    limit_price=intent.limit_price,
+                    asset_class="us_option",
+                    position_intent=x.position_intent,  # type: ignore[arg-type]
+                )
+            return OrderSpec(
+                symbol=intent.symbol,
+                side="buy" if intent.side == "buy" else "sell",
+                qty=float(intent.qty),
+                order_type="limit",
+                client_order_id=cid,
+                limit_price=intent.limit_price,
+                asset_class="us_option",
+                legs=tuple(
+                    OrderLeg(x.symbol, "buy" if x.side == "buy" else "sell", x.ratio, x.position_intent)  # type: ignore[arg-type]
+                    for x in intent.legs
+                ),
+            )
+
+        order, status, error = await self._send(spec, cid)
+        label = f"{intent.family} {intent.qty}× {intent.symbol} @ {intent.limit_price:+.2f}"
+
+        async with self._db.session() as s:
+            row = await repo.get_broker_order(s, cid)
+            assert row is not None
+            events: list[tuple[str, str]] = []
+            if order is not None:
+                row.status = "new"
+                events = [("order_submitted", f"{label} sent: Alpaca order {order.id} ({order.status})")]
+                events += _apply(row, order, now)
+                status = order.status
+            else:
+                row.status, row.updated_at = status, now
+            row.error = error
+            if status == "rejected":
+                events.append(("order_rejected", f"{label} rejected: {error}"))
+            elif status == SUBMIT_UNKNOWN:
+                events.append(("order_unknown", f"{label}: {error}"))
+            elif status == SUBMIT_FAILED:
+                events.append(("order_failed", f"{label}: {error}"))
+            for kind, message in events:
+                await repo.add_trading_event(
+                    s, kind, message, now, cycle_id=cycle_id, symbol=intent.symbol, client_order_id=cid,
+                    details={"kind": intent.kind, "reason": intent.reason, "family": intent.family,
+                             "legs": legs_json, "alpaca_order_id": order.id if order is not None else None,
+                             "status": status, "exploration": intent.exploration},
+                )  # fmt: skip
+        return Submission(
+            cid, intent.symbol, intent.side, status, submitted=order is not None, order=order, error=error
+        )
+
+    async def _send(
+        self, build: Callable[[], OrderSpec], cid: str
+    ) -> tuple[BrokerOrder | None, str, str | None]:
+        """The one place an order leaves for Alpaca, exactly once: (the order Alpaca holds, its status, an
+        error). An invalid spec is never sent; an ambiguous failure is looked up by its client order id and
+        never resent."""
+        order: BrokerOrder | None = None
+        error: str | None = None
+        status = PENDING_SUBMIT
+        try:
+            order = await self._broker.submit(build())
+        except ValueError as exc:  # the order spec itself is invalid: nothing was sent
+            status, error = SUBMIT_FAILED, f"invalid order (never sent): {exc}"
+        except DuplicateClientOrderId:
+            order = await self._lookup(cid)  # an earlier attempt got through: adopt it
+            error = "Alpaca already had this client order id; adopted the existing order"
+        except OrderRejected as exc:
+            status, error = "rejected", str(exc)
+        except BrokerError as exc:
+            if exc.ambiguous:
+                order = await self._lookup(cid)
+                if order is None:
+                    status, error = SUBMIT_UNKNOWN, f"{exc} — left for reconciliation, not resent"
+            else:
+                status, error = SUBMIT_FAILED, str(exc)
+        return order, status, error
 
     async def _lookup(self, cid: str) -> BrokerOrder | None:
         try:
@@ -527,7 +682,11 @@ class OrderManager:
         return out
 
     async def unresolved_symbols(self) -> set[str]:
-        """Symbols with a local order whose fate is still unknown (never trade them until resolved)."""
+        """Symbols (and option legs) with a local order whose fate is still unknown (never trade them until
+        resolved)."""
         async with self._db.session() as s:
             rows = await repo.broker_orders(s, 500, statuses=list(UNRESOLVED))
-        return {r.symbol for r in rows}
+        out = {r.symbol for r in rows}
+        for r in rows:
+            out.update(str(x.get("symbol")) for x in (r.legs or []) if x.get("symbol"))
+        return out

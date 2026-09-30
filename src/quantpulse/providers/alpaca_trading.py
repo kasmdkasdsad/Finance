@@ -9,6 +9,12 @@ Paper only, by construction
 The account, positions, orders and fills reported here are authoritative: QuantPulse's own database is
 only a record, reconciled against this broker.
 
+Options go through the same client and the same checks: a single-leg option order or a multi-leg (``mleg``)
+order of two to four option legs, always a DAY *limit* order in whole contracts, each leg with its position
+intent (buy/sell to open/close). A multi-leg order may never sell more contracts of a kind (calls, puts)
+than it buys: no naked short leg can be expressed here (the risk engine checks coverage by shares and cash
+as well).
+
 The SDK is synchronous (``requests``); every call runs in a worker thread with a hard HTTP timeout.
 Credentials are held by the SDK client only; they never appear in errors, logs or ``repr``.
 """
@@ -17,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,15 +32,17 @@ from typing import Any, Literal, TypeVar
 import requests
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
+from alpaca.trading.enums import OrderClass, OrderSide, PositionIntent, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
     ClosePositionRequest,
     GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
+    OptionLegRequest,
 )
 
 from quantpulse.core.errors import QuantPulseError
+from quantpulse.options.contracts import is_option_symbol, parse_occ
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +57,17 @@ QTY_DECIMALS = 9
 T = TypeVar("T")
 Side = Literal["buy", "sell"]
 OrderType = Literal["market", "limit"]
+AssetClass = Literal["us_equity", "us_option"]
+Intent = Literal["buy_to_open", "buy_to_close", "sell_to_open", "sell_to_close"]
+INTENTS: tuple[Intent, ...] = ("buy_to_open", "buy_to_close", "sell_to_open", "sell_to_close")
+MAX_LEGS = 4
+MLEG_MARK = ":MLEG"  # a multi-leg order's record symbol: its underlying and this mark (AAPL:MLEG)
+
+
+def mleg_symbol(leg_symbols: list[str] | tuple[str, ...]) -> str:
+    """The symbol QuantPulse records a multi-leg order under (Alpaca reports none for it)."""
+    roots = sorted({parse_occ(x).underlying for x in leg_symbols if is_option_symbol(x)})
+    return (roots[0] if len(roots) == 1 else "MULTI") + MLEG_MARK
 
 
 # ----------------------------------------------------------------------------- errors
@@ -114,6 +134,10 @@ class BrokerAccount:
     pattern_day_trader: bool
     daytrade_count: int
     multiplier: float
+    # the account's effective options level (0 none, 1 covered calls / cash-secured puts, 2 long calls and
+    # puts, 3 spreads) and options buying power; None when Alpaca does not report them
+    options_trading_level: int | None = None
+    options_buying_power: float | None = None
 
     @property
     def day_pl(self) -> float:
@@ -142,6 +166,25 @@ class BrokerPosition:
     unrealized_plpc: float
     unrealized_intraday_pl: float
     lastday_price: float | None
+    asset_class: str = "us_equity"
+
+    @property
+    def is_option(self) -> bool:
+        return self.asset_class == "us_option" or is_option_symbol(self.symbol)
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerOrderLeg:
+    """One leg of a multi-leg option order, as Alpaca reports it."""
+
+    symbol: str
+    side: str
+    ratio_qty: float
+    position_intent: str | None
+    status: str
+    qty: float | None
+    filled_qty: float
+    filled_avg_price: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +208,19 @@ class BrokerOrder:
     canceled_at: datetime | None
     expired_at: datetime | None
     failed_at: datetime | None
+    asset_class: str = "us_equity"
+    order_class: str = "simple"
+    position_intent: str | None = None
+    legs: tuple[BrokerOrderLeg, ...] = ()
+
+    @property
+    def is_option(self) -> bool:
+        return self.asset_class == "us_option" or bool(self.legs) or is_option_symbol(self.symbol)
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        """Every symbol the order trades: its legs' for a multi-leg order, else its own."""
+        return tuple(leg.symbol for leg in self.legs) if self.legs else (self.symbol,)
 
     @property
     def is_open(self) -> bool:
@@ -184,12 +240,58 @@ class MarketClock:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderLeg:
+    """One leg of a multi-leg option order: ``ratio_qty`` contracts per unit of the order's quantity."""
+
+    symbol: str
+    side: Side
+    ratio_qty: int
+    position_intent: Intent
+
+    def __post_init__(self) -> None:
+        if not is_option_symbol(self.symbol):
+            raise ValueError(f"a leg must be an option contract (OCC symbol), not {self.symbol!r}")
+        if self.side not in ("buy", "sell"):
+            raise ValueError("a leg's side is buy or sell")
+        if self.position_intent not in INTENTS:
+            raise ValueError(f"unknown position intent {self.position_intent!r}")
+        if not self.position_intent.startswith(self.side):
+            raise ValueError(f"a {self.side} leg cannot {self.position_intent.replace('_', ' ')}")
+        if isinstance(self.ratio_qty, bool) or int(self.ratio_qty) != self.ratio_qty or self.ratio_qty < 1:
+            raise ValueError("a leg's ratio is a whole number of contracts, at least 1")
+
+
+def naked_short_legs(legs: tuple[OrderLeg, ...] | list[OrderLeg]) -> list[str]:
+    """Kinds (call, put) of which a multi-leg order *opens* more short contracts than long ones."""
+    out = []
+    for kind in ("call", "put"):
+        short = sum(
+            x.ratio_qty
+            for x in legs
+            if x.position_intent == "sell_to_open" and parse_occ(x.symbol).kind == kind
+        )
+        long = sum(
+            x.ratio_qty
+            for x in legs
+            if x.position_intent == "buy_to_open" and parse_occ(x.symbol).kind == kind
+        )
+        if short > long:
+            out.append(kind)
+    return out
+
+
+@dataclass(frozen=True, slots=True)
 class OrderSpec:
     """One order as QuantPulse wants it placed (always a regular-hours DAY order).
 
-    Exactly one of ``qty`` (shares, fractional allowed) and ``notional`` (dollars, market orders only) is
-    set. Quantities are rounded to Alpaca's 9 decimal places, so a float such as 0.30000000000000004 is
-    sent as 0.3."""
+    Stocks: exactly one of ``qty`` (shares, fractional allowed) and ``notional`` (dollars, market orders
+    only) is set. Quantities are rounded to Alpaca's 9 decimal places, so a float such as
+    0.30000000000000004 is sent as 0.3.
+
+    Options (``asset_class="us_option"``): a limit order for a whole number of contracts, with a position
+    intent. A multi-leg order carries two to four ``legs`` (unique contracts); its ``symbol`` is the record
+    symbol (``AAPL:MLEG``) and its ``limit_price`` the net price per unit — positive a debit paid,
+    negative a credit received, as Alpaca expects."""
 
     symbol: str
     side: Side
@@ -198,8 +300,22 @@ class OrderSpec:
     client_order_id: str
     limit_price: float | None = None
     notional: float | None = None
+    asset_class: AssetClass = "us_equity"
+    position_intent: Intent | None = None
+    legs: tuple[OrderLeg, ...] = ()
 
     def __post_init__(self) -> None:
+        if not 1 <= len(self.client_order_id) <= 128:
+            raise ValueError("client order ids are 1-128 characters")
+        if self.asset_class == "us_option":
+            self._check_option()
+            return
+        if self.asset_class != "us_equity":
+            raise ValueError(f"unknown asset class {self.asset_class!r}")
+        if self.legs or self.position_intent is not None:
+            raise ValueError("legs and position intents are for option orders only")
+        if is_option_symbol(self.symbol):
+            raise ValueError(f"{self.symbol} is an option contract: send it as an option order")
         if (self.qty is None) == (self.notional is None):
             raise ValueError("an order needs exactly one of a quantity or a notional amount")
         if self.qty is not None:
@@ -214,8 +330,39 @@ class OrderSpec:
                 raise ValueError("a notional (dollar-amount) order must be a market order")
         if self.order_type == "limit" and (self.limit_price is None or not self.limit_price > 0):
             raise ValueError("a limit order needs a positive limit price")
-        if not 1 <= len(self.client_order_id) <= 128:
-            raise ValueError("client order ids are 1-128 characters")
+
+    def _check_option(self) -> None:
+        if self.order_type != "limit":
+            raise ValueError("option orders are limit orders only")
+        if self.notional is not None:
+            raise ValueError("option orders are sized in contracts, never in dollars")
+        if self.qty is None or int(self.qty) != self.qty or not self.qty >= 1:
+            raise ValueError("an option order is for a whole number of contracts, at least 1")
+        object.__setattr__(self, "qty", float(int(self.qty)))
+        price = self.limit_price
+        if price is None or not math.isfinite(price):
+            raise ValueError("an option order needs a limit price")
+        if self.legs:
+            if not 2 <= len(self.legs) <= MAX_LEGS:
+                raise ValueError(f"a multi-leg order has 2 to {MAX_LEGS} legs")
+            if len({x.symbol for x in self.legs}) != len(self.legs):
+                raise ValueError("a multi-leg order's legs must be different contracts")
+            if self.position_intent is not None:
+                raise ValueError("a multi-leg order's intents are on its legs")
+            naked = naked_short_legs(self.legs)
+            if naked:
+                raise ValueError(f"the order would open naked short {' and '.join(naked)}s: refused")
+            if round(abs(price), 2) == 0 and price != 0:
+                raise ValueError("the net limit price rounds to zero")
+            return
+        if not is_option_symbol(self.symbol):
+            raise ValueError(f"{self.symbol!r} is not an option contract (OCC symbol)")
+        if self.position_intent not in INTENTS:
+            raise ValueError("a single-leg option order needs its position intent (buy/sell to open/close)")
+        if not self.position_intent.startswith(self.side):
+            raise ValueError(f"a {self.side} order cannot {self.position_intent.replace('_', ' ')}")
+        if not price > 0:
+            raise ValueError("a single-leg option limit price is positive")
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -237,6 +384,13 @@ def _opt(value: Any) -> float | None:
         return None
 
 
+def _int(value: Any) -> int | None:
+    try:
+        return None if value is None or value == "" else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _enum(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
@@ -246,10 +400,42 @@ def _mask(account_number: str | None) -> str:
     return f"…{s[-4:]}" if len(s) > 4 else s
 
 
+def _option_request(spec: OrderSpec, side: OrderSide) -> LimitOrderRequest:
+    price = round(float(spec.limit_price or 0.0), 2)
+    if spec.legs:
+        return LimitOrderRequest(
+            qty=spec.qty,
+            order_class=OrderClass.MLEG,
+            time_in_force=TimeInForce.DAY,
+            limit_price=price,
+            client_order_id=spec.client_order_id,
+            legs=[
+                OptionLegRequest(
+                    symbol=x.symbol,
+                    ratio_qty=x.ratio_qty,
+                    side=OrderSide.BUY if x.side == "buy" else OrderSide.SELL,
+                    position_intent=PositionIntent(x.position_intent),
+                )
+                for x in spec.legs
+            ],
+        )
+    return LimitOrderRequest(
+        symbol=spec.symbol,
+        qty=spec.qty,
+        side=side,
+        time_in_force=TimeInForce.DAY,
+        limit_price=price,
+        client_order_id=spec.client_order_id,
+        position_intent=PositionIntent(spec.position_intent or ""),
+    )
+
+
 def order_request(spec: OrderSpec) -> MarketOrderRequest | LimitOrderRequest:
     """The SDK request for ``spec``; ``InvalidOrder`` (never sent) if the SDK refuses to build it."""
     side = OrderSide.BUY if spec.side == "buy" else OrderSide.SELL
     try:
+        if spec.asset_class == "us_option":
+            return _option_request(spec, side)
         if spec.order_type == "limit":
             return LimitOrderRequest(
                 symbol=spec.symbol,
@@ -293,6 +479,8 @@ def account_from_sdk(a: Any) -> BrokerAccount:
         pattern_day_trader=bool(a.pattern_day_trader),
         daytrade_count=int(a.daytrade_count or 0),
         multiplier=_f(a.multiplier, 1.0),
+        options_trading_level=_int(getattr(a, "options_trading_level", None)),
+        options_buying_power=_opt(getattr(a, "options_buying_power", None)),
     )
 
 
@@ -310,15 +498,42 @@ def position_from_sdk(p: Any) -> BrokerPosition:
         unrealized_plpc=_f(p.unrealized_plpc),
         unrealized_intraday_pl=_f(p.unrealized_intraday_pl),
         lastday_price=_opt(p.lastday_price),
+        asset_class=_enum(getattr(p, "asset_class", None)) or "us_equity",
+    )
+
+
+def _leg_from_sdk(o: Any) -> BrokerOrderLeg:
+    return BrokerOrderLeg(
+        symbol=o.symbol or "",
+        side=_enum(o.side),
+        ratio_qty=_f(getattr(o, "ratio_qty", None), 1.0),
+        position_intent=_enum(getattr(o, "position_intent", None)) or None,
+        status=_enum(o.status),
+        qty=_opt(o.qty),
+        filled_qty=_f(o.filled_qty),
+        filled_avg_price=_opt(o.filled_avg_price),
     )
 
 
 def order_from_sdk(o: Any) -> BrokerOrder:
+    legs = tuple(_leg_from_sdk(x) for x in (getattr(o, "legs", None) or []))
+    order_class = _enum(getattr(o, "order_class", None)) or "simple"
+    mleg = order_class == "mleg"
+    symbol = o.symbol or ""
+    if mleg and legs:
+        symbol = mleg_symbol([x.symbol for x in legs])
+    asset_class = _enum(getattr(o, "asset_class", None)) or ("us_option" if mleg else "us_equity")
+    if is_option_symbol(symbol):
+        asset_class = "us_option"
+    side = _enum(o.side)
+    if mleg and not side:
+        # a multi-leg order has no side of its own: a debit is paid (buy), a credit received (sell)
+        side = "sell" if (_opt(o.limit_price) or 0.0) < 0 else "buy"
     return BrokerOrder(
         id=str(o.id),
         client_order_id=o.client_order_id,
-        symbol=o.symbol or "",
-        side=_enum(o.side),
+        symbol=symbol,
+        side=side,
         order_type=_enum(o.order_type or o.type),
         time_in_force=_enum(o.time_in_force),
         status=_enum(o.status),
@@ -334,6 +549,10 @@ def order_from_sdk(o: Any) -> BrokerOrder:
         canceled_at=o.canceled_at,
         expired_at=o.expired_at,
         failed_at=o.failed_at,
+        asset_class=asset_class,
+        order_class=order_class,
+        position_intent=_enum(getattr(o, "position_intent", None)) or None,
+        legs=legs,
     )
 
 
@@ -491,7 +710,8 @@ class AlpacaPaperBroker:
             limit=min(max(limit, 1), 500),
             after=after,
             symbols=symbols,
-            nested=False,
+            # a multi-leg order's legs come nested under it (never as orders of their own)
+            nested=True,
         )
         raw = await self._call("orders", lambda c: c.get_orders(filter=request))
         return [order_from_sdk(o) for o in raw]

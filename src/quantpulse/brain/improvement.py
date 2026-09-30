@@ -96,6 +96,7 @@ PROTECTED = (
     "QP_BRAIN_KILL_SWITCH",
     "QP_BRAIN_MODE",
     "QP_BRAIN_MAX_",  # the Brain's own caps (new positions per cycle, …), protected like the trading limits
+    "QP_OPTIONS_",  # every options limit, the structures allowed and the execution switch
 )
 STATUSES = ("proposed", "testing", "validated", "rejected", "applied", "protected_review")
 PROTECTED_NOTE = (
