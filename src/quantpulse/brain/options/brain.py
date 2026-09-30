@@ -22,7 +22,7 @@ import logging
 import math
 import random
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -174,8 +174,11 @@ class OptionsBrain:
         market: Any,
         lab: OptionsLabService,
         reference: Any = None,
+        refresh_orders: Callable[[list[str]], Awaitable[Any]] | None = None,
     ) -> None:
         self._s = settings
+        # reads working orders' status from Alpaca into the order record (a lookup, never an order)
+        self._refresh_orders = refresh_orders
         self._clock = clock
         self._db = db
         self.data = data
@@ -289,6 +292,24 @@ class OptionsBrain:
             if ctx is not None
             else None
         )
+        waiting = [
+            cid
+            for r in rows
+            if r.mode == "paper"
+            for cid in (
+                r.client_order_id
+                if r.status == "pending"
+                else r.exit_client_order_id
+                if r.status == "closing"
+                else None,
+            )
+            if cid
+        ]
+        if waiting and self._refresh_orders is not None:
+            try:
+                await self._refresh_orders(waiting)
+            except Exception as exc:  # the record stays as it was; the next cycle tries again
+                cyc.notes.append(f"working option orders could not be refreshed ({type(exc).__name__})")
         for row in rows:
             try:
                 if row.mode == "paper":
@@ -578,9 +599,10 @@ class OptionsBrain:
                        paper_allowed: bool) -> None:  # fmt: skip
         s = self._s
         open_rows = await self._open_positions()
-        book: dict[str, list[int]] = defaultdict(list)
+        # the paper and shadow books are separate: shadow evidence never blocks (or stands in for) a paper trade
+        books: dict[str, dict[str, list[int]]] = {"paper": defaultdict(list), "shadow": defaultdict(list)}
         for r in open_rows:
-            book[r.underlying].append(r.id)
+            books["paper" if r.mode == "paper" else "shadow"][r.underlying].append(r.id)
         weights = await self._weights()
         decays = await self._decays()
         rng = random.Random(now.date().toordinal())
@@ -627,7 +649,8 @@ class OptionsBrain:
                 )
                 risk = self._preview(intent, ctx, view, now) if intent is not None else None
                 cc = A.CandidateContext(view=view, version=v, genome=g, cand=pick, now=now,
-                                        stock_view=_stock_view(consensus.get(u)), book=book,
+                                        stock_view=_stock_view(consensus.get(u)),
+                                        book=books["paper" if intent is not None else "shadow"],
                                         weight=weights.get((v["key"], view.regime or "", g.family, view.vol_regime or "")),
                                         decay=decays.get(v["version_id"]), risk=risk, paper=intent is not None)  # fmt: skip
                 verdict = A.deliberate(cc)
@@ -651,7 +674,7 @@ class OptionsBrain:
                 gate = "no validated edge"
             elif verdict["score"] <= 0.05:
                 gate = "weak verdict"
-            elif u in chosen_under or book.get(u):
+            elif u in chosen_under or books["paper" if item["intent"] is not None else "shadow"].get(u):
                 gate = "one position per underlying"
             elif n_shadow >= SHADOW_PER_CYCLE:
                 gate = "enough new positions this cycle"
@@ -663,7 +686,8 @@ class OptionsBrain:
                 continue
             chosen_under.add(u)
             n_shadow += 1
-            await self._open_shadow(cyc, item, cand_id, thesis_id, now)
+            if not books["shadow"].get(u):
+                await self._open_shadow(cyc, item, cand_id, thesis_id, now)
             intent = item["intent"]
             if intent is not None and n_paper < max_paper and (item["risk"] or {}).get("approved"):
                 n_paper += 1

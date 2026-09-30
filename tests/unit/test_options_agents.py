@@ -83,7 +83,9 @@ def test_disagreement_and_rich_volatility_weigh_against_buying(ctx):
     assert A.deliberate(bearish)["score"] < base
     ctx.view.features.iv_rv = 1.8
     assert A.implied_volatility(ctx).verdict == "neutral"  # a vertical spread is close to volatility-neutral
-    long_call = replace(ctx, genome=Genome("long_call", "bullish", entry_signal="trend_up", dte_min=20, dte_max=45))
+    long_call = replace(
+        ctx, genome=Genome("long_call", "bullish", entry_signal="trend_up", dte_min=20, dte_max=45)
+    )
     assert A.implied_volatility(long_call).verdict == "oppose"  # buying rich volatility outright
     assert A.no_trade(["3 vetoed by LiquidityAgent"]).verdict == "abstain"
 

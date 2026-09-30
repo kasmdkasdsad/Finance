@@ -87,6 +87,9 @@ class HealthMonitor:
         self._blocked_since: datetime | None = None
         self._blocked_checked: datetime | None = None
         self._blocked_alerted = False
+        self._options_checked: datetime | None = None
+        self._active_strategies: set[str] | None = None
+        self._closing_since: dict[int, datetime] = {}  # option position id -> first seen closing
 
     # ------------------------------------------------------------------ checks
     async def check(self) -> dict[str, Any]:
@@ -363,6 +366,10 @@ class HealthMonitor:
         if leader:
             await self._fail_closed_on_anomalies()
             await self._unexpected_positions()
+            try:
+                await self._options_alerts()
+            except Exception:  # an alert that cannot be computed never stops the health round
+                logger.warning("the options alerts could not be computed", exc_info=True)
             if c.broker.configured():
                 try:  # a kill switch turned on during an Alpaca outage still owes its cancellations
                     await c.trading.retry_pending_cancels()
@@ -471,6 +478,92 @@ class HealthMonitor:
                       f"{', '.join(new)} held in the paper account without a Brain decision (bought outside the "
                       "Brain?). The Brain reports it; nothing is sold automatically.", "warning", ",".join(new)[:16])
             )  # fmt: skip
+
+    async def _options_alerts(self) -> None:
+        """Options and market evolution, at most every few minutes: option contracts held that no QuantPulse
+        position explains, positions close to expiration still open, closes that do not complete, detected
+        market changes, and strategies promoted to (or removed from) paper execution. Alerts only — nothing is
+        traded from here."""
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from quantpulse.core.market_calendar import NEW_YORK
+        from quantpulse.db.evolution_models import EvolutionChangeRow
+        from quantpulse.db.options_models import OptionsPositionRow, OptionsStrategyVersionRow
+
+        c = self._c
+        now = c.clock.now()
+        if self._options_checked is not None and now - self._options_checked < timedelta(minutes=5):
+            return
+        self._options_checked = now
+        today = now.astimezone(NEW_YORK).date()
+        async with c.db.session() as s:
+            live = (
+                await s.scalars(
+                    select(OptionsPositionRow).where(
+                        OptionsPositionRow.status.in_(("pending", "open", "closing"))
+                    )
+                )
+            ).all()
+            changes = (
+                await s.scalars(
+                    select(EvolutionChangeRow).where(
+                        EvolutionChangeRow.detected_at >= now - timedelta(days=2)
+                    )
+                )
+            ).all()
+            active = (await s.scalars(select(OptionsStrategyVersionRow).where(
+                OptionsStrategyVersionRow.stage.in_(("PAPER_ACTIVE", "PROVEN"))))).all()  # fmt: skip
+        tracked = {
+            leg["symbol"] for p in live if p.mode == "paper" for leg in (p.structure.get("legs") or [])
+        }
+        if c.broker.configured():
+            held = [p.symbol for p in await c.broker.positions() if p.is_option]
+            untracked = sorted(set(held) - tracked)
+            key = "opt_untracked:" + ",".join(untracked)
+            if untracked and key not in self._reported:
+                self._reported.add(key)
+                await c.alerts.send(Alert("unexpected_option", "Option contracts QuantPulse did not open",
+                                          f"{', '.join(untracked)[:300]} held in the paper account without an Options "
+                                          "Brain position (opened outside QuantPulse?). Nothing is closed automatically.",
+                                          "warning", untracked[0][:16]))  # fmt: skip
+        for p in live:
+            if p.mode != "paper" or p.first_expiration is None:
+                continue
+            dte = (p.first_expiration - today).days
+            key = f"opt_expiring:{p.id}:{today}"
+            if dte <= c.settings.options_close_dte and key not in self._reported:
+                self._reported.add(key)
+                await c.alerts.send(Alert("option_expiring", "Option position close to expiration",
+                                          f"position {p.id} ({p.family} on {p.underlying}) expires in {dte} day(s) and is "
+                                          f"still {p.status}: QuantPulse closes it before expiration when it can "
+                                          "(it never exercises); check the Options page.", "warning", str(p.id)))  # fmt: skip
+            key = f"opt_closing:{p.id}"
+            since = self._closing_since.setdefault(p.id, now) if p.status == "closing" else None
+            if since is not None and now - since > timedelta(hours=1) and key not in self._reported:
+                self._reported.add(key)
+                await c.alerts.send(Alert("option_close_pending", "Option close not completed",
+                                          f"position {p.id} ({p.family} on {p.underlying}) has a closing order that has "
+                                          "not filled; it is retried every cycle.", "warning", str(p.id)))  # fmt: skip
+        closing = {p.id for p in live if p.status == "closing"}
+        self._closing_since = {k: v for k, v in self._closing_since.items() if k in closing}
+        for ch in changes:
+            key = f"evolution:{ch.id}"
+            if key not in self._reported:
+                self._reported.add(key)
+                await c.alerts.send(Alert("market_change", "Market change detected",
+                                          f"{ch.dimension} {ch.subject} {ch.metric} ({ch.timescale}): {ch.kind}, "
+                                          f"q = {ch.q_value:.3f}. {ch.hypotheses_summary[:300]}", "info", str(ch.id)))  # fmt: skip
+        now_active = {f"{v.strategy_key}@v{v.version}" for v in active}
+        if self._active_strategies is not None:
+            for k in sorted(now_active - self._active_strategies):
+                await c.alerts.send(Alert("strategy_promoted", "Option strategy promoted to paper execution",
+                                          f"{k} earned PAPER_ACTIVE (shadow evidence on live quotes).", "info", k[:16]))  # fmt: skip
+            for k in sorted(self._active_strategies - now_active):
+                await c.alerts.send(Alert("strategy_demoted", "Option strategy removed from paper execution",
+                                          f"{k} left PAPER_ACTIVE (decay or re-validation).", "warning", k[:16]))  # fmt: skip
+        self._active_strategies = now_active
 
     async def _transitions(self, parts: dict[str, dict[str, Any]]) -> None:
         alerts = self._c.alerts

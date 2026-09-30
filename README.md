@@ -45,14 +45,15 @@ synthetic data with a visible status badge.
 9. [Daily picks and the email digest](#daily-picks-and-the-email-digest)
 10. [Trading sandbox (paper trading)](#trading-sandbox-paper-trading)
 11. [Alpaca paper trading (automated strategy)](#alpaca-paper-trading-automated-strategy)
-12. [The Brain (multi-agent analysis)](#the-brain-multi-agent-analysis)
-13. [24/7 in the cloud](#247-in-the-cloud)
-14. [Vehicle module reference data](#vehicle-module-reference-data)
-15. [Database and migrations](#database-and-migrations)
-16. [Testing and quality gates](#testing-and-quality-gates)
-17. [Project layout](#project-layout)
-18. [Security and operations](#security-and-operations)
-19. [Known limitations](#known-limitations)
+12. [The Brain (multi-agent portfolio manager, Alpaca PAPER only)](#the-brain-multi-agent-portfolio-manager-alpaca-paper-only)
+13. [Options intelligence and market evolution](#options-intelligence-and-market-evolution)
+14. [24/7 in the cloud](#247-in-the-cloud)
+15. [Vehicle module reference data](#vehicle-module-reference-data)
+16. [Database and migrations](#database-and-migrations)
+17. [Testing and quality gates](#testing-and-quality-gates)
+18. [Project layout](#project-layout)
+19. [Security and operations](#security-and-operations)
+20. [Known limitations](#known-limitations)
 
 ---
 
@@ -2008,6 +2009,53 @@ QP_API_TOKEN=...                          # recommended once orders are enabled
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
 `QP_API_TOKEN`.
 
+## Options intelligence and market evolution
+
+Options are a layer of the same Brain, not a second engine: the **full guide is [`OPTIONS.md`](OPTIONS.md)**
+(the safety model, a cycle, how a strategy earns the right to trade, how QuantPulse learns, the Market Evolution
+Monitor, the model registry, every setting).
+
+* **Paper only, one path.** Option orders go through the existing trading service, risk engine, final execution
+  audit and order manager to the Alpaca **paper** account — the same kill switches, the same single
+  `broker.submit`, the same reconciliation and ledger. Defined-risk structures only (long calls/puts, debit and
+  credit verticals, covered calls): never a naked short option, never 0DTE, never an exercise; positions are
+  closed before expiration. Option limits (maximum loss per trade and per book, per-underlying risk, net delta
+  and vega, contracts, DTE, spread, quote age, open interest) are protected: they can only be tightened.
+* **Favoured, never forced.** `QP_OPTIONS_PRIORITY_WEIGHT` (0.15) tips close calls towards an option expression
+  of the Brain's view; each candidate is compared with the equivalent share trade, and NO TRADE remains an
+  answer.
+* **Research, then shadow, then paper.** A population of strategy genomes is backtested on model-priced chains
+  under five execution models, walk-forward validated, stress-tested and Monte-Carlo checked; survivors trade in
+  a **shadow** book on live quotes before any paper order, and are demoted when they decay. Research, shadow and
+  paper evidence are stored and reported apart and labelled.
+* **Agents.** 18+ option agents (regime, implied volatility, skew, term structure, liquidity, Greeks, events,
+  portfolio, decay, critic, devil's advocate, …) each answer one question; vetoes stop a candidate; every
+  candidate carries a thesis, a debate and a plain-language explanation.
+* **Market Evolution Monitor.** Every day it measures volatility (1-minute micro-volatility included),
+  microstructure, options behaviour, correlations, liquidity, execution quality and strategy results at several
+  timescales, detects structural changes under a false-discovery-rate control with autocorrelation-adjusted
+  sample sizes, and attaches *competing* hypotheses — chance, data artefacts, macro regime, automated liquidity
+  provision (marked unidentifiable from prices) — none assumed. Affected strategies are re-validated;
+  relationship estimates are appended, never overwritten.
+* **Model registry.** Every model is versioned; nothing becomes authoritative on in-sample results. A candidate
+  must pass out-of-sample, walk-forward, stress and a live shadow record that beats the champion — and an AI
+  model also needs a person's approval (`"I APPROVE THIS MODEL"`).
+
+| Method & path | Purpose |
+|---|---|
+| `GET /options/status` | Switches, limits, the agents, the strategy population by stage, the last options pass |
+| `GET /options/chains?underlying=` | A live option chain with data quality, IV term structure and skew (needs the paper keys) |
+| `GET /options/candidates` · `/strategies` · `/strategies/{id}` | Candidates with thesis, debate and agents · every strategy version with its evidence and next gate |
+| `GET /options/research` · `POST /options/research/run` | Sources and their claims (hypotheses, not facts) · start a budgeted research run |
+| `GET /options/experiments` · `/learning` · `POST /options/learn` | The experiment queue · learned weights and lessons · run learning now |
+| `GET /options/portfolio` · `/positions?mode=` · `/greeks` · `/performance` | Paper and shadow books (never mixed), net Greeks, results |
+| `GET /options/counterfactuals` · `/missed-opportunities` | What the alternatives and the rejected candidates would have done |
+| `GET /evolution/status` · `/changes` · `/relationships` · `POST /evolution/run` | The monitor: measured days, changes with hypotheses, relationship history · run it now |
+| `GET /registry/models` · `POST /registry/models/{id}/advance` · `/approve` | Model versions and stages · advance on evidence · a person's approval |
+
+`GET /brain/status` carries an options summary. Dashboard pages: **Options Intelligence** and **Market
+Evolution**.
+
 ## 24/7 in the cloud
 
 QuantPulse runs in the cloud so the Brain keeps supervising the Alpaca **paper** account with the PC turned off.
@@ -2234,6 +2282,16 @@ tests/                   unit · providers · integration · frontend · fixture
     universe (a few minutes); later cycles only fetch the latest session.
   * Cycles need the API process to be running. Performance statistics need weeks of recorded cycles
     before they mean anything.
+* **Options and market evolution** (details in [`OPTIONS.md`](OPTIONS.md#10-what-is-established--and-what-is-not)):
+  * No option strategy is statistically established. Research is model-priced (Black-Scholes prices with an
+    implied volatility built from the underlying's realized volatility — premium, term slope and skew stated —
+    because free data has no historical option quotes); it tests a strategy's logic and the underlying's path,
+    not whether real option prices offered the edge. Shadow and paper evidence only accumulates once it runs
+    against the live Alpaca paper account.
+  * The free options feed is Alpaca's indicative feed: quotes are not firm, and paper option fills can be kinder
+    than a real market's. IV rank needs 60 days of QuantPulse's own IV records.
+  * The Market Evolution Monitor needs months of measured days before it can report a change, and it can say a
+    change *happened*, not *why*: causes such as automated liquidity provision cannot be identified from prices.
 * **The Brain:**
   * It trades the Alpaca **paper** account only (simulated money), and only through the trading service;
     with the default `.env` (`QP_ALPACA_TRADING_ENABLED=false`, `QP_TRADING_DRY_RUN=true`) nothing is sent.

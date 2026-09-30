@@ -127,7 +127,8 @@ class BrainStatusOut(StrictModel):
     learning: str
     language_models: str
     limitations: list[str] = []
-    options: dict[str, Any] | None = None  # the Options Brain (paper and shadow positions, the lab, last pass)
+    # the Options Brain (paper and shadow positions, the lab, last pass)
+    options: dict[str, Any] | None = None
 
 
 class BrainMemoryOut(StrictModel):

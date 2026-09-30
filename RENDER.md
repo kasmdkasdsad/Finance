@@ -78,6 +78,15 @@ Optional, add later under *quantpulse-api → Environment* (all secrets): `QP_AL
 free ntfy app), `QP_ALERT_WEBHOOK_URL` (Slack/Discord), `QP_HEARTBEAT_URL` (a free healthchecks.io check: alerts
 you if the whole service stops), and any extra data keys you use on the PC (`QP_POLYGON_API_KEY`, …).
 
+Options and market evolution run with their defaults (see [`OPTIONS.md`](OPTIONS.md#8-settings)); nothing needs
+to be set. `QP_OPTIONS_EXECUTION=false` keeps options in the shadow book only; `QP_OPTIONS_ENABLED=false` switches the
+options layer off; `QP_EVOLUTION_ENABLED=false` stops the daily Market Evolution scan. The option limits
+(`QP_OPTIONS_MAX_LOSS_PER_TRADE`, `_MAX_LOSS_PCT_PER_TRADE`, `_MAX_TOTAL_RISK_PCT`, `_MAX_UNDERLYING_RISK_PCT`,
+`_MAX_POSITIONS`, `_MAX_CONTRACTS`, `_MIN_DTE`/`_MAX_DTE`, `_MAX_SPREAD_PCT`, `_MAX_QUOTE_AGE_SECONDS`,
+`_MIN_OPEN_INTEREST`, `_MAX_DELTA_PCT`, `_MAX_VEGA_PCT`, `_CLOSE_DTE`, `_STOP_LOSS_PCT`, `_EXPLORATION_MAX_LOSS`,
+`_ALLOWED_STRUCTURES`) are protected like the share limits:
+the cloud refuses to start if one is looser than shipped (a structure can be removed, never added).
+
 Everything else keeps the defaults you run on the PC — including every protected risk control (loss, position,
 order, spread, quote-age and data-quality limits). The cloud refuses to start if one of them is set looser.
 Database defaults that suit Render (change only if you know why): `QP_DB_POOL_SIZE=5`, `QP_DB_MAX_OVERFLOW=5`,
@@ -239,8 +248,10 @@ Sent on changes, never for a normal skipped trade: Brain stopped (also reported 
 holds the lease but stopped ticking), the lease lost to another process, a takeover after a crash, database
 failing, Alpaca unreachable, reconciliation failed, stale data halting new positions, an unexpected position, a
 kill switch turned on, an execution anomaly (repeated rejected/failed/unknown orders turn the Brain kill switch
-on), three Brain cycles failing in a row, autonomous execution blocked for ten minutes in the session — and a note
-when each recovers. `QP_HEARTBEAT_URL` covers the one failure a server cannot report: itself being gone.
+on), three Brain cycles failing in a row, autonomous execution blocked for ten minutes in the session, an unexpected
+option position, an option approaching expiration or a close that is still pending, a structural market change
+detected by the Market Evolution Monitor, an option strategy promoted or demoted — and a note when each recovers.
+`QP_HEARTBEAT_URL` covers the one failure a server cannot report: itself being gone.
 
 ### Failure simulations (all automated, against the fake Alpaca paper API)
 
@@ -283,3 +294,5 @@ secrets, tokens, passwords and the database password are masked in every line.
 * Market data stays Alpaca's free IEX feed: quiet names often have stale or wide quotes, so entries are halted more
   often than with SIP. The limits are not loosened; SIP is a later, optional subscription (`QP_ALPACA_STOCK_FEED=sip`).
 * No language model is configured (`QP_BRAIN_LLM_PROVIDER=none`), as on the PC.
+* Options use Alpaca's free *indicative* options feed (not firm quotes). Option research is model-priced and no option
+  strategy is established yet; real evidence starts with shadow trades on live quotes (see [`OPTIONS.md`](OPTIONS.md)).

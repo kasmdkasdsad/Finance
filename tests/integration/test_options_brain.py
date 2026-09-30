@@ -3,7 +3,6 @@ validated strategy's candidate is deliberated, recorded with its thesis, traded 
 at PAPER_ACTIVE — sent as a paper order through the trading service; later exits close both, and every
 closed position feeds learning. Strategies still in research never trade."""
 
-
 import pytest
 from sqlalchemy import select
 
@@ -155,15 +154,69 @@ async def test_expiration_is_recorded_as_the_occ_settles_it_and_learning_follows
         expiry_day = paper.first_expiration
         spot = api.feed.live_price("MIDA") * 1.2
         api.fake.expire(expiry_day, {"MIDA": spot})
-        assert leg not in api.fake.positions and api.fake.positions.get("MIDA", {}).get("qty", 0) > 0  # exercised
+        assert (
+            leg not in api.fake.positions and api.fake.positions.get("MIDA", {}).get("qty", 0) > 0
+        )  # exercised
         after = next_trading_day(expiry_day)
         clock.advance((datetime.combine(after, time(10, 30), NEW_YORK) - clock.now()).total_seconds())
         api.feed.live_move["MIDA"] = 0.2
         await run_cycle(api)
         (paper,) = await rows(api, OptionsPositionRow, mode="paper")
-        assert paper.status == "closed" and "settled by the OCC" in paper.exit_reason and "never exercises" in paper.exit_reason
+        assert (
+            paper.status == "closed"
+            and "settled by the OCC" in paper.exit_reason
+            and "never exercises" in paper.exit_reason
+        )
         events = await rows(api, OptionsExerciseEventRow)
         assert events and events[0].share_delivery > 0 and events[0].symbol == leg
         report = await api.container.options_brain.learn()
         assert report["weights"] >= 1 and report["trades"]["paper"] >= 1
         assert await rows(api, OptionsStrategyWeightRow)
+
+
+async def test_option_failures_are_handled_and_alerted(tmp_path):
+    """Failure simulation: Alpaca rejects the option order (no position, the candidate says why); a restart
+    with an order still working picks it up on the next cycle; contracts opened outside QuantPulse and a
+    position left close to expiration are alerted — nothing is traded from an alert."""
+    from quantpulse.db.options_models import OptionsTradeCandidateRow as Cand
+
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        await promote(api, LONG_CALL, Stage.PAPER_ACTIVE)
+        api.fake.default_mode = "reject"
+        await run_cycle(api)
+        assert await rows(api, OptionsPositionRow, mode="paper") == []
+        (cand,) = await rows(api, Cand)
+        assert cand.status not in ("submitted",) and cand.reject_reason
+        # the order rests at Alpaca (unfilled); the next cycle after a restart finds it filled
+        api.fake.default_mode = "accept"
+        clock.advance(35 * 60)
+        await run_cycle(api)
+        (pending,) = await rows(api, OptionsPositionRow, mode="paper")
+        assert pending.status == "pending"
+        api.fake.complete(pending.client_order_id)
+        api.container.options_brain.last = None  # as after a restart: nothing held in memory
+        clock.advance(35 * 60)
+        await run_cycle(api)
+        (opened,) = await rows(api, OptionsPositionRow, mode="paper")
+        assert opened.status == "open" and opened.entry_value > 0
+        # an option contract nobody in QuantPulse opened, and alerts for it
+        api.fake.hold("MIDA261218P00150000", 1, 2.0)
+        health = api.container.health
+        await health._options_alerts()
+        kinds = {a["kind"] for a in api.container.alerts.sent}
+        assert "unexpected_option" in kinds
+        assert not [
+            b for b in api.fake.bodies if "MIDA261218P00150000" in str(b)
+        ]  # never traded from an alert
+        # a close that does not complete is alerted an hour after it began — not an hour after the opening
+        async with api.container.db.session() as s:
+            row = await s.get(OptionsPositionRow, opened.id)
+            row.status = "closing"
+            await s.commit()
+        clock.advance(6 * 60)
+        await health._options_alerts()
+        assert "option_close_pending" not in {a["kind"] for a in api.container.alerts.sent}
+        clock.advance(61 * 60)
+        await health._options_alerts()
+        assert "option_close_pending" in {a["kind"] for a in api.container.alerts.sent}

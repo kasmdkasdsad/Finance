@@ -37,7 +37,7 @@ async def seed_history(api, days: list[date], shift_after: int):
     ev = api.container.evolution
     rng = np.random.default_rng(7)
     closes = {u: {} for u in SUBJECTS}
-    level = {u: 100.0 for u in SUBJECTS}
+    level = dict.fromkeys(SUBJECTS, 100.0)
     for i, d in enumerate(days):
         for u in SUBJECTS:
             level[u] *= math.exp(rng.normal(0, 0.012))

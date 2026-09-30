@@ -79,7 +79,8 @@ jobs:
           tests/integration/test_cloud_security.py tests/integration/test_cloud_database.py
           tests/integration/test_render_deploy.py tests/integration/test_migrations.py
           tests/integration/test_brain_execution.py tests/integration/test_brain_supervisor.py
-          tests/unit/test_lease.py
+          tests/unit/test_lease.py tests/integration/test_options_execution.py
+          tests/integration/test_options_brain.py tests/integration/test_evolution_service.py
 
   docker:
     runs-on: ubuntu-latest
