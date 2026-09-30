@@ -22,6 +22,11 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
   itself never talks to the broker's order endpoint.
 * health — once a minute: the database, the supervisor, the scheduler, Alpaca, market data, reconciliation
   and the last cycle; alerts on changes, the heartbeat, and Brain orders failing closed while unhealthy.
+* options research — once per trading day after ``options_research_time``: the lab's budgeted research run
+  (background), then the Options Brain's learning pass (weights, lessons, missed opportunities graded);
+* market evolution — once per trading day after ``evolution_time``: the day's metrics, the scan for
+  structural change, competing hypotheses, relationships and re-validation.
+  Both run only in the process holding the supervisor lease, and never place an order.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ MODEL_WARM_SECONDS = 300.0
 TRADING_CHECK_SECONDS = 60.0
 BRAIN_CHECK_SECONDS = 60.0
 HEALTH_CHECK_SECONDS = 60.0
+RESEARCH_CHECK_SECONDS = 300.0
 
 
 @dataclass
@@ -105,6 +111,10 @@ class Poller:
             asyncio.create_task(self._loop("trading", lambda: TRADING_CHECK_SECONDS, self.run_trading)),
             asyncio.create_task(self._loop("brain", lambda: BRAIN_CHECK_SECONDS, self.run_brain)),
             asyncio.create_task(self._loop("health", lambda: HEALTH_CHECK_SECONDS, self.run_health)),
+            asyncio.create_task(
+                self._loop("options_research", lambda: RESEARCH_CHECK_SECONDS, self.run_research)
+            ),
+            asyncio.create_task(self._loop("evolution", lambda: RESEARCH_CHECK_SECONDS, self.run_evolution)),
         ]
         logger.info("poller started (%d jobs)", len(self._tasks))
 
@@ -208,6 +218,53 @@ class Poller:
     async def run_health(self) -> str:
         """Health of every part, alerts on changes, the heartbeat, and failing closed when unhealthy."""
         return await self._c.health.run()
+
+    async def _daily(self, key: str, at: str) -> str | None:
+        """``None`` when a once-per-trading-day job is due now (else why not); marks it done for today."""
+        now = self._c.clock.now().astimezone(NEW_YORK)
+        today = now.date()
+        if not is_trading_day(today) or now.time() < time.fromisoformat(at):
+            return "waiting"
+        lease = getattr(self._c, "lease", None)
+        if lease is not None and not await lease.acquire():
+            return "standby (another process holds the supervisor lease)"
+        from quantpulse.db.models import BrainStateRow
+
+        async with self._c.db.session() as session:
+            row = await session.get(BrainStateRow, key)
+            if row is not None and (row.value or {}).get("day") == today.isoformat():
+                return f"done for {today}"
+            if row is None:
+                session.add(
+                    BrainStateRow(key=key, value={"day": today.isoformat()}, updated_at=self._c.clock.now())
+                )
+            else:
+                row.value, row.updated_at = {"day": today.isoformat()}, self._c.clock.now()
+        return None
+
+    async def run_research(self) -> str:
+        """The options research lab and the Options Brain's learning pass, once a trading day."""
+        s = self._c.settings
+        if not s.options_enabled:
+            return "disabled"
+        why = await self._daily("options_research_day", s.options_research_time)
+        if why:
+            return why
+        await self._c.registry.bootstrap()
+        job = self._c.options_lab.start_research()
+        learned = await self._c.options_brain.learn()
+        return f"research job {job.id} started; learned: {learned.get('weights')} weight(s), {learned.get('lessons')} lesson(s)"
+
+    async def run_evolution(self) -> str:
+        """The market evolution monitor, once a trading day."""
+        s = self._c.settings
+        if not s.evolution_enabled:
+            return "disabled"
+        why = await self._daily("evolution_day", s.evolution_time)
+        if why:
+            return why
+        job = self._c.evolution.start()
+        return f"evolution job {job.id} started"
 
     async def warm_model(self) -> str:
         """Keep the latest close's model run computed, so pages and the ledger never wait for it."""

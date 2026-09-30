@@ -65,6 +65,19 @@ class Series:
         return [v for _, v in sorted(self.points, key=lambda p: p[0])]
 
 
+def metric_window(metric: str) -> int:
+    """The number of days a rolling metric averages over (``rv20`` → 20, ``avg_pair_corr_20d`` → 20,
+    ``vol_of_vol`` → 60); 1 for a same-day measurement."""
+    import re
+
+    if metric == "vol_of_vol":
+        return 60
+    m = re.search(r"(?:rv|_)(\d+)d?$", metric)
+    if m and not metric.startswith("rv_"):
+        return int(m.group(1))
+    return 1
+
+
 def scan(series: Sequence[Series], *, recent: int = 20, reference: int = 120, q: float = 0.10,
          previous: Mapping[str, Mapping[str, Any]] | None = None) -> list[dict[str, Any]]:  # fmt: skip
     """Every series tested; ``significant`` only after the FDR control across all of them. ``previous``:
@@ -74,6 +87,8 @@ def scan(series: Sequence[Series], *, recent: int = 20, reference: int = 120, q:
         vals = s.values()
         if len(vals) < recent + 10:
             continue
+        if metric_window(s.metric) * 3 > reference:
+            continue  # a rolling statistic this long barely changes within the reference window: not testable
         ref = vals[-(recent + reference) : -recent]
         rec = vals[-recent:]
         cmp = compare(ref, rec)

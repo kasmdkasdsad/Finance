@@ -18,8 +18,10 @@ from frontend import auth  # noqa: E402
 from frontend.api_client import ApiClient, ApiError  # noqa: E402
 from frontend.views import (  # noqa: E402
     brain,
+    evolution,
     model_lab,
     options,
+    options_brain,
     overview,
     picks,
     portfolio,
@@ -113,6 +115,13 @@ pages = {
             default=auth.cloud(),
         ),
         st.Page(brain.render, title="Brain", icon=":material/psychology:", url_path="brain"),
+        st.Page(
+            options_brain.render,
+            title="Options Intelligence",
+            icon=":material/stacked_line_chart:",
+            url_path="options-intelligence",
+        ),
+        st.Page(evolution.render, title="Market Evolution", icon=":material/timeline:", url_path="evolution"),
         st.Page(
             trading.render,
             title="Paper Trading (Alpaca)",

@@ -269,6 +269,21 @@ class Container:
             self.market,
         )
 
+        # the market evolution monitor and the versioned model registry (research; never an order)
+        from quantpulse.services.evolution import EvolutionService
+        from quantpulse.services.model_registry import ModelRegistryService
+
+        self.evolution = EvolutionService(settings, self.db, self.clock, self.market, self.jobs, self.options_lab)
+        self.registry = ModelRegistryService(self.db, self.clock)
+        # the Options Brain: inside the Brain's cycle (shadow always; paper orders only through the trading service)
+        from quantpulse.brain.options.brain import OptionsBrain
+
+        self.options_brain = OptionsBrain(
+            settings, self.clock, self.db, self.options_data, self.market, self.options_lab, self.reference
+        )
+        if settings.options_enabled:
+            self.brain.orchestrator.options = self.options_brain
+
         # cloud monitoring: alerts (ntfy / webhook / heartbeat, all optional) and the health monitor, whose
         # order-critical checks (database, Alpaca, reconciliation) fail Brain orders closed at the last gate
         self.alerts = AlertService(settings, self.clock, self.db, self.http.raw)

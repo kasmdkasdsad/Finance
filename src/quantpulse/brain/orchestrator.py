@@ -68,6 +68,7 @@ class CycleResult:
     execution: dict[str, Any] = field(default_factory=dict)
     theses: dict[str, Any] = field(default_factory=dict)
     ideas: int = 0  # new ideas recorded for outcome grading (one per kind, symbol, direction and day)
+    options: dict[str, Any] = field(default_factory=dict)  # the Options Brain's pass (see brain/options)
     error: str | None = None
 
 
@@ -102,6 +103,7 @@ class Orchestrator:
         self._theses = theses
         self._ledger = ledger
         self._lock = asyncio.Lock()
+        self.options: Any = None  # the Options Brain (set by the service when options are enabled)
         self.last_ctx: BrainContext | None = None  # the latest completed cycle's picture (for the monitor)
 
     @property
@@ -190,6 +192,18 @@ class Orchestrator:
                     expected_by_subject(result.consensus, reliability, CONSENSUS_VERSION),
                 )
                 await self._recall(ctx, result)
+            options_cycle = None
+            if self.options is not None and kind == "full":
+                # options inside the same cycle: shadow always, paper orders only when the Brain owns the account
+                try:
+                    options_cycle = await self.options.run(
+                        ctx, cycle_id, consensus=result.consensus, stock_proposals=result.proposals,
+                        paper_allowed=mode is BrainMode.PAPER_EXECUTION,
+                    )  # fmt: skip
+                except Exception:
+                    logger.exception(
+                        "the options pass of brain cycle %s failed (the stock cycle goes on)", cycle_id
+                    )
             trace(
                 ctx.opportunities,
                 focus=ctx.focus,
@@ -210,8 +224,18 @@ class Orchestrator:
             if mode is BrainMode.PAPER_EXECUTION and self._executor is not None:
                 # the Brain owns the Alpaca paper account: the trading service executes (or says why not)
                 result.execution = await self._executor.execute(
-                    ctx, result.proposals, cycle_id=cycle_id, scheduled=trigger != "manual"
+                    ctx,
+                    result.proposals,
+                    cycle_id=cycle_id,
+                    scheduled=trigger != "manual",
+                    option_orders=options_cycle.orders if options_cycle is not None else (),
                 )
+                if options_cycle is not None and options_cycle.pending:
+                    await self.options.after_execution(
+                        options_cycle,
+                        result.execution.get("option_trades") or [],
+                        reason="; ".join(result.execution.get("blockers") or []) or None,
+                    )
                 await self._store.record_execution(decision_ids, result.proposals)
                 if self._ledger is not None:  # every order sent, from the decision to its final state
                     await self._ledger.record(cycle_id, decision_ids, result.proposals)
@@ -245,6 +269,11 @@ class Orchestrator:
                 ctx, cycle_id, forecasts, result.consensus, reliability, result.debates
             )
             await self._remember(ctx, cycle_id, result)
+            if options_cycle is not None:
+                result.options = options_cycle.summary()
+                await self._store.set_state(
+                    "options_last_cycle", {"cycle_id": cycle_id, **result.options}, now
+                )
             result.status = "completed"
             await self._store.finish_cycle(
                 cycle_id, self._clock.now(), status="completed", **self._summary(ctx, result)

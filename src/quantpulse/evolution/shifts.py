@@ -12,6 +12,11 @@
 A change counts as *significant* only after a false-discovery-rate control across everything tested at once
 (:func:`quantpulse.options.lab.overfit.benjamini_hochberg`) — the monitor tests many series, and some will
 look different by chance.
+
+Daily series of rolling statistics (a 20-day volatility, a rolling correlation) are strongly autocorrelated:
+consecutive values share most of their data, so counting each day as an independent observation makes chance
+look significant. :func:`compare` therefore tests with an *effective* sample size, ``n·(1−ρ)/(1+ρ)`` for the
+series' lag-1 autocorrelation ρ (an AR(1) approximation), for the level, the spread and the shape tests alike.
 """
 
 from __future__ import annotations
@@ -53,6 +58,10 @@ def compare(
     if len(a) < min_n or len(b) < max(5, min_n // 2):
         out["note"] = "too few observations to compare"
         return out
+    # autocorrelation of the noise within each window (a shift between them is not autocorrelation)
+    rho = _lag1(np.concatenate([a - a.mean(), b - b.mean()]))
+    factor = (1 - rho) / (1 + rho) if rho > 0 else 1.0
+    na, nb = max(2.0, len(a) * factor), max(2.0, len(b) * factor)
     ks = stats.ks_2samp(a, b)
     try:
         # SciPy caps this p-value to [0.001, 0.25] and warns about it: known, and clipped below
@@ -62,8 +71,16 @@ def compare(
         ad_p = float(min(max(ad.pvalue, 0.001), 0.25))
     except (ValueError, FloatingPointError):
         ad_p = None
-    t = stats.ttest_ind(b, a, equal_var=False)
+    va, vb = float(a.var(ddof=1)), float(b.var(ddof=1))
+    se = math.sqrt(va / na + vb / nb) or 1e-12
+    t_stat = (float(b.mean()) - float(a.mean())) / se
+    df = (va / na + vb / nb) ** 2 / max(
+        (va / na) ** 2 / max(na - 1, 1) + (vb / nb) ** 2 / max(nb - 1, 1), 1e-300
+    )
+    mean_p = float(2 * stats.t.sf(abs(t_stat), max(df, 1.0)))
     lev = stats.levene(a, b, center="median")
+    spread_p = float(stats.f.sf(float(lev.statistic) * factor, 1, max(na + nb - 2, 1.0)))
+    ks_p = float(stats.kstwobign.sf(float(ks.statistic) * math.sqrt(na * nb / (na + nb))))
     sd = float(a.std(ddof=1)) or 1e-12
     out.update({
         "reference_mean": round(float(a.mean()), 6),
@@ -73,10 +90,12 @@ def compare(
         "effect_sd": round(float((b.mean() - a.mean()) / sd), 4),
         "variance_ratio": round(float(b.var(ddof=1) / max(a.var(ddof=1), 1e-24)), 4),
         "ks_stat": round(float(ks.statistic), 4),
-        "ks_p": float(ks.pvalue),
+        "ks_p": min(ks_p, 1.0),
         "ad_p": ad_p,
-        "mean_p": float(t.pvalue),
-        "spread_p": float(lev.pvalue),
+        "mean_p": mean_p,
+        "spread_p": spread_p,
+        "lag1_autocorrelation": round(rho, 4),
+        "effective_n": [round(na, 1), round(nb, 1)],
         "wasserstein": round(float(stats.wasserstein_distance(a, b)), 6),
         "psi": None if (p := psi(a, b)) is None else round(p, 4),
     })  # fmt: skip
@@ -85,6 +104,14 @@ def compare(
     )  # Bonferroni over 3
     out["kind"] = _kind(out)
     return out
+
+
+def _lag1(x: np.ndarray) -> float:
+    """Lag-1 autocorrelation (0 for a series too short or constant), clipped to [0, 0.99]."""
+    if len(x) < 10 or float(x.std()) == 0.0:
+        return 0.0
+    r = float(np.corrcoef(x[1:], x[:-1])[0, 1])
+    return 0.0 if not math.isfinite(r) else min(max(r, 0.0), 0.99)
 
 
 def _kind(r: dict[str, Any]) -> str:

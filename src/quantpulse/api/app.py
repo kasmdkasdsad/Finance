@@ -16,12 +16,14 @@ from quantpulse.api.errors import install_error_handlers
 from quantpulse.api.middleware import RequestContextMiddleware
 from quantpulse.api.routers import (
     brain,
+    evolution,
     forecast,
     fundamentals,
     jobs,
     market,
     model,
     options,
+    options_brain,
     picks,
     portfolio,
     predictions,
@@ -126,6 +128,8 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         model,  # before any catch-all market paths, for /market/regime
         rates,
         options,
+        options_brain,
+        evolution,
         fundamentals,
         portfolio,
         vehicle,

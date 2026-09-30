@@ -16,6 +16,8 @@ PAGES = [
     "vehicle",
     "sports",
     "system",
+    "options_brain",
+    "evolution",
 ]
 
 

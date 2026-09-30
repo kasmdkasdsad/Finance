@@ -114,13 +114,13 @@ def test_naked_shorts_are_refused_whatever_they_are_called():
                               leg(C210, "sell", "sell_to_open", ratio=2)), 1, 1.2, "entry", "t", True, 200.0)  # fmt: skip
     d = book().evaluate_option(naked)
     assert "no_naked_short" in failed(d) and "defined_risk" in failed(d)
-    lone = OptionOrderIntent("AAPL", "naked_call", (leg(C210, "sell", "sell_to_open"),), 1, -2.4, "entry", "t",
+    lone = OptionOrderIntent("AAPL", "naked_call", (leg(C210, "sell", "sell_to_open"),), 1, 2.4, "entry", "t",
                              True, 200.0)  # fmt: skip
     assert {"no_naked_short", "structure_allowed"} <= failed(book().evaluate_option(lone))
 
 
 def test_a_covered_call_needs_the_shares_and_they_cover_only_once():
-    cc = OptionOrderIntent("AAPL", "covered_call", (leg(C210, "sell", "sell_to_open"),), 1, -2.4, "entry", "t",
+    cc = OptionOrderIntent("AAPL", "covered_call", (leg(C210, "sell", "sell_to_open"),), 1, 2.4, "entry", "t",
                            True, 200.0)  # fmt: skip
     assert "no_naked_short" in failed(book().evaluate_option(cc))
     shares = stock_position("AAPL", 100, 200.0)
@@ -249,3 +249,19 @@ def test_property_an_approved_vertical_never_risks_more_than_the_cap(lo, width, 
         cap = min(OptionLimits().max_loss_per_trade, 0.01 * 100_000)
         assert true_loss <= cap + 1.0 + 2 * qty  # cents of rounding per unit
         assert not any(c.name == "no_naked_short" and not c.passed for c in d.checks)
+
+
+def test_single_leg_limits_are_prices_and_a_sale_is_a_credit():
+    held = [opt_position(C200, 2, 6.0)]
+    sell = OptionOrderIntent("AAPL", "close", (leg(C200, "sell", "sell_to_close"),), 2, 5.9, "take_profit", "t", False,
+                             200.0)  # fmt: skip
+    assert sell.net_debit == -5.9 and sell.side == "sell"
+    assert book(positions=held).evaluate_option(sell).approved  # selling at the bid is the natural price
+    patient = replace(sell, limit_price=6.0)  # asking the mid: better than natural, allowed
+    assert book(positions=held).evaluate_option(patient).approved
+    giveaway = replace(sell, limit_price=5.8)  # below the bid: worse than crossing the spread
+    assert "limit_price" in failed(book(positions=held).evaluate_option(giveaway))
+    buy = OptionOrderIntent(
+        "AAPL", "long_call", (leg(C200, "buy", "buy_to_open"),), 1, 6.5, "entry", "t", True, 200.0
+    )
+    assert "limit_price" in failed(book().evaluate_option(buy))  # paying above the ask: refused

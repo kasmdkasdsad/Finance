@@ -54,7 +54,7 @@ from quantpulse.schemas.trading import CycleOut, ProposedTradeOut
 from quantpulse.services.order_manager import DUPLICATE_NOTE
 from quantpulse.services.trading import BrainOrder, TradingService
 from quantpulse.services.trading_data import TradingDataLoader
-from quantpulse.services.trading_risk import RiskLimits
+from quantpulse.services.trading_risk import OptionOrderIntent, RiskLimits
 
 from .context import BrainContext
 from .decisions import Proposal
@@ -486,18 +486,34 @@ class BrainExecutor:
         return None
 
     async def execute(
-        self, ctx: BrainContext, proposals: list[Proposal], *, cycle_id: int, scheduled: bool
+        self,
+        ctx: BrainContext,
+        proposals: list[Proposal],
+        *,
+        cycle_id: int,
+        scheduled: bool,
+        option_orders: Sequence[OptionOrderIntent] = (),
     ) -> dict[str, Any]:
-        """Send what may be sent; record on every trade decision what happened to it."""
+        """Send what may be sent; record on every trade decision what happened to it. Option orders (from the
+        Options Brain) go with the stock orders into the same trading cycle, through the same gate: none is
+        sent when the gate is closed, and option entries wait while entries are halted (exits still go)."""
         trades = [p for p in proposals if p.is_trade]
         gate = await self.gate(ctx, scheduled=scheduled)
-        report: dict[str, Any] = {**gate.to_dict(), "orders_sent": 0, "trading_cycle_id": None}
-        if not trades:
+        report: dict[str, Any] = {
+            **gate.to_dict(),
+            "orders_sent": 0,
+            "trading_cycle_id": None,
+            "option_trades": [],
+        }
+        if not trades and not option_orders:
             return report
         if not gate.send:
             for p in trades:
                 p.execution = {"sent": False, "reason": "not sent: " + "; ".join(gate.blockers)}
             return report
+        options = [o for o in option_orders if not o.opening or gate.entries]
+        if len(options) < len(option_orders):
+            report["option_entries_halted"] = "entries halted: " + "; ".join(h["reason"] for h in gate.halts)
         chosen: list[Proposal] = []
         for p in trades:
             why = self.sendable(p, gate)
@@ -506,7 +522,7 @@ class BrainExecutor:
             else:
                 p.status = "halted" if why.startswith("entries halted") else p.status
                 p.execution = {"sent": False, "reason": why}
-        if not chosen:
+        if not chosen and not options:
             return report
         today = self._clock.now().astimezone(NEW_YORK).date()
         armed = await self._trading.armed()
@@ -526,7 +542,10 @@ class BrainExecutor:
             self._audited_day = today
         try:
             cycle = await self._trading.run_brain(
-                [to_order(p, ctx) for p in chosen], brain_cycle_id=cycle_id, scheduled=scheduled
+                [to_order(p, ctx) for p in chosen],
+                brain_cycle_id=cycle_id,
+                scheduled=scheduled,
+                option_orders=options,
             )
         except (BrokerError, DomainError) as exc:
             logger.warning("Brain execution failed: %s", exc)
@@ -535,6 +554,10 @@ class BrainExecutor:
             report["error"] = str(exc)
             return report
         report["trading_cycle_id"] = cycle.id
+        report["option_trades"] = [
+            t.model_dump(mode="json") for t in cycle.trades if t.asset_class == "us_option"
+        ]
+        report["option_orders_sent"] = sum(1 for t in report["option_trades"] if t.get("alpaca_order_id"))
         report["trading_mode"] = cycle.mode
         report["trading_status"] = cycle.status
         report["notes"] = cycle.notes

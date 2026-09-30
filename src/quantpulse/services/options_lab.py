@@ -627,6 +627,59 @@ class OptionsLabService:
             run.summary = {"origins": sorted({c.origin for c in children})}
             return {"generation": gen, "children": len(children)}
 
+    async def revalidate(
+        self,
+        version_id: int,
+        *,
+        closes: Mapping[str, Mapping[date, float]] | None = None,
+        sessions: int = 252,
+    ) -> dict[str, Any] | None:
+        """Re-test a version on the most recent ``sessions`` only (after a detected market change): REALISTIC
+        and PESSIMISTIC fills must both stay positive per dollar at risk. Stored as a ``revalidation`` backtest;
+        fewer than ten trades is inconclusive (``passed`` None), never a pass."""
+        from quantpulse.options.fills import ExecutionModel
+        from quantpulse.options.lab.backtest import BacktestConfig, run
+
+        async with self._db.session() as s:
+            v = await s.get(OptionsStrategyVersionRow, version_id)
+            g_row = await s.get(OptionsStrategyGenomeRow, v.genome_id) if v is not None else None
+        if v is None or g_row is None:
+            return None
+        g = from_dict(g_row.params)
+        prices = (
+            {u: dict(c) for u, c in closes.items()}
+            if closes is not None
+            else (await self._prices(self._s.options_universe))[0]
+        )
+        data = await asyncio.to_thread(prepare, prices)
+        if not data.underlyings:
+            return None
+        days = data.days
+        start = days[max(0, len(days) - sessions)]
+        now = self._clock.now()
+        out: dict[str, Any] = {"window": [start.isoformat(), days[-1].isoformat()], "grade": data.grade}
+        for model in (ExecutionModel.REALISTIC, ExecutionModel.PESSIMISTIC):
+            cfg = BacktestConfig(
+                start, days[-1], data.underlyings, equity=self._s.brain_book_capital, model=model
+            )
+            res = await asyncio.to_thread(run, g, data.source, data.features, cfg)
+            out[model.value] = {
+                "trades": res.metrics.get("trades"),
+                "expectancy_on_risk": res.metrics.get("expectancy_on_risk"),
+            }
+            async with self._db.session() as s:
+                s.add(OptionsStrategyBacktestRow(version_id=version_id, run_at=now, purpose="revalidation",
+                                                 data_source=data.grade, execution_model=model.value, period_start=start,
+                                                 period_end=days[-1], universe=list(data.underlyings),
+                                                 trades=int(res.metrics.get("trades") or 0), metrics=jsonable(res.metrics),
+                                                 label=res.label, details={"reason": "re-validation after a market change"}))  # fmt: skip
+        n = int(out["REALISTIC"]["trades"] or 0)
+        if n < 10:
+            out["passed"], out["note"] = None, f"{n} trades in the recent window: inconclusive"
+        else:
+            out["passed"] = all((out[m]["expectancy_on_risk"] or 0) > 0 for m in ("REALISTIC", "PESSIMISTIC"))
+        return out
+
     # ------------------------------------------------------------------ read models
     async def strategies(self, *, stage: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         async with self._db.session() as s:

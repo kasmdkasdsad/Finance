@@ -48,7 +48,14 @@ ControlAuth = [Depends(control_allowed)]
 
 @router.get("/status", response_model=BrainStatusOut, summary="Mode, agents, last cycle, open predictions")
 async def brain_status(c: Container = ContainerDep) -> BrainStatusOut:
-    return BrainStatusOut.model_validate(await c.brain.status())
+    from quantpulse.api.routers.options_brain import options_summary
+
+    out = await c.brain.status()
+    try:
+        out["options"] = await options_summary(c)
+    except Exception as exc:  # the stock Brain's status never fails because of the options summary
+        out["options"] = {"error": f"{type(exc).__name__}: {exc}"}
+    return BrainStatusOut.model_validate(out)
 
 
 @router.get(

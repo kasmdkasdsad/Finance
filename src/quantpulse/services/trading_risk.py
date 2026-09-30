@@ -246,6 +246,15 @@ class OptionOrderIntent:
     strategy_key: str | None = None
 
     @property
+    def net_debit(self) -> float:
+        """The limit as a signed net price per share: positive a debit paid, negative a credit received. A
+        multi-leg limit is already signed (as Alpaca takes it); a single-leg limit is a positive price, a
+        credit when the leg is sold."""
+        if len(self.legs) == 1 and self.legs[0].side == "sell":
+            return -abs(self.limit_price)
+        return self.limit_price if len(self.legs) > 1 else abs(self.limit_price)
+
+    @property
     def symbol(self) -> str:
         """The record symbol: the contract of a single-leg order, ``AAPL:MLEG`` for a multi-leg one."""
         return self.legs[0].symbol if len(self.legs) == 1 else mleg_symbol([x.symbol for x in self.legs])
@@ -254,7 +263,7 @@ class OptionOrderIntent:
     def side(self) -> str:
         if len(self.legs) == 1:
             return self.legs[0].side
-        return "buy" if self.limit_price >= 0 else "sell"
+        return "buy" if self.net_debit >= 0 else "sell"
 
     @property
     def closes_position(self) -> bool:
@@ -714,8 +723,8 @@ class RiskBook:
         if not known:
             check("limit_price", False, "the natural price cannot be computed (a leg has no quote)")
         else:
-            ok = o.limit_price <= natural + tol
-            check("limit_price", ok, f"net {o.limit_price:+.2f} vs natural {natural:+.2f} per share"
+            ok = o.net_debit <= natural + tol
+            check("limit_price", ok, f"net {o.net_debit:+.2f} vs natural {natural:+.2f} per share"
                   + ("" if ok else " (worse than crossing the spread)"))  # fmt: skip
 
         if not o.opening:
@@ -761,7 +770,7 @@ class RiskBook:
 
         # the order's own maximum loss at its limit price (shares' own risk excluded)
         opt_only = Structure(o.family, u, tuple(legs))
-        shift = o.limit_price * 100 - opt_only.debit()  # paid beyond the mids, per unit
+        shift = o.net_debit * 100 - opt_only.debit()  # paid beyond the mids, per unit
         shares_n = sum(x.units for x in with_shares if x.contract is None)
         if shares_n:
             loss_unit = (
@@ -835,7 +844,7 @@ class RiskBook:
               "no new positions today" if self.daily_loss_hit
               else f"day P/L {self.account.day_pl_pct:+.2%} (limit −{L.max_daily_loss_pct:.0%})")  # fmt: skip
 
-        capital = max(order_loss, o.limit_price * 100 * o.qty, 0.0) if math.isfinite(order_loss) else math.inf
+        capital = max(order_loss, o.net_debit * 100 * o.qty, 0.0) if math.isfinite(order_loss) else math.inf
         reserve = L.cash_buffer_pct * equity
         spendable = min(self.buying_power_left, self.cash_left - reserve)
         if self.account.options_buying_power is not None:
@@ -902,10 +911,10 @@ class RiskBook:
                     for x, m in zip(o.legs, mids, strict=True)]  # fmt: skip
             try:
                 st = Structure(o.family, o.underlying, tuple(legs))
-                loss = st.max_loss() + o.limit_price * 100 - st.debit()
+                loss = st.max_loss() + o.net_debit * 100 - st.debit()
             except StructureError:
                 loss = math.inf
-            capital = max(loss if math.isfinite(loss) else 0.0, o.limit_price * 100, 0.0) * o.qty
+            capital = max(loss if math.isfinite(loss) else 0.0, o.net_debit * 100, 0.0) * o.qty
             self.cash_left -= capital
             self.buying_power_left -= capital
             self.option_pending_capital += capital
