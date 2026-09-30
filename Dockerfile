@@ -25,6 +25,11 @@ USER quantpulse
 
 ENV QP_DATABASE_URL=sqlite+aiosqlite:////app/data/quantpulse.db
 
+# the commit this image was built from (the server's ./qp update passes it; shown in the status and the logs)
+ARG QP_GIT_COMMIT=""
+ENV QP_GIT_COMMIT=${QP_GIT_COMMIT}
+LABEL org.opencontainers.image.revision=${QP_GIT_COMMIT}
+
 EXPOSE 8000 8501
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

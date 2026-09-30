@@ -6,32 +6,41 @@
 #   ./qp preflight             check the configuration without starting anything (paper only, secured, ...)
 #   ./qp import-sqlite FILE    copy the PC's history (data/quantpulse.db) into the empty cloud database
 #   ./qp start [--public]      build, preflight, start everything (--public: HTTPS on QP_PUBLIC_HOSTNAME)
-#   ./qp status                containers and the health of every part
+#   ./qp status [--json]       the server at a glance: CPU, memory, disk, Docker, PostgreSQL, API, Brain
+#                              supervisor, last cycle, heartbeat, backups, deployed commit and its CI result
 #   ./qp logs [SERVICE]        follow the logs (api, dashboard, db, backup, caddy; default api)
 #   ./qp restart [SERVICE]     restart (default: api and dashboard); the Brain recovers before any order
 #   ./qp stop-trading [REASON] Brain kill switch ON: no new Brain orders, working Brain orders canceled
 #   ./qp start-trading         Brain kill switch OFF (asks first)
-#   ./qp update                back up, pull the latest code from GitHub, rebuild, restart
-#   ./qp rollback [COMMIT]     back to the previous deployed version (or COMMIT)
-#   ./qp backup                a database backup now (./backups; nightly ones are automatic)
+#   ./qp update [COMMIT]       deploy the followed branch's newest commit (or COMMIT) now — only if GitHub CI
+#                              passed on it; built and checked first, rolled back by itself if it fails
+#   ./qp rollback [COMMIT]     back to the previous deployed version (or COMMIT); pauses automatic deploys
+#   ./qp backup                a verified database backup now (deploy/backups; the nightly one also goes off
+#                              the server to Object Storage)
 #   ./qp restore FILE          replace the database with a backup (asks first)
+#   ./qp restore-test [FILE]   restore the newest backup into a scratch database and check it
+#   ./qp ci-gate [COMMIT]      would this commit be deployed? (GitHub CI, every required job, ARM64 included)
+#   ./qp install-timers        systemd timers: watchdog (1 min), auto-update (10 min), nightly backup, weekly
+#                              restore test (Oracle / any systemd server; see deploy/ORACLE.md)
+#   ./qp watchdog | auto-update  what the timers run (by hand: once)
 #   ./qp password              change the dashboard password
 #   ./qp tailscale             publish the dashboard on your private Tailscale network (HTTPS)
-#   ./qp down                  stop everything (the Brain stops; restart with ./qp start)
+#   ./qp down                  stop everything (the Brain stops; the timers leave it stopped; ./qp start)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 cd "$HERE"
 ENV_FILE="$HERE/.env"
 HISTORY="$HERE/.deploy-history"
+OPS=(python3 "$HERE/qpops.py")
 dc() { docker compose -f "$HERE/compose.yaml" "$@"; }
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 die() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 need_env() { [[ -f "$ENV_FILE" ]] || die "deploy/.env is missing: run ./qp setup first"; }
 
-# Set NAME=VALUE in deploy/.env; the value travels in the environment, never on a command line.
+# Set NAME=VALUE in deploy/.env (or FILE); the value travels in the environment, never on a command line.
 set_var() {
-  QP_NAME="$1" QP_VALUE="$2" QP_FILE="$ENV_FILE" python3 - <<'PY'
+  QP_NAME="$1" QP_VALUE="$2" QP_FILE="${3:-$ENV_FILE}" python3 - <<'PY'
 import os, re
 name, value, path = os.environ["QP_NAME"], os.environ["QP_VALUE"], os.environ["QP_FILE"]
 text = open(path, encoding="utf-8").read()
@@ -111,6 +120,14 @@ case "$cmd" in
       hashed="$(hash_password)"; set_var QP_DASHBOARD_PASSWORD_HASH "$hashed"; unset hashed
       say "saved the dashboard password hash"
     fi
+    if [[ ! -f "$HERE/ops.env" ]]; then  # host-only settings (never given to a container)
+      cp "$HERE/ops.env.example" "$HERE/ops.env"
+      branch="$(git -C "$HERE/.." rev-parse --abbrev-ref HEAD)"
+      [[ "$branch" == "HEAD" ]] || set_var QP_DEPLOY_BRANCH "$branch" "$HERE/ops.env"
+      say "created deploy/ops.env (auto-update follows ${branch})"
+    fi
+    chmod 600 "$HERE/ops.env"
+    mkdir -p "$HERE/state" "$HERE/backups" && chmod 700 "$HERE/state"
     say "setup done. Next: ./qp preflight, then (optional) ./qp import-sqlite, then ./qp start"
     ;;
   preflight)
@@ -137,28 +154,18 @@ case "$cmd" in
     need_env
     profile=()
     [[ "${1:-}" == "--public" ]] && { [[ -n "$(get_var QP_PUBLIC_HOSTNAME)" ]] || die "set QP_PUBLIC_HOSTNAME in deploy/.env first"; profile=(--profile public); }
-    dc build api
+    dc build --build-arg QP_GIT_COMMIT="$(git -C "$HERE/.." rev-parse HEAD)" api
     dc run --rm --no-deps -T api quantpulse-preflight || die "preflight failed: nothing was started"
+    rm -f "$HERE/state/stopped"
     dc "${profile[@]}" up -d
     record_deploy
+    "${OPS[@]}" record-start || true
     wait_healthy
     "$0" status
     ;;
   status)
     need_env
-    dc ps
-    dc exec -T api python - <<'PY'
-import json, os, urllib.request
-req = urllib.request.Request("http://127.0.0.1:8000/api/v1/system/health?fresh=true",
-                             headers={"X-API-Key": os.environ.get("QP_API_TOKEN", "")})
-r = json.load(urllib.request.urlopen(req, timeout=60))
-print()
-print("HEALTH: %s   (checked %s UTC)" % (r["status"].upper(), r["checked_at"][:19]))
-for name, p in r["parts"].items():
-    print("  %8s  %-15s %s" % (p["status"], name, p["detail"]))
-for b in r.get("order_blockers") or []:
-    print("  NEW BRAIN ORDERS HELD: " + b)
-PY
+    exec "${OPS[@]}" status "$@"
     ;;
   logs)
     need_env
@@ -185,8 +192,28 @@ PY
     ;;
   backup)
     need_env
-    # shellcheck disable=SC2016  # expands inside the backup container
-    dc exec -T backup sh -c 'f=/backups/quantpulse-manual-$(date -u +%Y%m%d-%H%M%S).dump; pg_dump -Fc -f "$f" && echo "backup written: deploy/backups/${f#/backups/}"'
+    exec "${OPS[@]}" backup "${1:-manual}"
+    ;;
+  restore-test)
+    need_env
+    exec "${OPS[@]}" restore-test "$@"
+    ;;
+  ci-gate|watchdog|auto-update|sample)
+    need_env
+    exec "${OPS[@]}" "$cmd" "$@"
+    ;;
+  install-timers)
+    command -v systemctl >/dev/null || die "systemd is required for the timers"
+    user="$(stat -c %U "$HERE/..")"
+    [[ "$user" == "root" ]] || id -nG "$user" | grep -qw docker || die "$user must be in the docker group (bootstrap does it; log in again)"
+    for unit in "$HERE"/systemd/quantpulse-*.service "$HERE"/systemd/quantpulse-*.timer; do
+      sed -e "s#@DEPLOY@#$HERE#g" -e "s#@USER@#$user#g" "$unit" | sudo tee "/etc/systemd/system/$(basename "$unit")" >/dev/null
+    done
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now quantpulse-watchdog.timer quantpulse-update.timer quantpulse-backup.timer \
+      quantpulse-restore-test.timer
+    systemctl list-timers 'quantpulse-*' --no-pager
+    say "timers installed (running as $user). Logs: journalctl -u 'quantpulse-*' -e"
     ;;
   restore)
     need_env
@@ -202,15 +229,9 @@ PY
     ;;
   update)
     need_env
-    "$0" backup
-    before="$(git -C "$HERE/.." rev-parse HEAD)"
-    if [[ "$(git -C "$HERE/.." rev-parse --abbrev-ref HEAD)" == "HEAD" ]]; then  # after a rollback
-      [[ -f "$HERE/.deploy-branch" ]] || die "not on a branch: git -C /opt/quantpulse checkout <branch> first"
-      git -C "$HERE/.." checkout "$(cat "$HERE/.deploy-branch")"
-    fi
-    git -C "$HERE/.." pull --ff-only
-    [[ "$(git -C "$HERE/.." rev-parse HEAD)" != "$before" ]] || say "already up to date; rebuilding anyway"
-    exec "$HERE/qp" start  # the freshly pulled script
+    # a backup, the build of exactly that commit, its preflight, then the switch and a check that the Brain
+    # ticks; the old version comes back by itself if not. Only commits whose GitHub CI passed are deployed.
+    exec "${OPS[@]}" deploy "$@"
     ;;
   rollback)
     need_env
@@ -221,6 +242,7 @@ PY
       target="$(grep -v "^$current$" "$HISTORY" | tail -1)"
       [[ -n "$target" ]] || die "no earlier deployment recorded"
     fi
+    mkdir -p "$HERE/state" && echo "$target" > "$HERE/state/pin"  # automatic deploys pause until ./qp update
     "$0" backup
     head_then="$(git -C "$HERE/.." ls-tree --name-only "$target" src/quantpulse/db/migrations/versions/ | grep -oE '/[0-9]{4}_' | tr -d '/_' | sort | tail -1)"
     say "rolling back to $target (database schema $head_then) ..."
@@ -244,10 +266,11 @@ PY
     ;;
   down)
     need_env
+    mkdir -p "$HERE/state" && touch "$HERE/state/stopped"  # the watchdog and auto-update leave it stopped
     dc --profile public stop
     say "stopped. Start again with ./qp start"
     ;;
   help|*)
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

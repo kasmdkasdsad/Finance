@@ -86,3 +86,65 @@ def test_the_helper_scripts_are_strict_and_executable():
     # secrets are read without echo, and travel in the environment, never on a command line
     assert 'read -r -s -p "Alpaca PAPER secret key' in qp and 'QP_VALUE="$2"' in qp
     assert "echo $QP_API_TOKEN" not in qp and 'echo "$secret"' not in qp
+
+
+# --------------------------------------------------------------------------- Oracle Cloud Always Free (ARM)
+def test_the_oracle_bootstrap_keeps_the_server_private_and_self_maintaining():
+    path = DEPLOY / "bootstrap-oracle.sh"
+    assert os.access(path, os.X_OK) and os.access(DEPLOY / "qpops.py", os.X_OK)
+    text = path.read_text()
+    assert "set -euo pipefail" in text
+    # Oracle's own iptables rules are kept (ufw would fight them and Docker)
+    assert "ufw --force enable" not in text and "ufw allow" not in text
+    assert "--dport (8000|8501)" in text  # refuses a rule that would expose the API or the dashboard
+    assert "PasswordAuthentication no" in text and "PermitRootLogin no" in text
+    # security updates install themselves; a reboot they need happens outside US market hours
+    assert 'Automatic-Reboot "true"' in text and 'Automatic-Reboot-Time "07:40"' in text
+    assert "systemctl enable --now containerd docker" in text and '"shutdown-timeout": 180' in text
+    assert "/swapfile" in text and "vm.swappiness = 10" in text
+    assert "docker-compose-plugin" in text and "dpkg --print-architecture" in text
+
+
+def test_the_backup_container_holds_the_database_password_and_nothing_else():
+    backup = compose()["services"]["backup"]
+    assert "env_file" not in backup and "ports" not in backup
+    env = env_of(backup)
+    assert set(env) == {"PGHOST", "PGUSER", "PGDATABASE", "PGPASSWORD"}
+    assert "pg_dump" not in " ".join(backup["command"])  # idle: the host's timer runs the backups through it
+
+
+def test_the_api_stops_gracefully_and_runs_the_deployed_image():
+    services = compose()["services"]
+    api = services["api"]
+    assert api["image"] == services["dashboard"]["image"] == "quantpulse:${QP_IMAGE_TAG:-current}"
+    seconds = int(str(api["stop_grace_period"]).rstrip("s"))
+    assert seconds >= 75 + 15 + 30  # the drain, the final reconciliation, uvicorn's own graceful shutdown
+    db = " ".join(services["db"]["command"])
+    assert "shared_buffers=" in db and "effective_cache_size=" in db
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert 'ARG QP_GIT_COMMIT=""' in dockerfile and "ENV QP_GIT_COMMIT=${QP_GIT_COMMIT}" in dockerfile
+
+
+def test_the_server_settings_hold_no_secret_and_reach_no_container():
+    text = (DEPLOY / "ops.env.example").read_text()
+    values = dict(re.findall(r"^([A-Z0-9_]+)=(.*)$", text, re.MULTILINE))
+    for name in ("GITHUB_TOKEN", "QP_BACKUP_PAR_URL", "QP_BACKUP_HEARTBEAT_URL", "QP_OPS_NTFY_URL"):
+        assert values[name] == "", name
+    assert values["QP_AUTO_UPDATE_WINDOW"] == "closed" and values["QP_WATCHDOG"] == "true"
+    assert "ops.env" not in (DEPLOY / "compose.yaml").read_text()
+    ignored = (ROOT / ".gitignore").read_text().splitlines()
+    assert {"deploy/*.env", "!deploy/*.env.example", "deploy/state/", "backups/"} <= set(ignored)
+
+
+def test_the_timers_run_the_helper_as_the_owner_never_as_root():
+    units = {p.name: p.read_text() for p in (DEPLOY / "systemd").iterdir()}
+    commands = {"watchdog": "watchdog", "update": "auto-update", "backup": "backup nightly",
+                "restore-test": "restore-test"}  # fmt: skip
+    for name, command in commands.items():
+        service, timer = units[f"quantpulse-{name}.service"], units[f"quantpulse-{name}.timer"]
+        assert f"ExecStart=@DEPLOY@/qp {command}\n" in service and "User=@USER@" in service
+        assert "Requires=docker.service" in service and "WantedBy=timers.target" in timer
+    assert "OnUnitActiveSec=1min" in units["quantpulse-watchdog.timer"]
+    assert "OnCalendar=*:0/10" in units["quantpulse-update.timer"]
+    assert "Persistent=true" in units["quantpulse-backup.timer"]
+    assert len(units) == 2 * len(commands)

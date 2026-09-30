@@ -4,7 +4,8 @@
 #   api        the QuantPulse API + Brain supervisor + background jobs (QP_DEPLOYMENT=cloud: it refuses to start
 #              unless `quantpulse-preflight` passes: Alpaca PAPER only, secured, PostgreSQL, risk limits intact)
 #   dashboard  the Streamlit dashboard with its password login; it alone talks to the api
-#   backup     a nightly pg_dump into ./backups (14 days kept)
+#   backup     the database tools (pg_dump, pg_restore) with the password, for `./qp backup`, the nightly backup
+#              timer (verified, uploaded off the server) and the weekly restore test — see deploy/systemd/
 #   caddy      only with `--profile public`: HTTPS for the dashboard on your own domain name
 #
 # Nothing listens on the public internet by default: the api and the dashboard are bound to 127.0.0.1 and
@@ -36,13 +37,20 @@ services:
       timeout: 5s
       retries: 10
     shm_size: 256mb
+    # sized for a 6 GB server (Oracle Cloud Always Free A1); PostgreSQL's defaults assume 128 MB. Override with
+    # QP_PG_SHARED_BUFFERS / QP_PG_EFFECTIVE_CACHE in deploy/.env on a smaller machine.
+    command: ["postgres", "-c", "shared_buffers=${QP_PG_SHARED_BUFFERS:-1GB}",
+              "-c", "effective_cache_size=${QP_PG_EFFECTIVE_CACHE:-3GB}", "-c", "work_mem=16MB",
+              "-c", "maintenance_work_mem=256MB", "-c", "max_connections=60",
+              "-c", "wal_compression=on", "-c", "checkpoint_completion_target=0.9"]
     restart: unless-stopped
     logging: *logging
 
   api:
     build:
       context: ..
-    image: quantpulse:current
+    # quantpulse:current is the deployed version; ./qp update builds each commit as quantpulse:<commit> first
+    image: quantpulse:${QP_IMAGE_TAG:-current}
     env_file:
       - path: .env
         required: true
@@ -65,12 +73,14 @@ services:
       - data:/app/data
     ports:
       - "127.0.0.1:8000:8000"  # this server only (for ./qp status); never public
-    stop_grace_period: 45s  # a clean stop hands the Brain lease over at once
+    # a clean stop: no new order, the running tick may finish (QP_SHUTDOWN_DRAIN_SECONDS, 75 s), a final
+    # reconciliation, the Brain lease handed over at once. Only then would Docker kill it.
+    stop_grace_period: 180s
     restart: unless-stopped
     logging: *logging
 
   dashboard:
-    image: quantpulse:current
+    image: quantpulse:${QP_IMAGE_TAG:-current}
     depends_on:
       api:
         condition: service_healthy
@@ -108,15 +118,9 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./backups:/backups
+    # idle: ./qp backup / restore-test run pg_dump and pg_restore in here (the password stays in the container)
     entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        while true; do
-          f=/backups/quantpulse-$$(date -u +%Y%m%d-%H%M%S).dump
-          if pg_dump -Fc -f "$$f.part" && mv "$$f.part" "$$f"; then echo "backup written: $$f"; else echo "backup FAILED"; rm -f "$$f.part"; fi
-          find /backups -name 'quantpulse-*.dump' -mtime +14 -delete
-          sleep 86400
-        done
+    command: ["trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $$!; done"]
     restart: unless-stopped
     logging: *logging
 

@@ -22,6 +22,7 @@ deploy/.env
 deploy/*.env
 !deploy/*.env.example
 deploy/.deploy-*
+deploy/state/
 deploy/import/
 backups/
 *.dump

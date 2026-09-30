@@ -2071,6 +2071,14 @@ QuantPulse runs in the cloud so the Brain keeps supervising the Alpaca **paper**
   Brain supervisor (always on, 1 CPU / 2 GB), a free dashboard for the phone, and a private PostgreSQL 16; about
   $32.50 a month; every push to the branch deploys itself once GitHub CI passes. `GET /api/v1/brain/cloud-status`
   and `quantpulse-cloud-check` say whether it is running, paper, alone, and allowed to trade — and why not.
+* **$0 a month: Oracle Cloud Always Free (ARM, 2 OCPU · 6 GB): [`deploy/ORACLE.md`](deploy/ORACLE.md)** — the
+  same Docker Compose stack.
+  - GitHub CI gates every deploy: the server pulls only commits whose CI passed, the ARM64 image build
+    included; each deploy is built and checked before the switch and rolled back by itself if it fails.
+  - A watchdog restarts a stalled Brain supervisor, gracefully (it only ever reads the status: it cannot cause
+    an order).
+  - Nightly verified backups go to Object Storage through a write-only link, with a weekly restore test.
+  - `./qp status` shows the whole server.
 * A self-hosted server (Docker Compose, e.g. Hetzner CX23 at about €6 a month, reached through Tailscale):
   [`deploy/README.md`](deploy/README.md).
 
@@ -2204,7 +2212,7 @@ src/quantpulse/
   data/                  packaged vehicle profile · S&P 500 constituents and change-history snapshot
 frontend/                Streamlit app (app.py, auth.py (login), api_client.py, components.py, charts.py, views/* incl. remote (the phone page))
 render.yaml · RENDER.md  the 24/7 cloud on Render: the blueprint (API + Brain, dashboard, PostgreSQL) and its guide
-deploy/                  the self-hosted alternative: compose.yaml · qp (helper) · bootstrap.sh · cloud.env.example · Caddyfile · README.md
+deploy/                  self-hosting: compose.yaml · qp (helper) · qpops.py (CI-gated deploys, watchdog, backups, status) · systemd/ (timers) · bootstrap.sh · bootstrap-oracle.sh · cloud.env.example · ops.env.example · Caddyfile · README.md · ORACLE.md ($0 on Oracle Cloud Always Free)
 launcher/                Windows desktop launcher: quantpulse_launcher.py (start · stop · status) · *.bat · install-shortcuts.ps1 · make_icon.py
 assets/                  QuantPulse icons (.ico for the desktop shortcuts, .png for the browser tab)
 tests/                   unit · providers · integration · frontend · fixtures (real captured payloads) · fakes (Alpaca paper API, market data)

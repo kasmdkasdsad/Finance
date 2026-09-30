@@ -54,6 +54,9 @@ class AlertService:
         self._http = http
         self._last: dict[tuple[str, str], datetime] = {}
         self._last_beat: tuple[datetime, bool] | None = None
+        # the last heartbeat ping and the last one that reported "healthy" and was delivered (for the status)
+        self.last_heartbeat: dict[str, Any] | None = None
+        self.last_healthy_heartbeat_at: datetime | None = None
         self.sent: list[dict[str, Any]] = []  # the most recent alerts (for the dashboard), newest last
 
     @property
@@ -119,10 +122,21 @@ class AlertService:
         self._last_beat = (now, healthy)
         try:
             response = await self._http.get(url if healthy else f"{url}/fail", timeout=TIMEOUT)
-            return response.status_code < 400
+            delivered = response.status_code < 400
         except httpx.HTTPError as exc:
             logger.warning("heartbeat ping failed (%s)", type(exc).__name__)
-            return False
+            delivered = False
+        if delivered and healthy:
+            self.last_healthy_heartbeat_at = now
+        self.last_heartbeat = {
+            "at": now.isoformat(),
+            "healthy": healthy,
+            "delivered": delivered,
+            "last_healthy_delivered_at": self.last_healthy_heartbeat_at.isoformat()
+            if self.last_healthy_heartbeat_at
+            else None,
+        }
+        return delivered
 
     async def _ntfy(self, alert: Alert) -> bool:
         assert self._s.alert_ntfy_url is not None

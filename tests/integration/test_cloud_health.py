@@ -204,6 +204,9 @@ async def test_alerts_reach_ntfy_the_webhook_and_the_heartbeat(tmp_path, monkeyp
         assert any(a["title"] == "Alpaca paper API unreachable" for a in c.alerts.sent)
         listed = (await api.get("/api/v1/system/alerts")).json()
         assert listed["channels"] == ["ntfy", "webhook"] and listed["heartbeat"] is True
+        last = listed["last_heartbeat"]  # for `qp status`: the last ping and the last healthy one delivered
+        assert last["healthy"] is False and last["at"] == clock.now().isoformat()
+        assert last["last_healthy_delivered_at"] == NOW.isoformat()
         text = json.dumps(listed)
         for secret in (NTFY, HOOK, BEAT, "secret-uuid", "topic-secret"):
             assert secret not in text

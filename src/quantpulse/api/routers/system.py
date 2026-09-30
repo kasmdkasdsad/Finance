@@ -12,6 +12,7 @@ from quantpulse.core.market_calendar import NEW_YORK, is_trading_day, next_open,
 from quantpulse.db import repositories as repo
 from quantpulse.schemas.system import Health, IngestionEvent, MarketSessionOut, SystemStatus
 from quantpulse.services.container import Container
+from quantpulse.services.watchdog import watchdog_report
 
 public = APIRouter(tags=["system"])
 router = APIRouter(tags=["system"])
@@ -46,8 +47,17 @@ async def system_alerts(c: Container = ContainerDep) -> dict[str, Any]:
     return {
         "channels": c.alerts.channels,
         "heartbeat": c.settings.heartbeat_url is not None,
+        "last_heartbeat": c.alerts.last_heartbeat,
         "recent": list(reversed(c.alerts.sent)),
     }
+
+
+@router.get(
+    "/system/watchdog",
+    summary="Is the Brain supervisor alive (not just the process)? Read by the server's watchdog; read-only",
+)
+async def system_watchdog(c: Container = ContainerDep) -> dict[str, Any]:
+    return await watchdog_report(c)
 
 
 @router.get("/system/ingestions", response_model=list[IngestionEvent], summary="Recent warehouse ingestions")

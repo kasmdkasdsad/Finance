@@ -1,0 +1,16 @@
+# Installed by `./qp install-timers` (@DEPLOY@ and @USER@ are filled in). Is the Brain supervisor alive — not just
+# the process? A stalled one gets a graceful restart of the api container (at most 3 in 6 hours). The watchdog's
+# only request to QuantPulse is GET /api/v1/system/watchdog: it can never send or cause an order.
+[Unit]
+Description=QuantPulse supervisor watchdog (read-only check; restarts a stalled API)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DEPLOY@
+ExecStart=@DEPLOY@/qp watchdog
+TimeoutStartSec=10min
+Nice=5

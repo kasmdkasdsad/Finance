@@ -1,7 +1,8 @@
 # QuantPulse 24/7 on your own server (Docker Compose)
 
-> **Deploying on Render instead?** That is the primary, simpler path: see [`../RENDER.md`](../RENDER.md). This
-> folder is the self-hosted alternative (a small VPS you manage yourself).
+> **For $0 a month:** Oracle Cloud Always Free (ARM) — see [`ORACLE.md`](ORACLE.md): the same stack, plus a
+> CI-gated auto-update, a supervisor watchdog and off-site backups. **Render** (paid, simplest):
+> [`../RENDER.md`](../RENDER.md). This page is the self-hosted guide for any small VPS.
 
 **Set it up once, turn your PC off, and QuantPulse keeps running.** The Brain keeps supervising the Alpaca
 **paper** account in the cloud, and you can watch it (or stop it) from your iPhone.
@@ -14,7 +15,7 @@
  │  dashboard (password login) ──► api: QuantPulse API · Brain supervisor · jobs    │
  │                                   │   (starts only if the preflight passes)       │
  │                                   ├──► PostgreSQL (all Brain history, volume)    │
- │  backup (nightly pg_dump) ────────┘                                               │
+ │  backup (pg tools; nightly dump) ─┘                                               │
  └────────────────────────────────────┬─────────────────────────────────────────────┘
                                        ▼
                      Alpaca PAPER API (https://paper-api.alpaca.markets) — simulated money only
@@ -25,7 +26,7 @@
 | `api` | The QuantPulse API, the Brain supervisor (one tick a minute), background jobs, health checks, alerts |
 | `db` | PostgreSQL 16: cycles, agents, opinions, consensus, decisions, predictions, outcomes, reflections, performance, the execution ledger, positions and theses, evaluations, opportunities, events, the strategy shadow |
 | `dashboard` | The Streamlit dashboard, behind a password; the **Remote** page is made for the phone |
-| `backup` | A compressed database backup every night into `deploy/backups/` (14 days kept) |
+| `backup` | The database tools: `./qp backup`, and the nightly backup timer (`./qp install-timers`), write verified dumps into `deploy/backups/` (14 days kept), optionally uploaded off the server |
 | `caddy` | Optional (`--public`): HTTPS on your own domain name instead of Tailscale |
 
 ## Cost
@@ -33,7 +34,7 @@
 | Option | Server | Monthly | Notes |
 |---|---|---|---|
 | **Recommended** | Hetzner Cloud **CX23** (2 vCPU, 4 GB RAM, 40 GB SSD), Germany or Finland | **≈ €6** (€5.49 + €0.50 IPv4) | Reliable, simple, billed by the hour; plenty for QuantPulse. If the stock model ever runs out of memory, resize to CX33 (8 GB, €8.49) in two clicks. |
-| Cheapest | Oracle Cloud *Always Free* ARM instance (2 OCPU, 12 GB since June 2026) | €0 | Free, but capacity is often unavailable, and Oracle may reclaim instances that stay idle for a week — a trading server is idle most of the time. Fine for trying things out; not recommended for the 60-session experiment. |
+| Free | Oracle Cloud *Always Free* ARM instance (VM.Standard.A1.Flex, 2 OCPU · 6 GB of the 2 OCPU · 12 GB allowance) | €0 | See [`ORACLE.md`](ORACLE.md). No SLA; creating the VM can fail for lack of capacity (retry); Oracle may stop a VM whose CPU, network and memory all stay under 20% for a week — QuantPulse is light, so this is a real risk; `./qp status` shows it and the server warns you. |
 | US-based alternatives | DigitalOcean / AWS Lightsail, 2 vCPU · 4 GB | ≈ $24 | Closer to the US markets (latency does not matter for 30-minute cycles). |
 | Tailscale (phone ↔ server) | Personal plan | €0 | |
 | ntfy (phone alerts), healthchecks.io (server-down alert) | Free plans | €0 | Optional |
@@ -144,8 +145,10 @@ Every table is copied and its row count verified. It only works into an empty da
 ```bash
 ./qp start
 ./qp tailscale
+./qp install-timers
 ```
-`start` builds, runs the preflight, starts everything and prints the health of every part. `tailscale` prints the
+`start` builds, runs the preflight, starts everything and prints the health of every part. `install-timers` adds
+the supervisor watchdog, the CI-gated auto-update, the nightly backup and the weekly restore test (see below). `tailscale` prints the
 dashboard's private address, like `https://quantpulse.tail1234.ts.net`. (The first time, Tailscale may print a link
 asking to enable HTTPS certificates for your tailnet: open it, click *Enable*, and run `./qp tailscale` again.)
 The address works only on devices signed in to your Tailscale account — nothing is open to the internet.
@@ -212,9 +215,21 @@ Host quantpulse
   User root
 ```
 
-`update` backs up the database, pulls the latest code of the checked-out branch, rebuilds, runs the preflight
-and restarts; the Brain recovers before it sends anything. `rollback` backs up, rolls the database schema back
-to what the previous version expects, and redeploys that version (`qp update` later returns to the latest).
+`update` deploys the followed branch's newest commit **only if GitHub CI passed on it** (every job, the ARM64
+build included). It backs up the database, builds exactly that commit, and runs the preflight on the new image
+while the old version keeps running. It then switches, and checks that the Brain supervisor ticks within 10
+minutes; if not, it rolls back by itself, schema included. The Brain recovers before it sends anything.
+
+`rollback` backs up, rolls the database schema back to what the previous version expects, and redeploys that
+version. It pauses automatic deploys; `qp update` later returns to the latest.
+
+**Timers** (any systemd server): `./qp install-timers` adds four timers:
+- a supervisor watchdog, every minute;
+- a CI-gated auto-update, every 10 minutes, outside market hours;
+- the nightly backup, verified, and uploaded if `QP_BACKUP_PAR_URL` is set;
+- a weekly restore test.
+
+See [`ORACLE.md`](ORACLE.md) for how each works; the same commands apply on this server.
 
 Changing a setting: `ssh -t root@203.0.113.10 nano /opt/quantpulse/deploy/.env`, then `qp restart`. The preflight
 checks the new settings; the API does not start on an unsafe one.

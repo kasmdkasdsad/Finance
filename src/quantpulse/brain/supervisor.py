@@ -127,6 +127,10 @@ class Supervisor:
         self.standby: str | None = None  # another process holds the supervisor lease
         self.last_tick_at: datetime | None = None
         self.last_result: str | None = None
+        # for the watchdog (read only): when a tick was last asked for, whatever the answer, and when the tick
+        # running now began (``None``: none is running) — a hung tick and a scheduler that stopped asking
+        self.last_attempt_at: datetime | None = None
+        self.tick_started_at: datetime | None = None
         self.leader = False  # this process holds the supervisor lease
         self.stopping = False  # shutting down: no new tick
         self._last_tick_log: datetime | None = None
@@ -176,6 +180,8 @@ class Supervisor:
             "standby": self.standby,
             "last_tick_at": self.last_tick_at.isoformat() if self.last_tick_at else None,
             "last_result": self.last_result,
+            "last_attempt_at": self.last_attempt_at.isoformat() if self.last_attempt_at else None,
+            "tick_started_at": self.tick_started_at.isoformat() if self.tick_started_at else None,
             "next_cycle_at": self.next_cycle_at(state).isoformat(),
             "lease": await self._brain.trading.lease.info()
             if self._brain.trading.lease is not None
@@ -221,41 +227,49 @@ class Supervisor:
     async def tick(self) -> str:
         if not self._s.brain_supervisor_enabled:
             return "disabled"
+        self.last_attempt_at = self._clock.now()
         if self.stopping:
             return "stopping: this process is shutting down; no new work"
         if self._tick_lock.locked():
             return "busy: the previous tick is still running"
         async with self._tick_lock:
-            lease = self._brain.trading.lease
-            if lease is not None:  # one supervisor at a time, across every process on this database
-                before = None if self.leader else await lease.info()  # who held it, and how it ended
-                if not await lease.acquire():
-                    info = await lease.info()
-                    standby = f"another process supervises the Brain ({info.get('holder')})"
-                    if self.leader:
-                        log_event(logger, "supervisor.lost", "this process lost the supervisor lease: it stands by",
-                                  level=logging.WARNING, holder=info.get("holder"), this=lease.holder)  # fmt: skip
-                        self.lost = {"at": self._clock.now().isoformat(), "to": info.get("holder")}
-                    elif self.standby != standby:
-                        log_event(
-                            logger,
-                            "supervisor.standby",
-                            standby,
-                            holder=info.get("holder"),
-                            this=lease.holder,
-                        )
-                    self.leader, self.standby = False, standby
-                    await self._note_standby(lease.holder)
-                    return f"standby: {self.standby}"
-                if not self.leader:
-                    self._on_elected(lease.holder, before or {})
-                self.leader, self.standby = True, None
-                lease.start_heartbeat()
-            self.last_tick_at = self._clock.now()
-            result = await self._tick()
-            self.last_result = result
-            await self._record_tick(result)
-            return result
+            self.tick_started_at = self._clock.now()
+            try:
+                return await self._locked_tick()
+            finally:
+                self.tick_started_at = None
+
+    async def _locked_tick(self) -> str:
+        lease = self._brain.trading.lease
+        if lease is not None:  # one supervisor at a time, across every process on this database
+            before = None if self.leader else await lease.info()  # who held it, and how it ended
+            if not await lease.acquire():
+                info = await lease.info()
+                standby = f"another process supervises the Brain ({info.get('holder')})"
+                if self.leader:
+                    log_event(logger, "supervisor.lost", "this process lost the supervisor lease: it stands by",
+                              level=logging.WARNING, holder=info.get("holder"), this=lease.holder)  # fmt: skip
+                    self.lost = {"at": self._clock.now().isoformat(), "to": info.get("holder")}
+                elif self.standby != standby:
+                    log_event(
+                        logger,
+                        "supervisor.standby",
+                        standby,
+                        holder=info.get("holder"),
+                        this=lease.holder,
+                    )
+                self.leader, self.standby = False, standby
+                await self._note_standby(lease.holder)
+                return f"standby: {self.standby}"
+            if not self.leader:
+                self._on_elected(lease.holder, before or {})
+            self.leader, self.standby = True, None
+            lease.start_heartbeat()
+        self.last_tick_at = self._clock.now()
+        result = await self._tick()
+        self.last_result = result
+        await self._record_tick(result)
+        return result
 
     # ------------------------------------------------------------------ running in the cloud
     def _on_elected(self, holder: str, before: dict[str, Any]) -> None:
