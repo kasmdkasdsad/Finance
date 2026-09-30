@@ -97,6 +97,9 @@ class BacktestResult:
         }
 
 
+SHARE_BACKED = frozenset({"covered_call", "cash_secured_put", "protective_put", "collar"})
+
+
 def _rng(genome: Genome, cfg: BacktestConfig) -> random.Random:
     h = hashlib.sha256(f"{genome.hash}:{cfg.seed}:{cfg.model}".encode()).hexdigest()
     return random.Random(int(h[:12], 16))
@@ -262,6 +265,11 @@ def run(
             why = _passes(genome, f, rng)
             if why:
                 skipped[why] += 1
+                continue
+            if genome.family in SHARE_BACKED and equity_now * genome.risk_per_trade < 0.3 * f.spot * 100:
+                # a structure holding 100 shares (or their cash) per contract risks at least ~30% of 100 × spot:
+                # it cannot fit the risk budget, so the chain is not even built
+                skipped["too small to size"] += 1
                 continue
             chain = source.chain(u, d, (genome.dte_min, genome.dte_max))
             if chain is None or not chain.quotes:

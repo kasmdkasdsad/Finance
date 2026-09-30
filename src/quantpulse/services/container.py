@@ -48,6 +48,7 @@ from quantpulse.services.market import MarketService
 from quantpulse.services.model import ModelService
 from quantpulse.services.notifications import EmailNotifier
 from quantpulse.services.options import OptionsService
+from quantpulse.services.options_lab import OptionsLabService
 from quantpulse.services.picks import PicksService
 from quantpulse.services.portfolio import PortfolioService
 from quantpulse.services.predictions import PredictionService
@@ -245,6 +246,10 @@ class Container:
             self.jobs,
             lease=self.lease,
             options_data=self.options_data if settings.options_enabled else None,
+        )
+        # the options research lab (background research on real prices, model-priced chains; never an order)
+        self.options_lab = OptionsLabService(
+            settings, self.db, self.clock, self.market, self.jobs, self.reference
         )
         # The brain: specialist agents over a read-only view of the paper account. It proposes; the trading
         # service's deterministic risk engine is the only path to an order.
