@@ -173,6 +173,12 @@ def test_postgres_is_required_in_the_cloud():
         {"trading_max_order_notional": 50_000},
         {"trading_min_dollar_volume": 1_000_000},
         {"trading_scheduler_requires_arming": False},
+        {"options_max_loss_per_trade": 5_000},
+        {"options_max_total_risk_pct": 0.5},
+        {"options_min_dte": 3},  # (0 is refused outright: 0DTE is never allowed)
+        {"options_min_open_interest": 1},
+        {"options_max_vega_pct": 0.05},
+        {"options_allowed_structures": ["long_call", "iron_condor"]},  # adding a family needs a person
     ],
 )
 def test_protected_controls_may_not_be_loosened_in_the_cloud(loose):
@@ -184,6 +190,10 @@ def test_protected_controls_may_be_tightened():
     tight = dict(trading_max_quote_age_seconds=120, trading_max_spread_bps=15, trading_max_daily_loss_pct=0.02,
                  trading_max_positions=5, trading_min_dollar_volume=50_000_000)  # fmt: skip
     assert preflight.run(cloud(**tight), ENV).ok
+    options = dict(
+        options_max_loss_per_trade=250, options_min_dte=14, options_allowed_structures=["bull_call_spread"]
+    )
+    assert preflight.run(cloud(**options), ENV).ok  # fewer structures and smaller losses are always allowed
 
 
 def test_mask_url():

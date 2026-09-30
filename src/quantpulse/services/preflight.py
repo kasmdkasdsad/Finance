@@ -159,7 +159,10 @@ def _secret(value: Any) -> str:
 
 
 def _defaults() -> dict[str, Any]:
-    return {name: field.default for name, field in Settings.model_fields.items()}
+    # a list-valued setting has a default factory (field.default is then pydantic's "undefined" marker)
+    return {
+        name: field.get_default(call_default_factory=True) for name, field in Settings.model_fields.items()
+    }
 
 
 def run(settings: Settings, environ: Mapping[str, str] | None = None) -> Report:
