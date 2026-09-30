@@ -4,7 +4,8 @@ on:
   push:
     # Render deploys the branch it follows only after these checks pass (render.yaml: autoDeployTrigger: checksPass)
     branches: [main, "claude/**"]
-  pull_request:
+  # No pull_request trigger: a PR from one of these branches would run twice per push (and email twice).
+  # Its checks come from the push run on its head commit.
 
 permissions:
   contents: read

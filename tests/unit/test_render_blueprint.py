@@ -62,6 +62,7 @@ def test_deploys_follow_the_branch_only_after_ci_passes():
     ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
     on = ci.get("on", ci.get(True))
     assert "claude/**" in on["push"]["branches"]  # so Render sees checks on this branch
+    assert set(on) == {"push"}  # one run per push: a pull_request trigger would run the PR's pushes twice
     assert {"test", "postgres"} <= set(ci["jobs"])
 
 
