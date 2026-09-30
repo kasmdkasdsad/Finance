@@ -78,7 +78,10 @@ from .perception import UnderlyingView, perceive, record
 
 logger = logging.getLogger(__name__)
 SHADOW_PER_CYCLE = 5
-LIVE = ("pending", "open", "closing")
+# "assigned": a leg went (assigned early, or closed outside QuantPulse) while others remain — frozen for a person
+LIVE = ("pending", "open", "closing", "assigned")
+# an order that will not fill any further (whatever part of it did fill stays filled)
+ENDED = ("canceled", "expired", "rejected", "submit_failed", "done_for_day")
 RATE = 0.04
 
 
@@ -342,13 +345,22 @@ class OptionsBrain:
                     await self._event(
                         s, pos.id, "filled", f"opened at {o.average_fill_price:+.2f} per share", now
                     )
-                elif o is None or o.status in (
-                    "canceled",
-                    "expired",
-                    "rejected",
-                    "submit_failed",
-                    "done_for_day",
-                ):
+                elif o is None or o.status in ENDED:
+                    filled = int(o.filled_quantity or 0) if o is not None else 0
+                    if o is not None and 0 < filled < pos.quantity and o.average_fill_price is not None:
+                        # part filled, the rest ended (a DAY order at the close): the position is what was bought
+                        ordered, share = pos.quantity, filled / pos.quantity
+                        pos.status, pos.quantity = "open", filled
+                        pos.max_loss = round(pos.max_loss * share, 2)
+                        pos.max_profit = (
+                            round(pos.max_profit * share, 2) if pos.max_profit is not None else None
+                        )
+                        pos.entry_value = _net_dollars(
+                            o.average_fill_price, pos.structure, filled, opening=True
+                        )
+                        await self._event(s, pos.id, "partially_filled", f"{filled} of {ordered} filled at "
+                                          f"{o.average_fill_price:+.2f} per share; the rest {o.status}", now)  # fmt: skip
+                        return
                     pos.status, pos.closed_at = "closed", now
                     pos.exit_reason = f"the opening order never filled ({o.status if o else 'not found'})"
                     pos.realized_pnl = 0.0
@@ -363,13 +375,26 @@ class OptionsBrain:
                         o.average_fill_price, pos.structure, pos.quantity, opening=False
                     )
                     await self._close(s, cyc, pos, exit_value, pos.exit_reason or "exit", now, views)
-                elif o is None or o.status in (
-                    "canceled",
-                    "expired",
-                    "rejected",
-                    "submit_failed",
-                    "done_for_day",
-                ):
+                elif o is None or o.status in ENDED:
+                    filled = int(o.filled_quantity or 0) if o is not None else 0
+                    if o is not None and 0 < filled < pos.quantity and o.average_fill_price is not None:
+                        # part closed: book that part's P&L, keep the rest open at its share of the entry
+                        share = filled / pos.quantity
+                        exit_part = _net_dollars(o.average_fill_price, pos.structure, filled, opening=False)
+                        pnl_part = round(exit_part - pos.entry_value * share, 2)
+                        parts = [*(pos.structure.get("partial_exits") or []),
+                                 {"at": now.isoformat(), "qty": filled, "exit_value": exit_part, "pnl": pnl_part}]  # fmt: skip
+                        pos.structure = {**pos.structure, "partial_exits": parts}
+                        pos.entry_value = round(pos.entry_value * (1 - share), 2)
+                        pos.max_loss = round(pos.max_loss * (1 - share), 2)
+                        pos.max_profit = (
+                            round(pos.max_profit * (1 - share), 2) if pos.max_profit is not None else None
+                        )
+                        pos.quantity -= filled
+                        pos.status, pos.exit_client_order_id = "open", None
+                        await self._event(s, pos.id, "partly_closed", f"{filled} closed ({pnl_part:+,.2f}); "
+                                          f"{pos.quantity} still open: the exit is tried again", now)  # fmt: skip
+                        return
                     pos.status, pos.exit_client_order_id = "open", None
                     await self._event(s, pos.id, "exit_not_filled", f"the closing order did not fill "
                                       f"({o.status if o else 'not found'}): it is tried again", now)  # fmt: skip
@@ -378,6 +403,50 @@ class OptionsBrain:
                 missing = [leg["symbol"] for leg in _legs_of(pos.structure) if leg["symbol"] not in held]
                 if missing and len(missing) == len(_legs_of(pos.structure)):
                     await self._gone(s, cyc, pos, views, now)
+                elif missing:
+                    await self._partly_gone(s, cyc, pos, missing, views, now)
+            elif pos.status == "assigned" and held is not None:
+                if not any(leg["symbol"] in held for leg in _legs_of(pos.structure)):
+                    pos.status, pos.closed_at = "closed", now
+                    pos.exit_reason = (
+                        "resolved outside QuantPulse after a leg was assigned: P&L unknown here "
+                        "(see the account's activity)"
+                    )
+                    await self._event(s, pos.id, "resolved", pos.exit_reason, now)
+
+    async def _partly_gone(self, s: Any, cyc: OptionsCycle, pos: OptionsPositionRow, missing: Sequence[str],
+                           views: Mapping[str, UnderlyingView], now: datetime) -> None:  # fmt: skip
+        """Some legs are gone while others remain: a short leg assigned (American options can be assigned any
+        day) or a leg closed outside QuantPulse. What remains is the hedge of whatever the assignment delivered,
+        so nothing is closed automatically — closing the surviving long leg alone could leave naked stock. The
+        position is frozen (no exit orders, and it still blocks new trades on this underlying), the likely
+        assignment is recorded as inferred, and a person is alerted to close the shares and the rest together."""
+        view = views.get(pos.underlying)
+        spot = view.spot if view is not None else None
+        today = now.astimezone(NEW_YORK).date()
+        inferred = []
+        for leg in _legs_of(pos.structure):
+            if leg["symbol"] not in missing or leg["side"] != "short" or spot is None:
+                continue
+            c = parse_occ(leg["symbol"])
+            st = expiry.settlement(c, "short", int(leg["ratio"]) * pos.quantity, spot)
+            if st["share_delivery"]:  # in the money: an assignment is the likely explanation
+                inferred.append(leg["symbol"])
+                s.add(OptionsAssignmentEventRow(position_id=pos.id, at=now, symbol=leg["symbol"],
+                                                contracts=int(leg["ratio"]) * pos.quantity,
+                                                share_delivery=int(st["share_delivery"]), cash_flow=float(st["cash_flow"]),
+                                                detail=jsonable({**st, "inferred": True,
+                                                                 "early": c.expiration > today})))  # fmt: skip
+        pos.status = "assigned"
+        pos.expiry_state = expiry.ExpiryState.ASSIGNED.value if inferred else pos.expiry_state
+        cause = f"{', '.join(inferred)} most likely assigned" if inferred else "closed outside QuantPulse"
+        message = (
+            f"{', '.join(missing)} no longer held while the rest of the position is ({cause}). Frozen: "
+            "QuantPulse sends no exit for it (the remaining legs hedge what was delivered); close the shares "
+            "and the remaining legs together in the paper account."
+        )
+        await self._event(s, pos.id, "legs_gone", message, now, missing=list(missing), inferred=inferred)
+        cyc.notes.append(f"position {pos.id}: {message}")
 
     async def _gone(self, s: Any, cyc: OptionsCycle, pos: OptionsPositionRow, views: Mapping[str, UnderlyingView],
                     now: datetime) -> None:  # fmt: skip
@@ -529,7 +598,8 @@ class OptionsBrain:
         """Close a position and learn from it: P&L, attribution, the critique, a counterfactual, the event."""
         entry_fees = float((pos.structure.get("fees") or {}).get("open") or 0.0)
         pos.status, pos.closed_at, pos.exit_value, pos.exit_reason = "closed", now, exit_value, reason[:2000]
-        pos.realized_pnl = round(exit_value - pos.entry_value - entry_fees, 2)
+        partial = sum(float(x.get("pnl") or 0) for x in (pos.structure.get("partial_exits") or []))
+        pos.realized_pnl = round(exit_value - pos.entry_value - entry_fees + partial, 2)
         marks = [Mark(m["spot"], m.get("iv") or 0.0, m["value"], m["days"], m.get("delta", 0.0), m.get("gamma", 0.0),
                       m.get("theta", 0.0), m.get("vega", 0.0)) for m in (pos.marks or [])]  # fmt: skip
         attribution = None

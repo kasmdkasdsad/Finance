@@ -244,14 +244,15 @@ additive (the old version runs briefly on the new schema).
 
 ### Alerts (with `QP_ALERT_NTFY_URL` / `QP_ALERT_WEBHOOK_URL`)
 
-Sent on changes, never for a normal skipped trade: Brain stopped (also reported by a standby when the leader
-holds the lease but stopped ticking), the lease lost to another process, a takeover after a crash, database
-failing, Alpaca unreachable, reconciliation failed, stale data halting new positions, an unexpected position, a
-kill switch turned on, an execution anomaly (repeated rejected/failed/unknown orders turn the Brain kill switch
-on), three Brain cycles failing in a row, autonomous execution blocked for ten minutes in the session, an unexpected
-option position, an option approaching expiration or a close that is still pending, a structural market change
-detected by the Market Evolution Monitor, an option strategy promoted or demoted — and a note when each recovers.
-`QP_HEARTBEAT_URL` covers the one failure a server cannot report: itself being gone.
+Sent on changes, never for a normal skipped trade: Brain stopped (also reported by a standby when the leader holds
+the lease but stopped ticking), the lease lost to another process, a takeover after a crash, database failing,
+Alpaca unreachable, reconciliation failed, stale data halting new positions, an unexpected position, a kill switch
+turned on, an execution anomaly (repeated rejected/failed/unknown orders turn the Brain kill switch on), three Brain
+cycles failing in a row, autonomous execution blocked for ten minutes in the session, an unexpected option position,
+an option leg assigned (the position is frozen for you), an option approaching expiration or a close that is still
+pending, a structural market change detected by the Market Evolution Monitor, an option strategy promoted or demoted
+— and a note when each recovers. `QP_HEARTBEAT_URL` covers the one failure a server cannot report: itself being
+gone.
 
 ### Failure simulations (all automated, against the fake Alpaca paper API)
 

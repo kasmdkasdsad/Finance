@@ -435,6 +435,29 @@ class FakeAlpacaPaper(BaseAdapter):
         self.settlements += out
         return out
 
+    def assign(self, symbol: str, spot: float) -> dict[str, Any]:
+        """Early assignment of a short option (American style: any day, usually deep in the money or before an
+        ex-dividend date): the contracts disappear and the shares move at the strike."""
+        c = occ(symbol)
+        qty = self.positions[symbol]["qty"]
+        assert c is not None and qty < 0, "only a short option can be assigned"
+        del self.positions[symbol]
+        shares = (
+            100 * qty * (1 if c["kind"] == "call" else -1)
+        )  # short call: shares delivered; short put: taken
+        self.prices.setdefault(c["root"], spot)
+        self._move(c["root"], shares, c["strike"])
+        event = {
+            "symbol": symbol,
+            "qty": qty,
+            "spot": spot,
+            "itm": True,
+            "shares": shares,
+            "kind": "assigned",
+        }
+        self.settlements.append(event)
+        return event
+
     def complete(self, client_order_id: str) -> None:
         """Fill whatever is left of an open order (e.g. a resting or partially filled one)."""
         order = self.orders[self.by_client[client_order_id]]

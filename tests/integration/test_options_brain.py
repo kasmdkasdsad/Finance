@@ -220,3 +220,114 @@ async def test_option_failures_are_handled_and_alerted(tmp_path):
         clock.advance(61 * 60)
         await health._options_alerts()
         assert "option_close_pending" in {a["kind"] for a in api.container.alerts.sent}
+
+
+async def test_an_early_assignment_freezes_the_rest_and_asks_a_person(tmp_path):
+    """American options can be assigned any day. When the short leg of a spread is assigned the long leg is the
+    hedge of the delivered shares: QuantPulse must not close it alone (that could leave naked stock), nor keep
+    sending exits for legs it no longer holds. It freezes the position, records the likely assignment, keeps
+    new trades off the underlying and alerts a person."""
+    from datetime import timedelta
+
+    from quantpulse.db.options_models import OptionsAssignmentEventRow
+
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        m, spot = api.market, api.feed.live_price("MIDA")
+        long = m.pick("MIDA", "call", moneyness=0.85)
+        short = min((c for c in m.listed("MIDA") if c.kind == "call" and c.expiration == long.expiration
+                     and c.strike > long.strike), key=lambda c: c.strike)  # fmt: skip
+        assert short.strike < spot  # both in the money: the short call is a candidate for early assignment
+        legs = [{"symbol": c.symbol, "side": side, "ratio": 1, "kind": "call", "strike": c.strike,
+                 "expiration": c.expiration.isoformat()} for c, side in ((long, "long"), (short, "short"))]  # fmt: skip
+        async with api.container.db.session() as s:
+            pos = OptionsPositionRow(underlying="MIDA", family="bull_call_spread", direction="bullish", mode="paper",
+                                     structure={"legs": legs}, quantity=1, status="open", expiry_state="OPEN",
+                                     first_expiration=long.expiration, opened_at=clock.now() - timedelta(days=3),
+                                     entry_value=250.0, entry_underlying=spot, max_loss=250.0, marks=[])  # fmt: skip
+            s.add(pos)
+            await s.commit()
+            pid = pos.id
+        api.fake.hold(long.symbol, 1, 5.0)
+        api.fake.hold(short.symbol, -1, 3.0)
+        event = api.fake.assign(short.symbol, spot)
+        assert event["shares"] == -100 and api.fake.positions["MIDA"]["qty"] == -100  # shares delivered
+        await promote(api, LONG_CALL, Stage.PAPER_ACTIVE)  # a strategy that would otherwise trade MIDA
+        await run_cycle(api)
+        (pos,) = [p for p in await rows(api, OptionsPositionRow, mode="paper") if p.id == pid]
+        assert pos.status == "assigned" and pos.expiry_state == "ASSIGNED"
+        (ev,) = await rows(api, OptionsAssignmentEventRow)
+        assert (
+            ev.symbol == short.symbol
+            and ev.share_delivery == -100
+            and ev.detail["inferred"]
+            and ev.detail["early"]
+        )
+        assert not [b for b in api.fake.bodies if long.symbol in str(b)]  # the hedge is never closed alone
+        assert len(await rows(api, OptionsPositionRow, mode="paper")) == 1  # no new trade on MIDA meanwhile
+        assert {c.gate for c in await rows(api, OptionsTradeCandidateRow)} == {"OptionsPortfolioAgent"}
+        await api.container.health._options_alerts()
+        assert "option_assigned" in {a["kind"] for a in api.container.alerts.sent}
+        # a person closes the shares and the long call in the paper account: the record follows
+        del api.fake.positions[long.symbol], api.fake.positions["MIDA"]
+        clock.advance(35 * 60)
+        await run_cycle(api)
+        (pos,) = [p for p in await rows(api, OptionsPositionRow, mode="paper") if p.id == pid]
+        assert pos.status == "closed" and "resolved outside QuantPulse" in pos.exit_reason
+
+
+def _order(cid, symbol, side, qty, status, filled, price):
+    from quantpulse.db.models import BrokerOrderRow
+
+    return BrokerOrderRow(client_order_id=cid, symbol=symbol, side=side, quantity=qty, asset_class="us_option",
+                          order_type="limit", limit_price=price, status=status, filled_quantity=filled,
+                          average_fill_price=price, strategy="brain")  # fmt: skip
+
+
+async def _sync(api, pid, closing_cid=None, *orders):
+    """Record the broker orders, mark the position closing on ``closing_cid``, and let the Options Brain sync it."""
+    from quantpulse.brain.options.brain import OptionsCycle
+
+    db, now = api.container.db, api.container.clock.now()
+    async with db.session() as s:
+        p = await s.get(OptionsPositionRow, pid)
+        for o in orders:
+            s.add(o)
+        if closing_cid:
+            p.status, p.exit_client_order_id = "closing", closing_cid
+        await s.commit()
+    await api.container.options_brain._sync_paper(OptionsCycle(cycle_id=None, at=now), p, None, {}, now)
+    async with db.session() as s:
+        return await s.get(OptionsPositionRow, pid)
+
+
+async def test_partial_fills_keep_the_record_equal_to_what_is_held(tmp_path):
+    """A DAY order can end part-filled at the close. Opening: the position is what was bought (not "never
+    filled" while the contracts sit in the account). Closing: the closed part's P&L is booked and the rest stays
+    open at its share of the entry, so the next exit asks for exactly what is held."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        c = api.market.pick("MIDA", "call", moneyness=1.0)
+        legs = [{"symbol": c.symbol, "side": "long", "ratio": 1, "kind": "call", "strike": c.strike,
+                 "expiration": c.expiration.isoformat()}]  # fmt: skip
+        async with api.container.db.session() as s:
+            s.add(_order("qp-test-open", c.symbol, "buy", 3, "expired", 2, 1.9))
+            pos = OptionsPositionRow(underlying="MIDA", family="long_call", direction="bullish", mode="paper",
+                                     structure={"legs": legs}, quantity=3, status="pending", expiry_state="OPEN",
+                                     first_expiration=c.expiration, opened_at=clock.now(), entry_value=600.0,
+                                     entry_underlying=100.0, max_loss=600.0, marks=[], client_order_id="qp-test-open")  # fmt: skip
+            s.add(pos)
+            await s.commit()
+            pid = pos.id
+        p = await _sync(api, pid)
+        assert (p.status, p.quantity, p.entry_value, p.max_loss) == (
+            "open",
+            2,
+            380.0,
+            400.0,
+        )  # 2 of 3 at 1.90
+        p = await _sync(api, pid, "qp-c1", _order("qp-c1", c.symbol, "sell", 2, "canceled", 1, 2.5))
+        assert (p.status, p.quantity, p.entry_value, p.max_loss) == ("open", 1, 190.0, 200.0)
+        assert p.structure["partial_exits"][0]["pnl"] == 60.0  # 250 received for what cost 190
+        p = await _sync(api, pid, "qp-c2", _order("qp-c2", c.symbol, "sell", 1, "filled", 1, 3.0))
+        assert p.status == "closed" and p.realized_pnl == 170.0  # 110 on the last contract + 60 on the first

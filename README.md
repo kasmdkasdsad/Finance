@@ -2016,11 +2016,12 @@ Options are a layer of the same Brain, not a second engine: the **full guide is 
 Monitor, the model registry, every setting).
 
 * **Paper only, one path.** Option orders go through the existing trading service, risk engine, final execution
-  audit and order manager to the Alpaca **paper** account — the same kill switches, the same single
-  `broker.submit`, the same reconciliation and ledger. Defined-risk structures only (long calls/puts, debit and
-  credit verticals, covered calls): never a naked short option, never 0DTE, never an exercise; positions are
-  closed before expiration. Option limits (maximum loss per trade and per book, per-underlying risk, net delta
-  and vega, contracts, DTE, spread, quote age, open interest) are protected: they can only be tightened.
+  audit and order manager to the Alpaca **paper** account — the same kill switches, the same single `broker.submit`,
+  the same reconciliation and ledger. Defined-risk structures only (long calls/puts, debit and credit verticals,
+  covered calls): never a naked short option, never 0DTE, never an exercise; positions are closed before expiration;
+  an early assignment freezes the position (its remaining legs are the hedge) and alerts a person. Option limits
+  (maximum loss per trade and per book, per-underlying risk, net delta and vega, contracts, DTE, spread, quote age,
+  open interest) are protected: they can only be tightened.
 * **Favoured, never forced.** `QP_OPTIONS_PRIORITY_WEIGHT` (0.15) tips close calls towards an option expression
   of the Brain's view; each candidate is compared with the equivalent share trade, and NO TRADE remains an
   answer.

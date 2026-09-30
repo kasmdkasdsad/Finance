@@ -3,6 +3,7 @@ order manager as every stock order — against the real alpaca-py SDK, the fake 
 options market (never the network, never a real account)."""
 
 import re
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,23 @@ async def test_nothing_unsafe_is_ever_sent(tmp_path):
         cycle = await run(api, good, cycle=4)
         assert cycle.trades == [] and any("option" in n for n in cycle.notes)
         m.down = False
+        api.feed.quote_age = timedelta(minutes=15)  # the underlying's own price is stale
+        cycle = await run(api, good, cycle=6)
+        assert all(not t.approved for t in cycle.trades) and any("fresh price" in n for n in cycle.notes), (
+            cycle.notes
+        )
+        api.feed.quote_age = timedelta(seconds=5)
+        m.half_spread = 0.40  # a wide market on every leg
+        cycle = await run(api, call_spread(m), cycle=7)
+        (wide,) = cycle.trades
+        assert not wide.approved and "option_liquidity" in wide.risk, wide.risk
+        m.half_spread = 0.02
+        bogus = OptionOrderIntent(U, "long_call", (OptionLegIntent("UPA991399C00100000", "buy", 1, "buy_to_open"),),
+                                  1, 1.0, "entry", "t", True, m.spot(U))  # fmt: skip
+        cycle = await run(api, bogus, cycle=8)  # a contract that cannot exist
+        assert cycle.trades == [] and any("option entries are not sent" in n for n in cycle.notes), (
+            cycle.notes
+        )
         await api.post("/api/v1/trading/kill-switch", json={"active": True, "reason": "test"})
         cycle = await run(api, good, cycle=5)
         assert all(t.status != "filled" for t in cycle.trades)

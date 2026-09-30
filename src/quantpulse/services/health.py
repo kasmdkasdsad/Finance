@@ -502,7 +502,7 @@ class HealthMonitor:
             live = (
                 await s.scalars(
                     select(OptionsPositionRow).where(
-                        OptionsPositionRow.status.in_(("pending", "open", "closing"))
+                        OptionsPositionRow.status.in_(("pending", "open", "closing", "assigned"))
                     )
                 )
             ).all()
@@ -533,12 +533,20 @@ class HealthMonitor:
                 continue
             dte = (p.first_expiration - today).days
             key = f"opt_expiring:{p.id}:{today}"
-            if dte <= c.settings.options_close_dte and key not in self._reported:
+            if dte <= c.settings.options_close_dte and p.status != "assigned" and key not in self._reported:
                 self._reported.add(key)
                 await c.alerts.send(Alert("option_expiring", "Option position close to expiration",
                                           f"position {p.id} ({p.family} on {p.underlying}) expires in {dte} day(s) and is "
                                           f"still {p.status}: QuantPulse closes it before expiration when it can "
                                           "(it never exercises); check the Options page.", "warning", str(p.id)))  # fmt: skip
+            key = f"opt_assigned:{p.id}"
+            if p.status == "assigned" and key not in self._reported:
+                self._reported.add(key)
+                await c.alerts.send(Alert("option_assigned", "Option leg assigned — action needed",
+                                          f"position {p.id} ({p.family} on {p.underlying}): a leg is gone while the rest "
+                                          "is held (most likely assigned). QuantPulse froze it and sends no exit; close "
+                                          "the delivered shares and the remaining legs together in the paper account.",
+                                          "critical", str(p.id)))  # fmt: skip
             key = f"opt_closing:{p.id}"
             since = self._closing_since.setdefault(p.id, now) if p.status == "closing" else None
             if since is not None and now - since > timedelta(hours=1) and key not in self._reported:

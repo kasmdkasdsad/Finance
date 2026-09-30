@@ -22,6 +22,7 @@ established yet.
 | Defined risk only | the maximum loss is computed from the payoff at expiration (never estimated by a model); `inf` is refused |
 | Never 0DTE | at least one day to expiration for any order, whatever the settings (0DTE is research only) |
 | Never exercise | QuantPulse closes positions `QP_OPTIONS_CLOSE_DTE` days before expiration; anything left is settled by the OCC and recorded as such |
+| Early assignment | a leg gone while the rest is held (American options can be assigned any day) freezes the position: no exit orders (the remaining legs hedge the delivered shares — closing them alone could leave naked stock), no new trade on that underlying, the likely assignment recorded as inferred, and a critical alert asks a person to close the shares and the remaining legs together |
 | Fresh quotes only | every leg is re-quoted just before the order; model-priced and recorded quotes can never be execution quotes; the indicative feed is labelled |
 | Limits only tighten | every `QP_OPTIONS_*` limit is a protected control: the cloud preflight refuses a looser value and the self-improvement engine never proposes one |
 | Human approval | adding a structure family, anything undefined-risk (never allowed anyway), an AI model becoming authoritative, going live (impossible) |
