@@ -10,7 +10,9 @@
 #   ./qp status [--json]       the server at a glance: CPU, memory, disk, Docker, PostgreSQL, API, Brain
 #                              supervisor, last cycle, heartbeat, backups, deployed commit and its CI result
 #   ./qp logs [SERVICE]        follow the logs (api, dashboard, db, backup, caddy; default api)
-#   ./qp restart [SERVICE]     restart (default: api and dashboard); the Brain recovers before any order
+#   ./qp restart [SERVICE]     restart (default: api and dashboard) with the current deploy/.env; the Brain
+#                              recovers before any order
+#   ./qp keys                  replace the Alpaca PAPER keys (asked, never shown), then ./qp restart
 #   ./qp stop-trading [REASON] Brain kill switch ON: no new Brain orders, working Brain orders canceled
 #   ./qp start-trading         Brain kill switch OFF (asks first)
 #   ./qp update [COMMIT]       deploy the followed branch's newest commit (or COMMIT) now — only if GitHub CI
@@ -186,8 +188,20 @@ case "$cmd" in
     ;;
   restart)
     need_env
-    if [[ $# -gt 0 ]]; then dc restart "$@"; else dc restart api dashboard; fi
+    # recreated, not just restarted: a container keeps the settings it was created with, so a plain restart
+    # would ignore changes to deploy/.env (new keys, alert URLs); the API still stops gracefully first
+    if [[ $# -gt 0 ]]; then dc up -d --no-deps --force-recreate "$@"; else dc up -d --no-deps --force-recreate api dashboard; fi
     wait_healthy
+    ;;
+  keys)
+    need_env
+    read -r -s -p "New Alpaca PAPER key id (starts with PK; not shown): " key; echo
+    [[ "$key" == PK* ]] || die "that is not a paper key id (paper key ids start with PK): nothing was changed"
+    read -r -s -p "New Alpaca PAPER secret key (not shown): " secret; echo
+    [[ -n "$secret" ]] || die "no secret given: nothing was changed"
+    set_var QP_ALPACA_API_KEY_ID "$key"; set_var QP_ALPACA_API_SECRET_KEY "$secret"
+    unset key secret
+    say "saved the new Alpaca paper keys. Apply them: ./qp restart"
     ;;
   stop-trading)
     need_env
@@ -284,6 +298,6 @@ case "$cmd" in
     say "stopped. Start again with ./qp start"
     ;;
   help|*)
-    sed -n '2,29p' "$HERE/qp" | sed 's/^# \{0,1\}//'
+    sed -n '2,31p' "$HERE/qp" | sed 's/^# \{0,1\}//'
     ;;
 esac

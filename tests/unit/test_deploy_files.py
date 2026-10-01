@@ -221,3 +221,21 @@ def test_qp_setup_works_on_a_fresh_server(tmp_path):
                            env=env, timeout=60)  # fmt: skip
     assert again.returncode == 0, again.stderr
     assert (deploy / ".env").read_text() == written
+
+    # Alpaca refused the keys: ./qp keys replaces them (asked, never shown), ./qp restart applies them
+    bad = subprocess.run(["bash", str(deploy / "qp"), "keys"], input="AKLIVEKEY\nx\n", text=True,
+                         capture_output=True, env=env, timeout=60)  # fmt: skip
+    assert bad.returncode != 0 and "not a paper key" in bad.stderr
+    assert (deploy / ".env").read_text() == written  # a live key id changes nothing
+    keys = subprocess.run(["bash", str(deploy / "qp"), "keys"], input="PKNEWKEY456\nnew-secret-hidden\n",
+                          text=True, capture_output=True, env=env, timeout=60)  # fmt: skip
+    assert keys.returncode == 0, keys.stderr
+    updated = (deploy / ".env").read_text()
+    assert re.search(r"^QP_ALPACA_API_KEY_ID=PKNEWKEY456$", updated, re.M) and "PKTESTKEY123" not in updated
+    assert re.search(r"^QP_ALPACA_API_SECRET_KEY=new-secret-hidden$", updated, re.M)
+    assert "new-secret-hidden" not in keys.stdout + keys.stderr
+    restart = subprocess.run(["bash", str(deploy / "qp"), "restart"], text=True, capture_output=True, env=env,
+                             timeout=60)  # fmt: skip
+    assert restart.returncode == 0, restart.stderr
+    # recreated, so the containers take the new deploy/.env (a plain `docker compose restart` would not)
+    assert "up -d --no-deps --force-recreate api dashboard" in log.read_text().splitlines()
