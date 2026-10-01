@@ -24,6 +24,9 @@ Keeps hot data warm so user requests are served from cache instead of hitting ra
   and the last cycle; alerts on changes, the heartbeat, and Brain orders failing closed while unhealthy.
 * options research — once per trading day after ``options_research_time``: the lab's budgeted research run
   (background), then the Options Brain's learning pass (weights, lessons, missed opportunities graded);
+* the research queue — once a minute: while the market is closed the Brain works through its research queue
+  (grading, analysis, backtests, preparation), within memory and CPU limits and only in the process holding the
+  supervisor lease; in the session research waits (execution and safety first). It never places an order.
 * market evolution — once per trading day after ``evolution_time``: the day's metrics, the scan for
   structural change, competing hypotheses, relationships and re-validation.
   Both run only in the process holding the supervisor lease, and never place an order.
@@ -115,6 +118,7 @@ class Poller:
                 self._loop("options_research", lambda: RESEARCH_CHECK_SECONDS, self.run_research)
             ),
             asyncio.create_task(self._loop("evolution", lambda: RESEARCH_CHECK_SECONDS, self.run_evolution)),
+            asyncio.create_task(self._loop("research", lambda: BRAIN_CHECK_SECONDS, self.run_research_queue)),
         ]
         logger.info("poller started (%d jobs)", len(self._tasks))
 
@@ -254,6 +258,9 @@ class Poller:
         job = self._c.options_lab.start_research()
         learned = await self._c.options_brain.learn()
         return f"research job {job.id} started; learned: {learned.get('weights')} weight(s), {learned.get('lessons')} lesson(s)"
+
+    async def run_research_queue(self) -> str:
+        return await self._c.brain.research.tick()
 
     async def run_evolution(self) -> str:
         """The market evolution monitor, once a trading day."""

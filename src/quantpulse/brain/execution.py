@@ -40,7 +40,7 @@ service still re-checks the kill switches, switches, key, endpoint and .env imme
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
@@ -255,6 +255,9 @@ class BrainExecutor:
         self._store = store
         self._agents = agents
         self._audited_day: Any = None  # the trading day a pre-trade audit last passed in this process
+        # the session's execution readiness (pre-market audit, data health, reconciliation, strategy status):
+        # set by the Brain service; an order waits until it has passed today (see brain.research.operating)
+        self.readiness: Callable[[], Awaitable[dict[str, Any]]] | None = None
 
     # ------------------------------------------------------------------ the final execution audit
     async def audit(
@@ -540,6 +543,23 @@ class BrainExecutor:
             if not armed:
                 await self._trading.arm("Brain pre-trade execution audit passed")
             self._audited_day = today
+        # then the session's execution readiness (an extra gate after the audit: it only ever holds orders)
+        if self.readiness is not None and self._s.brain_owns_account:
+            ready = await self.readiness()
+            report["readiness"] = {
+                "passed": ready.get("passed"),
+                "failed": ready.get("failed"),
+                "at": ready.get("at"),
+            }
+            if not ready.get("passed"):
+                for p in chosen:
+                    p.status = "blocked"
+                    p.execution = {
+                        "sent": False,
+                        "reason": "execution readiness has not passed today: "
+                        + "; ".join(ready.get("failed") or ["not checked"]),
+                    }
+                return report
         try:
             cycle = await self._trading.run_brain(
                 [to_order(p, ctx) for p in chosen],

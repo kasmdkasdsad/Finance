@@ -19,6 +19,7 @@ stress tests) → paper (shadow) tracking → compare → promote only if valida
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Any
 
@@ -201,15 +202,19 @@ class StrategyLab:
                 raise DomainError(f"{strategy_id}@v{version} is retired")
             spec = StrategySpec.from_dict(row.spec)
         panel, meta = await self.panel()
-        features = compute_features(panel)
-        report = validate(
-            spec,
-            features,
-            panel.close,
-            panel.benchmark,
-            self.thresholds,
-            volume=panel.volume,
-            capital=self._s.brain_book_capital,
+        # CPU-heavy (features, backtests, walk-forward, random portfolios): off the event loop, so the supervisor
+        # and the API keep running meanwhile
+        features = await asyncio.to_thread(compute_features, panel)
+        report = await asyncio.to_thread(
+            lambda: validate(
+                spec,
+                features,
+                panel.close,
+                panel.benchmark,
+                self.thresholds,
+                volume=panel.volume,
+                capital=self._s.brain_book_capital,
+            )
         )
         report["data"] = meta
         summary = {
@@ -285,7 +290,7 @@ class StrategyLab:
             await self.publish_signals()
             return {"tracked": 0}
         panel, _ = await self.panel()
-        features = compute_features(panel)
+        features = await asyncio.to_thread(compute_features, panel)
         close, bench = panel.close, panel.benchmark
         now = self._clock.now()
         updated = 0

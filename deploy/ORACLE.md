@@ -58,6 +58,9 @@ them when you sign up. **Nothing is bought by QuantPulse or by these scripts.**
   - in a rehearsal (an empty database, the supervisor off) the whole stack used about **450 MB = 7.5% of 6 GB**;
   - with the Brain working, the S&P 500 data loaded and the daily model runs, it uses more: PostgreSQL's 1 GB
     cache fills as the history grows, and the stock model peaks near 1.5 GB;
+  - while the market is closed the Brain does real research (grading, analyses, backtests, walk-forward tests:
+    see the README's *24/7 operating model*). That uses CPU and memory outside the session, within limits that
+    keep execution first: no new job above 70% memory, running jobs stop at 85%, and one job at a time;
   - whether that stays above 20% (1.2 GB) *all week* has not been measured on a real server.
 
   What protects you:
@@ -344,6 +347,7 @@ more. It leaves the API alone for 5 minutes after any start, while a deploy, bac
 | **A crash of the API** | Docker restarts it; recovery first. |
 | **`./qp down`** | Everything stops and stays stopped (the watchdog and auto-update leave it alone) until `./qp start`. |
 | **`./qp stop-trading`** | The Brain kill switch: no new Brain orders (persists across restarts); the Brain keeps analysing. |
+| **Research jobs** (while the market is closed) | A stop or reboot stops the running research job and queues it again. After the start, the Brain picks it up while the market is still closed. Being interrupted costs a job nothing, and a job is never run in the session. |
 
 ---
 

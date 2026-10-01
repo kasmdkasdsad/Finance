@@ -26,6 +26,7 @@ from frontend.views import (  # noqa: E402
     picks,
     portfolio,
     remote,
+    research,
     sandbox,
     sports,
     stock,
@@ -122,6 +123,7 @@ pages = {
             url_path="options-intelligence",
         ),
         st.Page(evolution.render, title="Market Evolution", icon=":material/timeline:", url_path="evolution"),
+        st.Page(research.render, title="Research (24/7)", icon=":material/science:", url_path="research"),
         st.Page(
             trading.render,
             title="Paper Trading (Alpaca)",

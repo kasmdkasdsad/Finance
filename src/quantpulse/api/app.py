@@ -28,6 +28,7 @@ from quantpulse.api.routers import (
     portfolio,
     predictions,
     rates,
+    research,
     sandbox,
     sports,
     stocks,
@@ -140,6 +141,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         stocks,
         predictions,
         trading,
+        research,  # /brain/research/*: before the brain router's own paths
         brain,
         jobs,
     )

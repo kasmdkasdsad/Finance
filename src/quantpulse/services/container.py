@@ -393,6 +393,10 @@ class Container:
         except Exception:
             logger.warning("draining the Brain at shutdown failed", exc_info=True)
         await self.poller.stop()
+        try:  # research jobs stop and are queued again; they resume after the restart
+            await self.brain.research.stop()
+        except Exception:
+            logger.warning("stopping the research jobs at shutdown failed", exc_info=True)
         reconciled = await self._final_reconcile()
         await self._record_lifecycle(stopped_at=self.clock.now().isoformat(), clean=True,
                                      drained=finished and not still, reconciled=reconciled)  # fmt: skip

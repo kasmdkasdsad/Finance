@@ -273,6 +273,7 @@ which would include query-string API keys, is suppressed.
 | Forecasts | `QP_FORECAST_IV_WEIGHT` (weight of options-implied volatility, default 0.5), `QP_FORECAST_VARIANCE_PREMIUM` (implied variance is divided by this, default 1.1), `QP_FORECAST_EARNINGS_JUMPS` (default on) |
 | Reference data | `QP_TTL_REFERENCE` (S&P membership, SEC profiles and earnings dates, default 7 days), `QP_TTL_FUNDAMENTALS_FRAMES` (SEC XBRL frames, default 7 days) |
 | Alpaca paper trading | `QP_ALPACA_TRADING_ENABLED` (default off), `QP_TRADING_DRY_RUN` (default on), `QP_ALPACA_PAPER` (must be true), `QP_TRADING_KILL_SWITCH`, `QP_TRADING_TIME`, `QP_TRADING_REBALANCE_INTERVAL_MINUTES`, `QP_TRADING_MAX_*` limits, `QP_TRADING_ORDER_TYPE`, `QP_TRADING_SIGNAL_WEIGHTS`, `QP_TRADING_REGIME_*` — see [Alpaca paper trading](#alpaca-paper-trading-automated-strategy) and `.env.example` |
+| Brain research (24/7) | `QP_RESEARCH_ENABLED` (default on), `QP_RESEARCH_MAX_CONCURRENT` (1, at most 2), `QP_RESEARCH_MAX_MEMORY_PCT` (70: no new job above), `QP_RESEARCH_ABORT_MEMORY_PCT` (85: running jobs stop), `QP_RESEARCH_MAX_LOAD` (0.85 per core), `QP_RESEARCH_JOB_TIMEOUT_MINUTES` (30) — see [The 24/7 operating model](#the-247-operating-model-execution-and-research) |
 | Predictions | `QP_PREDICTIONS_ENABLED`, `QP_PREDICTIONS_LOG_TIME` (default 16:20 ET), `QP_PREDICTIONS_ALLOW_SYNTHETIC` (default off) |
 
 The Streamlit app reads `QP_API_URL` (default `http://127.0.0.1:8000`) and `QP_API_TOKEN`. Both can
@@ -1489,7 +1490,7 @@ market session and by event, and never runs every agent all the time:
 
 | Session | What it does |
 |---|---|
-| Pre-market (from 08:30 New York) | Once a day. When the Brain owns the account, first the **pre-market check**: the SDK client points at the paper API, Alpaca's view of the account (blocked?), reconciliation of orders and positions, the calendar (Alpaca's clock, an early close), market data (the vendors' feeds, a live benchmark quote), overnight changes against the last close, and orders still open before the bell — kept with the day (`GET /brain/sessions`). Then a learning pass and a full cycle to prepare the session. Nothing is executable while the market is closed |
+| Pre-market (from 08:30 New York) | Once a day. When the Brain owns the account, first **execution readiness** (see [The 24/7 operating model](#the-247-operating-model-execution-and-research)), which runs the **pre-market check**: the SDK client points at the paper API, Alpaca's view of the account (blocked?), reconciliation of orders and positions, the calendar (Alpaca's clock, an early close), market data (the vendors' feeds, a live benchmark quote), overnight changes against the last close, and orders still open before the bell — kept with the day (`GET /brain/sessions`). Then a learning pass and a full cycle to prepare the session. Nothing is executable while the market is closed |
 | Market open | A full cycle every `QP_BRAIN_CYCLE_MINUTES` (30). A quote monitor for holdings and the last focus every `QP_BRAIN_MONITOR_MINUTES` (5): a move of ≥ 3 daily σ or a stale quote becomes an event. When the Brain owns the account, a reconciliation with Alpaca (and the execution ledger) every 5 minutes. It reads the trading service's audit trail for orders, fills and risk limits. Event wake-ups run focused cycles, at most `QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR` (4). From 30 minutes before the close, once a day: the **near-close review** — a portfolio cycle that de-risks what should not be held into an overnight earnings release, then records the day's decision state (each holding: held overnight or reduced, and why) |
 | After hours (from 16:40) | Once a day. When the Brain owns the account, first the **close**: reconcile, then record the day — equity, the day's return and the benchmark's, exposure, positions, the Brain's orders sent and filled and their notional, cycles run and how many had new positions halted and why (`brain_sessions`, what the 60-session evaluation reads). Then a learning pass, **trade lessons** (every position closed since the last pass becomes a long-term memory: the thesis, how it ended, its return against the benchmark, and its execution grades — outcome and execution kept apart), a portfolio review, the strategy lab's paper portfolios and the improvement review (proposals only) |
 | Weekends and holidays | Once a day: a learning pass, then a deep research cycle (twice the pre-screen and opportunity budget) |
@@ -1530,6 +1531,139 @@ closes the cycles the restart interrupted, reconciles with Alpaca, brings the ex
 and runs the startup audit. Ticks never overlap (a duplicate tick does nothing). It can be paused and
 resumed at runtime (`POST /brain/supervisor {"paused": true}` or the page), and its state survives
 restarts.
+
+### The 24/7 operating model: execution and research
+
+The Brain works around the clock in three modes (`GET /brain/research/operating`; the change of mode is logged
+and kept):
+
+| Mode | When (New York) | Loop |
+|---|---|---|
+| **EXECUTION** | the regular session | EXECUTE → MONITOR → RECONCILE → LEARN: the supervisor above. It buys and sells the Alpaca **paper** account only when every existing gate passes. |
+| **PRE_MARKET** | trading days, 08:00 to the open | PRE-MARKET AUDIT → DATA HEALTH → PORTFOLIO RECONCILIATION → WATCHLIST → STRATEGY STATUS → EXECUTION READINESS |
+| **RESEARCH** | after the close, overnight, weekends, holidays | GRADE → ANALYZE → RESEARCH → TEST → LEARN → PREPARE: the research queue |
+
+**Execution readiness** is one more gate in front of the existing ones; it never replaces or loosens any of
+them. Before the first Brain order of a session, these steps must pass, and the result is kept for the day:
+
+* the pre-market audit (paper endpoint, account, calendar);
+* data health (live data for the benchmark, no refused feed);
+* reconciliation with Alpaca;
+* the watchlist (informational);
+* strategy status: nothing is in production without a person's promotion.
+
+The supervisor runs it from 08:30 and retries every 10 minutes until it passes. A process started mid-session
+runs it before its first order, retrying at most every 5 minutes. Until it passes, Brain orders are held with
+the reason `execution readiness has not passed today: …`. The final execution audit, the risk engine, both kill
+switches, the stale-data and spread checks, reconciliation, duplicate-order prevention and paper-only
+enforcement all still apply unchanged.
+
+**Research while the market is closed.** The research scheduler works through a persistent queue
+(`brain_research_jobs`). The poller ticks it once a minute, separately from the supervisor, so it never delays
+a supervisor tick. It has 23 kinds of job (`GET /brain/research/catalog`):
+
+* **Grade:** matured predictions and ideas.
+* **Analyze:**
+  * agent accuracy and calibration;
+  * decision quality against outcome (skill, not luck);
+  * winning against losing trades, with a post-mortem per loss;
+  * rejected and missed opportunities;
+  * execution cost and turnover;
+  * the account against the benchmark (excess return, beta);
+  * sector and size exposure;
+  * pathological behaviour.
+* **Research:**
+  * new signals: the rank IC of every feature, in-sample, out-of-sample and in high volatility, corrected for
+    multiple testing;
+  * agent combinations (leave-one-out on graded calls);
+  * redundant agents;
+  * the strategy lab (backtests, walk-forward, random portfolios, stress);
+  * the improvement engine's proposals.
+* **Learn:** long-term memory.
+* **Prepare:**
+  * data quality;
+  * database and schema integrity;
+  * reconciliation (read only);
+  * upcoming earnings for what is held and watched;
+  * the next session's watchlist and priorities.
+
+How the queue is run:
+
+* **Priority** is the expected information value: `value × uncertainty × staleness ÷ cost`, plus a bonus for a
+  person's question. Each job stores how its priority was computed. A question already queued is not asked
+  twice; asking it again raises its priority. Standing questions come back when their answer is older than
+  their refresh interval. Jobs can ask follow-up questions, such as a post-mortem for each losing trade.
+* **Execution and safety first:**
+  * no research starts in the session, or in pre-market after 09:15 (before then, light jobs only);
+  * a job still running at those points is stopped and queued again, and so is one running when the supervisor
+    is paused or the process stops;
+  * research runs only in the process that holds the supervisor lease;
+  * memory and CPU are read the way the kernel enforces them (the container's cgroup limit and the machine). A
+    job starts only below `QP_RESEARCH_MAX_MEMORY_PCT` (70%; heavy jobs need 10 points more) and a load of
+    `QP_RESEARCH_MAX_LOAD` per core. Running jobs stop above `QP_RESEARCH_ABORT_MEMORY_PCT` (85%);
+  * at most `QP_RESEARCH_MAX_CONCURRENT` jobs run at once (1); each has a timeout and a heartbeat.
+* **Restartable:** jobs live in the database. After a reboot or a crash, the next start queues again whatever
+  was left running. Being stopped for the open, a pause or a shutdown costs a job nothing. An error, a timeout,
+  a crash or a memory stop counts as one of its 3 attempts, and the job fails after those. Every job is kept,
+  with its result, duration and peak memory: that is the experiment history.
+
+**No fake learning.** Every conclusion in the learning ledger (`brain_learnings`, `GET
+/brain/research/learnings`) records:
+
+* the claim, the sample size against the minimum (`QP_BRAIN_MIN_RELIABILITY_OBSERVATIONS`) and the period;
+* the market regime, the benchmark and the statistical method;
+* the statistics, the confidence and the limitations.
+
+The status is computed from that evidence; a job cannot assert it:
+
+| Status | When |
+|---|---|
+| **UNPROVEN** | The sample is below the minimum, or no test was possible |
+| **SUPPORTED** | p < 0.05 in the claim's direction |
+| **REFUTED** | p < 0.05 in the opposite direction |
+| **INCONCLUSIVE** | Enough data, but no detectable effect |
+
+Confidence is 0 unless the claim is supported or refuted, and never more than 0.99. A finding without its
+limitations is refused, not recorded. A newer conclusion on the same topic supersedes the older one, and both
+are kept.
+
+**Research never touches production.** An improvement (a feature, a strategy, an agent combination, a process
+change) moves through `brain_hypotheses`:
+
+`DISCOVERED → HYPOTHESIS → BACKTEST → WALK_FORWARD → STRESS_TEST → PAPER_SHADOW → EVALUATION → (a person) →
+PRODUCTION`
+
+* **One stage at a time.** Each move is one stage forward, needs evidence that the stage passed, and is
+  recorded with that evidence. A failed stage rejects the improvement. There is no way to set a stage, and
+  none to skip one.
+* **Shadow tracking is forward-only.** A feature waits in PAPER_SHADOW for 30 days and is evaluated only on data
+  that did not exist when the shadow began. A strategy is paper-tracked by the lab, which records the portfolio
+  it *would* hold and never places an order. Only *promoted* strategies feed the Brain.
+* **Only a person promotes.**
+  * EVALUATION → PRODUCTION is `POST /brain/research/hypotheses/{id}/promote` with your name and a note. It
+    needs the control token from another machine, and the Brain's own actors are refused.
+  * Every check runs before anything changes.
+  * A strategy then still has to pass the lab's own promotion gates: validated, paper-tracked long enough, not
+    short of the benchmark.
+  * Anything else is an approved change for a person to implement.
+* **Protected controls are never a subject.** A discovery that names one is parked as PROTECTED_REVIEW and never
+  advances. Protected controls are risk limits, kill switches, paper-only enforcement, market-data
+  requirements and execution safeguards (the improvement engine's list).
+
+Research writes only its own tables, the long-term memory, the lab's shadow tracking and its preparation notes
+(the watchlist, upcoming events). It never sends an order or changes a setting, a limit, a switch, an agent
+weight or a production strategy. Execution readiness checks each morning that nothing is in PRODUCTION without
+a person's promotion. The tests run every research job with the Brain owning the paper account and trading
+enabled, then check that no order was sent, no setting or switch changed, and nothing was promoted.
+
+The **Research (24/7)** page shows four things:
+
+* the mode, today's readiness and the resources;
+* the learning ledger, with the full evidence for each conclusion;
+* the lifecycle, with what is waiting for your decision;
+* the queue, its history and a box to ask the Brain a question.
+
+`QP_RESEARCH_ENABLED=false` turns research off; execution is unaffected.
 
 ### Strategy lab
 
@@ -2010,6 +2144,10 @@ QP_API_TOKEN=...                          # recommended once orders are enabled
 | `GET /brain/models` | Language models: provider, tier models, today's token budget and usage, recent calls (never prompts, answers or keys) |
 | `GET /brain/lab/templates` · `/lab/strategies?status=` · `/lab/strategies/{id}/{version}` · `/lab/compare?keys=` | Strategy templates · versions · one version with its runs · versions side by side |
 | `GET /brain/improvements?status=` · `POST /brain/improvements/review` · `POST /brain/improvements/{id} {"status": …, "note": …}` | Improvement proposals · review the record now · record a person's decision (nothing is applied automatically) |
+| `GET /brain/research/status` · `/operating` | The 24/7 operating model: mode, loop, today's execution readiness, the research queue, resources, ledger and lifecycle counts |
+| `GET /brain/research/catalog` · `/jobs?status=&kind=` · `/jobs/{id}` · `POST /brain/research/questions {"kind": …}` · `POST /brain/research/jobs/{id}/cancel` | Research jobs · the queue and the experiment history · one job and its result · ask a question (queued; answered while the market is closed) · cancel a queued one |
+| `GET /brain/research/learnings?status=&topic=&current=` | The learning ledger: conclusions with their evidence (UNPROVEN until enough) |
+| `GET /brain/research/hypotheses?stage=&kind=` · `POST /brain/research/hypotheses/{id}/promote` · `/reject` `{"by": "your name", "note": "…"}` | The improvement lifecycle · a person's promotion to production (strategies also pass the lab's gates) or rejection |
 | `POST /brain/lab/propose` · `/lab/strategies {"template": …}` · `/lab/strategies/{id}/{version}/validate` · `/lab/strategies/{id}/{version}/status {"status": "paper"\|"promoted"\|"retired"}` · `/lab/paper` | Propose templates · create a version · validate (202 while running) · paper / promote (gated) / retire · update paper portfolios |
 
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
@@ -2154,6 +2292,9 @@ are rejected.
 | `0020_brain_reviews` | the automatic daily and weekly reviews |
 | `0021_widen_for_postgres` | `brain_cycles.trigger` 96 and `reference_blobs.key` 160 characters (PostgreSQL enforces lengths) |
 | `0022_service_leases` | `service_leases` (the single-supervisor lease) |
+| `0023_options_layer` | the options layer: `options_contracts`, `options_quotes`, `options_greeks`, `options_chain_snapshots`, `options_iv_history`, the strategy research tables (`options_strategy_*`, `options_hypotheses`, `options_experiments`, …), candidates, theses, trades, positions, the execution ledger, assignment and exercise events, counterfactuals and missed opportunities (see `OPTIONS.md`) |
+| `0024_market_evolution_and_model_registry` | `evolution_metrics`, `evolution_changes`, `evolution_hypotheses`, `evolution_relationships`, `model_registry`; option legs on `broker_orders` |
+| `0025_research_subsystem` | the 24/7 research subsystem: `brain_research_jobs` (the research queue and experiment history), `brain_learnings` (the learning ledger), `brain_hypotheses` (the improvement lifecycle) |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)

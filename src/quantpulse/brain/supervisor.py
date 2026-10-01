@@ -391,6 +391,11 @@ class Supervisor:
                 return f"waiting: startup recovery has not passed ({self.waiting}); no cycles, no orders"
             self.waiting = None
 
+        try:  # the operating mode (EXECUTION / PRE_MARKET / RESEARCH), recorded on each transition
+            await self._brain.research.operating.observe(now)
+        except Exception:
+            logger.warning("recording the operating mode failed", exc_info=True)
+
         trading_events = await self._bridge.poll()
         if trading_events:
             await self._bus.publish(trading_events)
@@ -416,11 +421,20 @@ class Supervisor:
             if owns and due("near_close", daily_from=near):  # overnight risk: hold or reduce, recorded
                 await run("near_close", self._near_close())
         elif session is BrainSession.PRE_MARKET:
+            operating = self._brain.research.operating
             if due("premarket", daily_from=PREMARKET_FROM):
-                if owns:  # verify the account, reconcile, calendar, data, overnight changes
-                    await run("premarket_check", self._brain.sessions.premarket())
+                # execution readiness: the pre-market audit (account, reconciliation, calendar, data, overnight
+                # changes), data health, the watchlist and strategy status
+                if owns:
+                    await run("premarket_check", operating.readiness())
                 await run("premarket_learn", self._brain.learn(wait=None))
                 await run("premarket", self._cycle("full", (), "pre-market preparation"))
+            elif (
+                owns
+                and due("readiness_retry", timedelta(minutes=10))
+                and not await operating.ready_today(now)
+            ):
+                await run("readiness_retry", operating.readiness())  # until it passes (orders wait on it)
         elif session is BrainSession.AFTER_HOURS:
             if due("after_hours", daily_from=AFTER_HOURS_FROM):
                 if owns:  # reconcile and record the day (what the 60-session evaluation reads)

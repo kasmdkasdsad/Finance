@@ -18,6 +18,7 @@ PAGES = [
     "system",
     "options_brain",
     "evolution",
+    "research",
 ]
 
 

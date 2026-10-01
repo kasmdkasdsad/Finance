@@ -1265,7 +1265,8 @@ class ServiceLeaseRow(Base):
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
-# the options layer (revision 0023) and market evolution with the model registry (revision 0024) live in their
-# own modules; importing them registers their tables
+# the options layer (revision 0023), market evolution with the model registry (revision 0024) and the 24/7
+# research subsystem (revision 0025) live in their own modules; importing them registers their tables
 from quantpulse.db import evolution_models as evolution_models  # noqa: E402
 from quantpulse.db import options_models as options_models  # noqa: E402
+from quantpulse.db import research_models as research_models  # noqa: E402

@@ -802,6 +802,36 @@ class Settings(BaseSettings):
     )
     evolution_recent_days: int = Field(default=20, ge=5, le=250, description="The recent window, in days.")
 
+    # --- 24/7: the closed-market research loop (analysis only; it never changes trading) -------------
+    research_enabled: bool = Field(
+        default=True,
+        description="While the market is closed the Brain works through its research queue (grading, analysis, "
+        "backtests, preparation). Research never sends an order or changes a setting, limit or strategy.",
+    )
+    research_max_concurrent: int = Field(
+        default=1, ge=1, le=2, description="Research jobs running at once (a small server: keep 1)."
+    )
+    research_max_memory_pct: float = Field(
+        default=70.0,
+        ge=30,
+        le=90,
+        description="No new research job starts while memory use (the container's limit, or the machine's) is "
+        "above this percentage.",
+    )
+    research_abort_memory_pct: float = Field(
+        default=85.0,
+        ge=40,
+        le=95,
+        description="A running research job is stopped (and queued again) above this memory percentage: "
+        "execution and safety always come first.",
+    )
+    research_max_load: float = Field(
+        default=0.85, gt=0, le=4, description="No new research job starts above this load average per CPU."
+    )
+    research_job_timeout_minutes: float = Field(
+        default=30.0, gt=0, le=240, description="A research job running longer than this is stopped."
+    )
+
     # --- Cloud monitoring and alerts (all optional and free; nothing is sent unless a URL is set) ------
     alert_ntfy_url: SecretStr | None = Field(
         default=None,

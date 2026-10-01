@@ -174,6 +174,11 @@ class BrainService:
             self.shadow,
         )
         self.supervisor = Supervisor(settings, clock, self, self.bus)
+        # 24/7: the closed-market research loop, the operating modes and the execution-readiness gate
+        from .research.service import ResearchService
+
+        self.research = ResearchService(settings, clock, self, reference=reference, market=market)
+        self.executor.readiness = self.research.operating.ensure_ready
 
     async def _sync(self) -> None:
         if self._synced:
