@@ -149,3 +149,75 @@ def test_the_timers_run_the_helper_as_the_owner_never_as_root():
     assert "OnCalendar=*:0/10" in units["quantpulse-update.timer"]
     assert "Persistent=true" in units["quantpulse-backup.timer"]
     assert len(units) == 2 * len(commands)
+
+
+FAKE_DOCKER = r'''#!/usr/bin/env python3
+"""A stand-in for `docker compose` that interpolates the compose file like Docker does: every ${VAR:?} must
+have a value, from the environment first, then from the .env next to the compose file."""
+import os, re, sys
+args = sys.argv[1:]
+if args[:1] != ["compose"]:
+    sys.exit(0)
+compose_file = args[args.index("-f") + 1]
+env_file = os.path.join(os.path.dirname(compose_file), ".env")
+values = {}
+if os.path.exists(env_file):
+    for line in open(env_file):
+        if "=" in line and not line.startswith("#"):
+            k, v = line.rstrip("\n").split("=", 1)
+            values[k] = v
+for name in re.findall(r"\$\{(\w+):\?", open(compose_file).read()):
+    if not os.environ.get(name, values.get(name, "")):
+        sys.stderr.write(f"error while interpolating: required variable {name} is missing a value\n")
+        sys.exit(1)
+with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
+    log.write(" ".join(args[3:]) + "\n")
+if "quantpulse-hash-password" in args:
+    password = sys.stdin.readline().rstrip("\n")
+    assert len(password) >= 12, "the password reached the hasher"
+    print("pbkdf2_sha256:600000:c2FsdHNhbHRzYWx0:ZGlnZXN0ZGlnZXN0ZGlnZXN0ZGlnZXN0ZGlnZXN0ZGk")
+'''
+
+
+def test_qp_setup_works_on_a_fresh_server(tmp_path):
+    """The first ./qp setup on a new server: the image is built before the dashboard password exists, and the
+    compose file requires that hash, so the build must not need it (a placeholder for that command only)."""
+    import shutil
+    import subprocess
+
+    deploy = tmp_path / "repo" / "deploy"
+    deploy.mkdir(parents=True)
+    for name in ("qp", "compose.yaml", "cloud.env.example", "ops.env.example"):
+        shutil.copy2(DEPLOY / name, deploy / name)
+    git = ["git", "-C", str(tmp_path / "repo"), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q", "-b", "claude/test-branch"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "x"], check=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(FAKE_DOCKER)
+    (bin_dir / "docker").chmod(0o755)
+    log = tmp_path / "docker.log"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QP_")}
+    env.update(PATH=f"{bin_dir}:{env['PATH']}", FAKE_DOCKER_LOG=str(log))
+    typed = "PKTESTKEY123\nsecret-not-shown\nlong enough password\nlong enough password\n"
+    run = subprocess.run(["bash", str(deploy / "qp"), "setup"], input=typed, text=True, capture_output=True,
+                         env=env, timeout=60)  # fmt: skip
+    assert run.returncode == 0, run.stderr
+    written = (deploy / ".env").read_text()
+    assert re.search(r"^QP_DASHBOARD_PASSWORD_HASH=pbkdf2_sha256:600000:", written, re.M)
+    assert re.search(r"^QP_ALPACA_API_KEY_ID=PKTESTKEY123$", written, re.M)
+    # neither the placeholder nor the password itself ends up in the file
+    assert "not-set-yet" not in written and "long enough password" not in written
+    assert re.search(r"^POSTGRES_PASSWORD=[0-9a-f]{48}$", written, re.M)
+    assert re.search(r"^QP_API_TOKEN=[0-9a-f]{64}$", written, re.M)
+    assert re.search(r"^QP_DEPLOY_BRANCH=claude/test-branch$", (deploy / "ops.env").read_text(), re.M)
+    assert oct((deploy / ".env").stat().st_mode & 0o777) == "0o600"
+    calls = log.read_text().splitlines()
+    assert calls[0] == "build api" and "quantpulse-hash-password" in calls[1]
+    assert "secret-not-shown" not in run.stdout + run.stderr and "PKTESTKEY123" not in run.stdout + run.stderr
+    # run again: everything is already set, nothing is asked, and it still works
+    again = subprocess.run(["bash", str(deploy / "qp"), "setup"], input="", text=True, capture_output=True,
+                           env=env, timeout=60)  # fmt: skip
+    assert again.returncode == 0, again.stderr
+    assert (deploy / ".env").read_text() == written

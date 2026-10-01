@@ -115,12 +115,17 @@ case "$cmd" in
       unset key secret
       say "saved the Alpaca paper keys"
     fi
+    # Docker Compose needs every required value just to read the compose file, but the password hash is made
+    # with the image built here: until it exists, a placeholder stands in for these two commands only (it is
+    # never written to deploy/.env, and the dashboard cannot start without the real hash).
+    [[ -n "$(get_var QP_DASHBOARD_PASSWORD_HASH)" ]] || export QP_DASHBOARD_PASSWORD_HASH="not-set-yet"
     say "building the image (a few minutes the first time) ..."
     dc build api
     if [[ -z "$(get_var QP_DASHBOARD_PASSWORD_HASH)" ]]; then
       hashed="$(hash_password)"; set_var QP_DASHBOARD_PASSWORD_HASH "$hashed"; unset hashed
       say "saved the dashboard password hash"
     fi
+    unset QP_DASHBOARD_PASSWORD_HASH
     if [[ ! -f "$HERE/ops.env" ]]; then  # host-only settings (never given to a container)
       cp "$HERE/ops.env.example" "$HERE/ops.env"
       branch="$(git -C "$HERE/.." rev-parse --abbrev-ref HEAD)"
