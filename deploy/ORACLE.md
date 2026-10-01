@@ -107,8 +107,19 @@ them when you sign up. **Nothing is bought by QuantPulse or by these scripts.**
   private one uses a read-only token in `deploy/ops.env`). No SSH key, no webhook, no inbound port.
 * **No credential in Git.** `deploy/.env` (Alpaca keys, database password, API token) and `deploy/ops.env` (the
   backup link, an optional GitHub token) are ignored by git and by the Docker build; `./qp` never prints them.
-* **Nothing public.** Oracle's default firewall lets in SSH only; the API and the dashboard are bound to
-  127.0.0.1 and reached through Tailscale.
+* **A second preflight, on the server.**
+  - `./qp start` and every deploy first run the server's own preflight (`./qp host-preflight`), which refuses
+    to start or deploy anything if:
+    - any line of `deploy/.env`, `deploy/ops.env` or the server's environment names Alpaca's live or broker API;
+    - `QP_ALPACA_PAPER` is not exactly `true`, or `QP_DEPLOYMENT` is anything but `cloud`;
+    - the compose file (the running one, or a new version's) no longer forces both.
+  - The API's own preflight then runs on the image itself. `deploy/ops.env` never reaches the container, so the
+    server's preflight is what covers it.
+* **Nothing public: the dashboard is Tailscale-only.**
+  - Oracle's default firewall lets in SSH only; the API and the dashboard are bound to 127.0.0.1.
+  - The dashboard is published with `tailscale serve` (your tailnet only).
+  - `QP_DASHBOARD_ACCESS=tailscale` (the default) makes `./qp start --public` refuse.
+  - `./qp status` flags the dashboard as PUBLIC if Tailscale Funnel or the caddy profile ever exposes it.
 
 ---
 
@@ -407,6 +418,7 @@ orders; the backup brings back the Brain's history and learning.
 | `QP_DEPLOY_REPO` | `owner/name` (empty: from the git remote) | no |
 | `QP_AUTO_UPDATE`, `QP_AUTO_UPDATE_WINDOW` | `true`, `closed` | no |
 | `QP_WATCHDOG` | `true` | no |
+| `QP_DASHBOARD_ACCESS` | `tailscale` (the dashboard is reached through Tailscale only; `public` would allow the caddy profile) | no |
 | `QP_BACKUP_PAR_URL` | the write-only pre-authenticated request (step 9) | **yes** |
 | `QP_BACKUP_HEARTBEAT_URL` | healthchecks.io check for backups | yes |
 | `QP_OPS_NTFY_URL` | optional separate topic for server alerts | yes |

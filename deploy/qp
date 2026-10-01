@@ -4,6 +4,7 @@
 #   ./qp setup                 first time: make deploy/.env (generated secrets, your Alpaca PAPER keys, a
 #                              dashboard password) and build the image
 #   ./qp preflight             check the configuration without starting anything (paper only, secured, ...)
+#   ./qp host-preflight        the server's own check (runs before every start and deploy): nothing live anywhere
 #   ./qp import-sqlite FILE    copy the PC's history (data/quantpulse.db) into the empty cloud database
 #   ./qp start [--public]      build, preflight, start everything (--public: HTTPS on QP_PUBLIC_HOSTNAME)
 #   ./qp status [--json]       the server at a glance: CPU, memory, disk, Docker, PostgreSQL, API, Brain
@@ -152,8 +153,15 @@ case "$cmd" in
     ;;
   start)
     need_env
+    # the server's own preflight first (paper only, nothing live anywhere, cloud mode forced): see qpops.py
+    "${OPS[@]}" host-preflight || die "server preflight failed: nothing was started"
     profile=()
-    [[ "${1:-}" == "--public" ]] && { [[ -n "$(get_var QP_PUBLIC_HOSTNAME)" ]] || die "set QP_PUBLIC_HOSTNAME in deploy/.env first"; profile=(--profile public); }
+    if [[ "${1:-}" == "--public" ]]; then
+      access="$(grep -E '^QP_DASHBOARD_ACCESS=' "$HERE/ops.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+      [[ "${access:-tailscale}" == "public" ]] || die "the dashboard is reached through Tailscale only (QP_DASHBOARD_ACCESS=tailscale in deploy/ops.env); set it to public first to open HTTPS to the internet"
+      [[ -n "$(get_var QP_PUBLIC_HOSTNAME)" ]] || die "set QP_PUBLIC_HOSTNAME in deploy/.env first"
+      profile=(--profile public)
+    fi
     dc build --build-arg QP_GIT_COMMIT="$(git -C "$HERE/.." rev-parse HEAD)" api
     dc run --rm --no-deps -T api quantpulse-preflight || die "preflight failed: nothing was started"
     rm -f "$HERE/state/stopped"
@@ -198,7 +206,7 @@ case "$cmd" in
     need_env
     exec "${OPS[@]}" restore-test "$@"
     ;;
-  ci-gate|watchdog|auto-update|sample)
+  ci-gate|watchdog|auto-update|sample|host-preflight)
     need_env
     exec "${OPS[@]}" "$cmd" "$@"
     ;;
@@ -271,6 +279,6 @@ case "$cmd" in
     say "stopped. Start again with ./qp start"
     ;;
   help|*)
-    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,29p' "$HERE/qp" | sed 's/^# \{0,1\}//'
     ;;
 esac

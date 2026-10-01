@@ -254,7 +254,8 @@ checks the new settings; the API does not start on an unsafe one.
 ## Public HTTPS instead of Tailscale (optional)
 
 If you would rather open the dashboard without the Tailscale app: get a domain name, point an `A` record (e.g.
-`quantpulse.example.com`) at the server, put `QP_PUBLIC_HOSTNAME=quantpulse.example.com` in `deploy/.env`, and:
+`quantpulse.example.com`) at the server, put `QP_PUBLIC_HOSTNAME=quantpulse.example.com` in `deploy/.env` and
+`QP_DASHBOARD_ACCESS=public` in `deploy/ops.env` (the default, `tailscale`, makes `--public` refuse), and:
 ```bash
 sudo ufw allow 80,443/tcp
 ./qp start --public

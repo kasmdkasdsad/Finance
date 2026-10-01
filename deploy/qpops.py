@@ -72,6 +72,9 @@ IDLE_THRESHOLD = 20.0  # percent: Oracle's idle rule for Always Free instances (
 IDLE_MIN_SAMPLES = 24 * 60  # a day of minutes before the idle warning speaks
 ALERT_REPEAT = timedelta(hours=6)
 SHA = re.compile(r"^[0-9a-f]{40}$")
+# Alpaca's live-money trading API and its broker API — the same rule as the API's own preflight
+LIVE_ENDPOINT = re.compile(r"(?<![\w.-])(api|broker-api)\.alpaca\.markets", re.IGNORECASE)
+HOST_PREFIXES = ("QP_", "APCA_", "ALPACA_")
 
 
 def utcnow() -> datetime:
@@ -406,6 +409,11 @@ class Ops:
                 return f"pinned by a rollback to {(self.state_dir / 'pin').read_text().strip()[:12]}: ./qp update resumes"
             if self.setting("QP_AUTO_UPDATE_WINDOW", "closed") != "any" and in_quiet_hours(self.now()):
                 return "market hours (08:00–17:30 New York, weekdays): no automatic deploy now"
+            problems = self.host_preflight()
+            if problems:
+                self.alert("Server preflight FAILED: nothing is deployed", "; ".join(problems), "critical",
+                           key="host-preflight")  # fmt: skip
+                return "server preflight failed: " + "; ".join(problems)
             branch = self.branch()
             target = self.fetch(branch)
             current = self.deployed()
@@ -439,6 +447,9 @@ class Ops:
     def deploy_now(self, target: str | None = None) -> str:
         """``./qp update``: the same gated deploy, now (inside market hours too); clears a rollback pin."""
         with self.lock(wait=True):
+            problems = self.host_preflight()
+            if problems:
+                raise OpsError("server preflight failed: " + "; ".join(problems))
             resumed = self._resume_interrupted()
             if resumed:
                 log(resumed)
@@ -471,12 +482,15 @@ class Ops:
         short, state = target[:12], self.load("deploy.json")
         log(f"deploying {short} ({why}; {gate.reason})")
         try:
+            # the switch checks the commit out: an edited file in the checkout would stop it half-way
             changed = self.git("status", "--porcelain", "--untracked-files=no")
-            if (
-                changed
-            ):  # the switch checks the commit out: an edited file in the checkout would stop it half-way
+            if changed:
                 raise OpsError(f"the checkout has local changes ({changed.splitlines()[0].strip()} …): commit or "
                                "undo them (git -C /opt/quantpulse status) — settings belong in deploy/.env")  # fmt: skip
+            target_compose = self.git("show", f"{target}:deploy/compose.yaml", check=False)
+            if not compose_forces_paper(target_compose):
+                raise OpsError("the new version's deploy/compose.yaml does not force QP_DEPLOYMENT=cloud and "
+                               "QP_ALPACA_PAPER=true: refused")  # fmt: skip
             dump = self.backup(kind="predeploy")["file"]
             self.build(target)
             self.dc("run", "--rm", "--no-deps", "-T", "api", "quantpulse-preflight",
@@ -625,6 +639,58 @@ class Ops:
         return self.rollback_failed(
             state, f"the deploy was interrupted and the result is not healthy ({verdict})"
         )
+
+    def host_preflight(self) -> list[str]:
+        """The server's own hard preflight, before anything starts or is deployed (``./qp start``, every deploy).
+        A second wall in front of the API's preflight, which refuses to start on its own: deploy/ops.env and the
+        host's environment never reach the container, so they are checked here. Problems name files and
+        variables, never values; an empty list is a pass."""
+        problems: list[str] = []
+        for name in (".env", "ops.env"):
+            path = self.dir / name
+            if not path.exists():
+                continue
+            for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                line = raw.strip()
+                if line and not line.startswith("#") and LIVE_ENDPOINT.search(line):
+                    key = line.split("=", 1)[0].strip() if "=" in line else f"line {number}"
+                    problems.append(f"deploy/{name}: {key} names Alpaca's live-money API")
+        for key, value in os.environ.items():
+            if key.startswith(HOST_PREFIXES) and LIVE_ENDPOINT.search(value):
+                problems.append(f"the server's environment variable {key} names Alpaca's live-money API")
+        if not (self.dir / ".env").exists():
+            problems.append("deploy/.env is missing (./qp setup makes it)")
+        elif self.app_env.get("QP_ALPACA_PAPER", "").strip().lower() != "true":
+            problems.append("deploy/.env: QP_ALPACA_PAPER must be exactly true")
+        deployment = self.app_env.get("QP_DEPLOYMENT", "cloud").strip().lower()
+        if deployment != "cloud":
+            problems.append(
+                f"deploy/.env: QP_DEPLOYMENT={deployment} is ambiguous on a server (cloud is forced)"
+            )
+        compose = self.dir / "compose.yaml"
+        if not compose_forces_paper(compose.read_text(encoding="utf-8") if compose.exists() else ""):
+            problems.append("deploy/compose.yaml does not force QP_DEPLOYMENT=cloud and QP_ALPACA_PAPER=true")
+        access = self.setting("QP_DASHBOARD_ACCESS", "tailscale").strip().lower()
+        if access not in ("tailscale", "public"):
+            problems.append(f"deploy/ops.env: QP_DASHBOARD_ACCESS={access} (tailscale or public)")
+        return problems
+
+    def tailscale(self) -> dict[str, Any]:
+        """How the dashboard is reached: on the tailnet only (``tailscale serve``), never the public internet
+        (Tailscale Funnel or the caddy profile) unless QP_DASHBOARD_ACCESS=public."""
+        out: dict[str, Any] = {"access": self.setting("QP_DASHBOARD_ACCESS", "tailscale").strip().lower()}
+        if shutil.which("tailscale") is None:
+            return {**out, "installed": False}
+        status = self.host.run(["tailscale", "status", "--json"], check=False, timeout=15)
+        try:
+            info = json.loads(status.stdout) if status.returncode == 0 and status.stdout.strip() else {}
+        except ValueError:
+            info = {}
+        serve = self.host.run(["tailscale", "serve", "status"], check=False, timeout=15)
+        text = serve.stdout if serve.returncode == 0 else ""
+        return {**out, "installed": True, "state": info.get("BackendState"),
+                "name": str((info.get("Self") or {}).get("DNSName") or "").rstrip("."),
+                "serving": "8501" in text, "funnel": "funnel on" in text.lower()}  # fmt: skip
 
     def record_start(self) -> None:
         """``./qp start`` built and started the working tree's commit by hand: what runs now."""
@@ -993,6 +1059,12 @@ class Ops:
                          "auto_update": self.flag("QP_AUTO_UPDATE", True),
                          "window": self.setting("QP_AUTO_UPDATE_WINDOW", "closed"),
                          "failed": list(deploy.get("failed", {}))[-3:]}  # fmt: skip
+        out["dashboard"] = self.tailscale()
+        if isinstance(out["docker"], list):
+            out["dashboard"]["caddy"] = any(
+                d["service"] == "caddy" and d["state"] == "running" for d in out["docker"]
+            )
+        out["preflight"] = self.host_preflight()
         wd = self.load("watchdog.json")
         recent = [
             t for t in wd.get("restarts", []) if self.now() - datetime.fromisoformat(t) < RESTART_WINDOW
@@ -1003,6 +1075,13 @@ class Ops:
 
 
 # --------------------------------------------------------------------------------------------- helpers
+def compose_forces_paper(text: str) -> bool:
+    """The api service's environment in deploy/compose.yaml forces cloud mode and paper trading."""
+    return bool(re.search(r"^\s+QP_DEPLOYMENT:\s*cloud\s*$", text, re.M)) and bool(
+        re.search(r'^\s+QP_ALPACA_PAPER:\s*"true"', text, re.M)
+    )
+
+
 def _json_lines(text: str) -> list[dict[str, Any]]:
     """``docker compose ps --format json`` prints one object per line (newer) or one array (older)."""
     text = text.strip()
@@ -1117,6 +1196,23 @@ def render_status(s: dict[str, Any]) -> str:
                  f"{ci.get('reason')} · auto-update {'on' if d['auto_update'] else 'OFF'} ({d['window']})"
                  + (" · PINNED by a rollback" if d["pinned"] else "")
                  + (f" · phase {d['phase']}" if d.get("phase") not in (None, "done") else ""))  # fmt: skip
+    dash = s.get("dashboard") or {}
+    if (dash.get("funnel") or dash.get("caddy")) and dash.get("access") != "public":
+        how = (
+            "Tailscale Funnel is on: sudo tailscale funnel reset"
+            if dash.get("funnel")
+            else "the caddy profile runs"
+        )
+        text = f"PUBLIC ({how}) although QP_DASHBOARD_ACCESS=tailscale"
+    elif not dash.get("installed"):
+        text = "Tailscale is not installed (bootstrap-oracle.sh installs it)"
+    elif dash.get("serving"):
+        text = f"tailnet only: https://{dash.get('name') or '?'} (Tailscale {dash.get('state')})"
+    else:
+        text = f"not published on the tailnet yet (./qp tailscale); Tailscale {dash.get('state')}"
+    lines.append(f"  dashboard   {text}")
+    if s.get("preflight"):
+        lines.append("  PREFLIGHT   FAILED: " + "; ".join(s["preflight"]))
     w = s["watchdog"]
     lines.append(f"  watchdog    {'on' if w['enabled'] else 'OFF'} · {w['restarts_6h']} restart(s) in 6 h"
                  + (f" · last check {(w.get('last') or {}).get('verdict')}" if w.get("last") else ""))  # fmt: skip
@@ -1160,6 +1256,12 @@ def main(argv: list[str]) -> int:
             print(json.dumps(data, indent=1, default=str) if "--json" in args else render_status(data))
         elif cmd == "sample":
             print(json.dumps(ops.sample()))
+        elif cmd == "host-preflight":
+            problems = ops.host_preflight()
+            for problem in problems:
+                print(f"FAIL  {problem}")
+            print("server preflight: " + ("FAILED — nothing is started" if problems else "PASS"))
+            return 1 if problems else 0
         elif cmd == "record-start":
             ops.record_start()
         elif cmd == "pin":

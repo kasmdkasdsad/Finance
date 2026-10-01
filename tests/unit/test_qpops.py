@@ -29,6 +29,7 @@ sys.modules["qpops"] = qpops
 _spec.loader.exec_module(qpops)
 
 OLD, NEW, BAD = "a" * 40, "b" * 40, "c" * 40
+COMPOSE = (ROOT / "deploy" / "compose.yaml").read_text()
 REPO = "kasmdkasdsad/Finance"
 BRANCH = "claude/keen-tesla-y7rion"
 NTFY = "https://ntfy.sh/qp-secret-topic"
@@ -106,6 +107,9 @@ class Server:
         self.restore_values = "rev=0024\ntables=40\nlive_tables=40\nrows=1234\n"
         self.restore_rc = 0
         self.dirty = ""  # `git status --porcelain` of the checkout
+        self.compose_of: dict[str, str] = {}  # a commit's deploy/compose.yaml (default: the real one)
+        self.tailscale = {"BackendState": "Running", "Self": {"DNSName": "quantpulse.tail1234.ts.net."}}
+        self.serve = "https://quantpulse.tail1234.ts.net (tailnet only)\n|-- / proxy http://127.0.0.1:8501\n"
         self.up_fails = False  # `docker compose up` fails: the old container keeps running
 
     # -------------------------------------------------------------- commands
@@ -116,6 +120,10 @@ class Server:
             return self._compose(a[4:], env)
         if a[:1] == ["docker"]:
             return self._docker(a[1:])
+        if a[:3] == ["tailscale", "status", "--json"]:
+            return 0, json.dumps(self.tailscale), ""
+        if a[:3] == ["tailscale", "serve", "status"]:
+            return 0, self.serve, ""
         raise AssertionError(f"unexpected command {a}")
 
     def _git(self, a: list[str]) -> tuple[int, str, str]:
@@ -137,6 +145,8 @@ class Server:
             return 0, f"https://github.com/{REPO}.git\n", ""
         if a[:2] == ["status", "--porcelain"]:
             return 0, self.dirty, ""
+        if a[0] == "show" and a[1].endswith(":deploy/compose.yaml"):  # a version's compose file
+            return 0, self.compose_of.get(a[1].split(":")[0], COMPOSE), ""
         raise AssertionError(f"unexpected git {a}")
 
     def _compose(self, a: list[str], env: dict[str, str]) -> tuple[int, str, str]:
@@ -302,7 +312,10 @@ class FakeHost(qpops.Host):
 def world(tmp_path):
     deploy = tmp_path / "deploy"
     deploy.mkdir()
-    (deploy / ".env").write_text(f"QP_API_TOKEN={TOKEN}\nQP_ALERT_NTFY_URL={NTFY}\nPOSTGRES_PASSWORD=pw\n")
+    (deploy / ".env").write_text(
+        f"QP_API_TOKEN={TOKEN}\nQP_ALERT_NTFY_URL={NTFY}\nPOSTGRES_PASSWORD=pw\nQP_ALPACA_PAPER=true\n"
+    )
+    (deploy / "compose.yaml").write_text(COMPOSE)
     (deploy / "ops.env").write_text(
         f"QP_DEPLOY_REPO={REPO}\nQP_DEPLOY_BRANCH={BRANCH}\nQP_BACKUP_PAR_URL={PAR}\n"
     )
@@ -658,10 +671,12 @@ def test_the_watchdog_cannot_cause_an_order(world):
 
 def test_the_operations_code_has_no_way_to_write_to_quantpulse_or_a_broker():
     source = (ROOT / "deploy" / "qpops.py").read_text()
-    assert (
-        "alpaca.markets" not in source and "APCA-" not in source and "/v2/" not in source
-    )  # no broker at all
-    assert "/orders" not in source and "QP_ALPACA" not in source  # it never reads the paper keys either
+    # no broker at all: no Alpaca host to call (the live-endpoint rule is a regex), no order path
+    assert "alpaca.markets" not in source and "APCA-" not in source and "/v2/" not in source
+    assert "/orders" not in source
+    # it never reads the Alpaca keys (only the QP_ALPACA_PAPER flag, for the server preflight)
+    for key in ("QP_ALPACA_API_KEY_ID", "QP_ALPACA_API_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY"):
+        assert key not in source
     assert "kill-switch" not in source and "/brain/" not in source and "/trading/" not in source
     # every request to the API goes through api_get, which is GET-only
     api_requests = re.findall(r"Request\(\s*API \+ path, method=\"(\w+)\"", source)
@@ -789,3 +804,120 @@ def test_update_never_goes_backwards(world):
     server.ci[OLD] = ([run(OLD)], GREEN_JOBS)
     with pytest.raises(qpops.OpsError, match=r"use \./qp rollback"):
         ops.deploy_now(OLD)
+
+
+# ================================================================================================ server preflight
+LIVE = "https://api.alpaca.markets"
+
+
+def test_the_shipped_files_pass_the_server_preflight(tmp_path):
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    (deploy / "compose.yaml").write_text(COMPOSE)
+    (deploy / ".env").write_text(
+        (ROOT / "deploy" / "cloud.env.example").read_text()
+    )  # what ./qp setup starts from
+    (deploy / "ops.env").write_text((ROOT / "deploy" / "ops.env.example").read_text())
+    assert qpops.Ops(deploy).host_preflight() == []
+
+
+@pytest.mark.parametrize(
+    ("where", "line", "why"),
+    [
+        (
+            ".env",
+            f"QP_ALPACA_BASE_URL={LIVE}",
+            "deploy/.env: QP_ALPACA_BASE_URL names Alpaca's live-money API",
+        ),
+        (
+            ".env",
+            "APCA_API_BASE_URL=https://broker-api.alpaca.markets/v1",
+            "APCA_API_BASE_URL names Alpaca's live",
+        ),
+        (
+            "ops.env",
+            f"ALPACA_ENDPOINT={LIVE}",
+            "deploy/ops.env: ALPACA_ENDPOINT names Alpaca's live-money API",
+        ),
+        (".env", "QP_ALPACA_PAPER=false", "QP_ALPACA_PAPER must be exactly true"),
+        (".env", "QP_ALPACA_PAPER=yes", "QP_ALPACA_PAPER must be exactly true"),
+        (".env", "QP_DEPLOYMENT=local", "QP_DEPLOYMENT=local is ambiguous"),
+        ("ops.env", "QP_DASHBOARD_ACCESS=everyone", "QP_DASHBOARD_ACCESS=everyone"),
+    ],
+)
+def test_the_server_preflight_refuses_anything_live_or_ambiguous(world, where, line, why):
+    ops, _, _ = world
+    path = ops.dir / where
+    text = (
+        path.read_text().replace("QP_ALPACA_PAPER=true\n", "")
+        if "QP_ALPACA_PAPER" in line
+        else path.read_text()
+    )
+    path.write_text(text + line + "\n")
+    problems = qpops.Ops(ops.dir).host_preflight()
+    assert any(why in p for p in problems), problems
+    assert all(LIVE not in p and "broker-api" not in p for p in problems)  # names variables, never values
+
+
+def test_the_server_preflight_reads_the_servers_own_environment_and_compose_file(world, monkeypatch):
+    ops, _, _ = world
+    monkeypatch.setenv("APCA_API_BASE_URL", LIVE)
+    assert any("environment variable APCA_API_BASE_URL" in p for p in ops.host_preflight())
+    monkeypatch.delenv("APCA_API_BASE_URL")
+    (ops.dir / "compose.yaml").write_text(
+        COMPOSE.replace('QP_ALPACA_PAPER: "true"', 'QP_ALPACA_PAPER: "false"')
+    )
+    assert any("compose.yaml does not force" in p for p in ops.host_preflight())
+    (ops.dir / "compose.yaml").write_text(COMPOSE.replace("QP_DEPLOYMENT: cloud", "QP_DEPLOYMENT: local"))
+    assert any("compose.yaml does not force" in p for p in ops.host_preflight())
+    (ops.dir / "compose.yaml").write_text(COMPOSE)
+    (ops.dir / ".env").write_text((ops.dir / ".env").read_text() + f"# never use {LIVE} here\n")
+    assert ops.host_preflight() == []  # a comment configures nothing
+
+
+def test_a_failed_server_preflight_deploys_nothing_and_alerts_once(world):
+    ops, server, clock = world
+    server.remote = NEW
+    server.ci[NEW] = ([run(NEW)], GREEN_JOBS)
+    (ops.dir / "ops.env").write_text((ops.dir / "ops.env").read_text() + f"ALPACA_BASE_URL={LIVE}\n")
+    ops.cfg = qpops.read_env(ops.dir / "ops.env")
+    for _ in range(3):
+        assert ops.auto_update().startswith("server preflight failed")
+        clock.sleep(600)
+    assert sum("Server preflight FAILED" in t for t in alerts(server)) == 1
+    assert not ops.host.builds and server.head == OLD and not server.compose_calls()
+    with pytest.raises(qpops.OpsError, match="server preflight failed"):
+        ops.deploy_now()
+
+
+def test_a_new_version_that_stops_forcing_paper_is_never_switched_to(world):
+    ops, server, _ = world
+    server.remote = NEW
+    server.ci[NEW] = ([run(NEW)], GREEN_JOBS)
+    server.compose_of[NEW] = COMPOSE.replace('QP_ALPACA_PAPER: "true"', 'QP_ALPACA_PAPER: "false"')
+    out = ops.auto_update()
+    assert out.startswith("not deployed") and "does not force" in out, out
+    assert server.head == OLD and server.running == OLD and not ops.host.builds
+
+
+# ================================================================================================ dashboard access
+def test_the_status_shows_the_dashboard_on_the_tailnet_only(world, monkeypatch):
+    ops, server, _ = world
+    monkeypatch.setattr(qpops.shutil, "which", lambda name: f"/usr/bin/{name}")
+    text = qpops.render_status(ops.status())
+    assert "dashboard   tailnet only: https://quantpulse.tail1234.ts.net (Tailscale Running)" in text
+    assert "PREFLIGHT" not in text
+    server.serve = "https://quantpulse.tail1234.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:8501\n"
+    text = qpops.render_status(ops.status())
+    assert "PUBLIC (Tailscale Funnel is on" in text
+    server.serve = ""
+    assert "not published on the tailnet yet" in qpops.render_status(ops.status())
+
+
+def test_qp_runs_the_server_preflight_first_and_keeps_the_dashboard_on_tailscale():
+    qp = (ROOT / "deploy" / "qp").read_text()
+    start = qp[qp.index("  start)") : qp.index("  status)")]
+    assert start.index("host-preflight") < start.index("dc build")  # before anything is built or started
+    assert 'access:-tailscale}" == "public"' in start  # --public needs QP_DASHBOARD_ACCESS=public
+    assert "tailscale serve --bg --https=443 http://127.0.0.1:8501" in qp  # tailnet only, never Funnel
+    assert "funnel" not in qp.lower()

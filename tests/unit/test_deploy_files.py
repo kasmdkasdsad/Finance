@@ -131,6 +131,7 @@ def test_the_server_settings_hold_no_secret_and_reach_no_container():
     for name in ("GITHUB_TOKEN", "QP_BACKUP_PAR_URL", "QP_BACKUP_HEARTBEAT_URL", "QP_OPS_NTFY_URL"):
         assert values[name] == "", name
     assert values["QP_AUTO_UPDATE_WINDOW"] == "closed" and values["QP_WATCHDOG"] == "true"
+    assert values["QP_DASHBOARD_ACCESS"] == "tailscale"  # the dashboard is reached through Tailscale only
     assert "ops.env" not in (DEPLOY / "compose.yaml").read_text()
     ignored = (ROOT / ".gitignore").read_text().splitlines()
     assert {"deploy/*.env", "!deploy/*.env.example", "deploy/state/", "backups/"} <= set(ignored)
