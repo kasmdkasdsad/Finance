@@ -93,6 +93,19 @@ def _positions(positions: dict[str, Any] | None, orders: list[Any] | None) -> No
     ui.link("trading", "Orders, performance and risk")
 
 
+def _learning(learning: dict[str, Any] | None) -> str | None:
+    """Graded predictions so far, the hit rate once there is one (unproven below the sample the learning
+    system needs before it trusts a record), and when the next ones are graded."""
+    p = (learning or {}).get("predictions") or {}
+    if not p:
+        return None
+    need = (learning or {}).get("min_observations") or 0
+    small = " (unproven)" if p.get("evaluated", 0) < need else ""
+    hit = f" · {p['hit_rate']:.0%} right{small}" if p.get("hit_rate") is not None else ""
+    due = f" · next graded {p['next_due']}" if p.get("next_due") else ""
+    return f"{p.get('evaluated', 0)} graded{hit} · {p.get('open', 0)} open{due}"
+
+
 def _brain(cs: dict[str, Any] | None, sup: dict[str, Any] | None) -> None:
     ui.section("Brain")
     sup = sup or {}
@@ -112,6 +125,7 @@ def _brain(cs: dict[str, Any] | None, sup: dict[str, Any] | None) -> None:
             ("Last cycle", ui.when(last)),
             ("Next cycle", ui.when(sup.get("next_cycle_at"))),
             ("Orders today", f"{today.get('orders', 0)} sent · {today.get('fills', 0)} filled"),
+            ("Learning", _learning(guarded(lambda: api().get(f"{BASE}/learning"), "learning"))),
         ]
     )  # fmt: skip
     if sup.get("waiting"):

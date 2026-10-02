@@ -31,7 +31,7 @@ from .book import Fill, PaperBook, expected_by_subject
 from .consensus import CONSENSUS_VERSION, Consensus, ReliabilityBook, build_consensus
 from .context import BrainContext
 from .debate import Debate, review
-from .decisions import Proposal, plan, risk_preview
+from .decisions import DERISK_EVERY, Proposal, plan, risk_preview
 from .events import EventBus, from_cycle
 from .execution import BrainExecutor
 from .learning import PredictionRecorder
@@ -299,6 +299,9 @@ class Orchestrator:
             ctx.track_record = await scorecard(db, self._s)
         except Exception as exc:  # context only: the agents that read it abstain
             ctx.provider_errors["track_record"] = f"{type(exc).__name__}: {exc}"[:200]
+        # holdings the defensive posture trimmed recently: their next third waits (decisions.DERISK_EVERY)
+        derisked_since = ctx.as_of - DERISK_EVERY
+        ctx.working.post("recently_derisked", await self._store.recent_subjects("de_risk", derisked_since))
         local = ctx.as_of.astimezone(NEW_YORK)
         if ctx.market_open and is_trading_day(local.date()):
             close = datetime.combine(local.date(), regular_close(local.date()), NEW_YORK)

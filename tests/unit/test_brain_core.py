@@ -235,6 +235,7 @@ def test_default_agents_are_deterministic_except_the_optional_briefing():
         "technical": "forecast",
         "momentum": "forecast",
         "mean_reversion": "forecast",
+        "intraday": "forecast",
         "volatility": "forecast",
         "statistical": "forecast",
         "fundamental": "forecast",

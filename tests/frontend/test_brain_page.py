@@ -119,7 +119,7 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert "Orders sent by the Brain" in text and "**Mode**" in text
     assert len(brain_view.TABS) == 6  # was 18: the same content, grouped
     agents = next(f for f in frames if "track record" in f.columns)
-    assert len(agents) == 20 and set(agents["this cycle"]) <= {"ok", "skipped", "failed", "timeout", "—"}
+    assert len(agents) == 21 and set(agents["this cycle"]) <= {"ok", "skipped", "failed", "timeout", "—"}
     assert (agents["track record"] == "unproven (no evaluated predictions yet)").all()
     consensus = next(f for f in frames if "disagreement" in f.columns)
     assert {"supporting", "neutral", "opposing", "confidence", "data"} <= set(consensus.columns)

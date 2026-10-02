@@ -1305,6 +1305,7 @@ the horizon it is graded on, and what happens when it cannot run. The charter is
 | `technical` | forecast (5 days) | Trend (price vs 50/200-day), ADX, MACD, RSI, 20-day breakout/breakdown, VWAP, distance to support/resistance; gives invalidation levels |
 | `momentum` | forecast (21 days) | Cross-sectional z-scores of 12-1, 6-1 and 3-month momentum, 1-month return, relative strength and persistence; acceleration or deterioration |
 | `mean_reversion` | forecast (5 days) | Stretch from the 20-day mean (z-score, RSI, 5-day move in sigmas), filtered by trend strength: buys pullbacks in uptrends, damps fading a strong trend, flags falling knives |
+| `intraday` | forecast (1 day) | Today's tape from the live quote: the move in daily sigmas, volume against normal for this time of day, the price against VWAP and in today's range. Heavy-volume moves tend to continue, quiet ones to partly reverse. Silent before the first 30 minutes and without a fresh quote; a "prices" vote (never an independent second source); graded at the next close, so its record grows every day |
 | `volatility` | forecast (10 days, mostly context) | The existing GARCH(1,1)-t forecast, realised-vol regime, expansion/compression, tail shape, drawdown; a size scale the planner uses; VIX and benchmark vol for the market |
 | `statistical` | forecast (5 days) | Lo–MacKinlay variance ratio and autocorrelation (trending vs mean-reverting), market-model beta and the last ten days' idiosyncratic move |
 | `fundamental` | forecast (63 days) | The stock model's point-in-time SEC fundamentals: gross profitability, ROE, accruals, asset growth, latest earnings reaction, ranked against the universe |
@@ -1370,7 +1371,9 @@ The decision step now also:
 
 * opens no new position on a challenged view;
 * halves new positions and scales size to 60% when cautious, and when defensive proposes no new risk and
-  trims a third of every holding that is not confidently bullish (`DE_RISK`);
+  trims a third of every holding that is not confidently bullish (`DE_RISK`), at most once per holding
+  every 30 minutes (the pace it had with 30-minute cycles; five-minute cycles do not make it six times
+  faster);
 * rejects a new position that is nearly the same bet as a holding (return correlation ≥ 0.85) or would
   push a sector over 45% (`portfolio fit`), and notes a high resulting beta;
 * judges it against the **whole portfolio**: annualised volatility before and after (six months of daily
@@ -1378,14 +1381,18 @@ The decision step now also:
   contribution), concentration (Herfindahl of the invested weights) and the momentum tilt. A good idea is
   still a poor fit when it would carry more than 40% of the portfolio's risk, or raise the portfolio's
   volatility by more than 30% to above 20% a year;
-* trims a bullish holding that has grown to more than 1.5× its target weight (`REBALANCE`);
+* trims a bullish holding that has grown to more than 1.5× its target weight (`REBALANCE`), and tops one up
+  (`INCREASE`) only below 0.75× its target. In between it holds: a no-trade band, so five-minute cycles
+  do not buy a share every time the price ticks;
 * when no position slot is free, closes the weakest *fading* holding (a weakening thesis, or no bullish
   consensus) for a candidate at least 0.20 stronger (score × confidence) — one per cycle; the sale goes
   first and the buy is re-checked by the risk engine once it has filled.
 
-`QP_BRAIN_MIN_CONFIDENCE` now applies after the devil's advocate. Its default is 0.45: the scale moved
-when more agents and the debate were added, and the calibration report (learning) is what should confirm
-or change it.
+`QP_BRAIN_MIN_CONFIDENCE` applies after the devil's advocate. Its default is 0.30 (it was 0.45): on a paper
+account the trades a slightly lower bar adds are worth more as evidence than the edge it gives up — every
+directional view is recorded and graded whether it is traded or not, so the calibration report (learning)
+shows directly whether trades taken between 0.30 and 0.45 do worse, and the bar can move back. The
+two-independent-sources rule, the per-cycle caps and every risk limit are unchanged.
 
 ### Learning from outcomes
 
@@ -1824,8 +1831,9 @@ The dashboard is one calm layout on a desktop and on a phone (light or dark, fol
   line saying what the page is for. A status line says what matters first, KPI cards hold the numbers (two
   per line on a phone), and details are folded away in expanders. Tabs compute only the tab that is open.
 * **Home** is the page to open first: one status line (green: trading on its own; yellow: healthy but not
-  trading now, and why; red: stopped or broken), equity and P&L, the positions, the Brain's latest decision
-  and recent trades, links to the details, and **STOP BRAIN TRADING**. Every part's health, the cloud, the
+  trading now, and why; red: stopped or broken), equity and P&L, the positions, the Brain's latest decision,
+  its recent trades and its learning so far (predictions graded, how often right, when the next are due),
+  links to the details, and **STOP BRAIN TRADING**. Every part's health, the cloud, the
   switches and the alerts are under *System details* and *Recent alerts*. It refreshes itself every 30 s.
 * **Portfolio:** positions, orders, performance, risk, history and controls (kill switch, reconcile, cancel and
   close all, the connection check and the guarded test order). The strategy's own view and its *Run strategy

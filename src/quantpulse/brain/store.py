@@ -519,6 +519,18 @@ class BrainStore:
                 "lessons", "evidence", "created_at")  # fmt: skip
         return [_cols(r, cols) for r in rows]
 
+    async def recent_subjects(self, action: str, since: datetime) -> list[str]:
+        """Subjects with a decision of this kind (with a quantity) since ``since``, sorted."""
+        async with self._db.session() as s:
+            rows = await s.scalars(
+                select(BrainDecisionRow.subject).where(
+                    BrainDecisionRow.action == action,
+                    BrainDecisionRow.created_at >= since,
+                    BrainDecisionRow.quantity > 0,
+                )
+            )
+            return sorted(set(rows.all()))
+
     async def prediction_summary(self) -> dict[str, Any]:
         async with self._db.session() as s:
             counts = dict(

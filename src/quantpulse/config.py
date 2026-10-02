@@ -549,11 +549,12 @@ class Settings(BaseSettings):
     )
     brain_agent_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
     brain_min_confidence: float = Field(
-        default=0.45,
+        default=0.30,
         ge=0,
         le=1,
         description="Consensus confidence (after the devil's advocate) needed before a buy, increase, reduce or "
-        "close is proposed. A starting value: the learning system's calibration shows whether it is borne out.",
+        "close is proposed. A starting value: the learning system's calibration shows whether it is borne out "
+        "(every directional view is recorded and graded, traded or not).",
     )
     brain_fresh_quote_seconds: float = Field(
         default=60.0, gt=0, description="A live quote younger than this is FRESH (older but allowed: LIVE)."

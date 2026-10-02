@@ -8,6 +8,7 @@ from .catalyst import CatalystAgent
 from .data_quality import DataQualityAgent
 from .factor import FactorAgent
 from .fundamental import FundamentalAgent, ValuationAgent
+from .intraday import IntradayAgent
 from .mean_reversion import MeanReversionAgent
 from .momentum import MomentumAgent
 from .monitor import ExecutionQualityAgent, LearningAgent, PositionMonitorAgent
@@ -28,6 +29,7 @@ def default_agents() -> list[Agent]:
         TechnicalAgent(),
         MomentumAgent(),
         MeanReversionAgent(),
+        IntradayAgent(),  # today's tape: a one-day view, graded at the next close
         VolatilityAgent(),
         StatisticalAgent(),
         FundamentalAgent(),
@@ -53,6 +55,7 @@ __all__ = [
     "DataQualityAgent",
     "FactorAgent",
     "FundamentalAgent",
+    "IntradayAgent",
     "MarketRegimeAgent",
     "MeanReversionAgent",
     "MomentumAgent",

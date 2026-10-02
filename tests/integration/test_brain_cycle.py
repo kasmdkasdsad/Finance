@@ -27,6 +27,7 @@ AGENTS = {
     "technical",
     "momentum",
     "mean_reversion",
+    "intraday",
     "volatility",
     "statistical",
     "fundamental",
@@ -70,6 +71,9 @@ async def brain_client(tmp_path, clock, fake=None, feed=None, client_host="127.0
     overrides.setdefault("brain_use_stock_model", False)  # never start a model training run in these tests
     overrides.setdefault("brain_options_analysis", False)  # the fakes have no option chains or SEC filings
     overrides.setdefault("brain_catalyst_analysis", False)
+    # the scenarios below were written around the 0.45 confidence bar (the default is 0.30 now, for more
+    # graded trades); a test that wants the default passes it
+    overrides.setdefault("brain_min_confidence", 0.45)
     feed = feed or TrendFeed(clock, drifts=WIDE)
     async for api in trading_client(
         tmp_path,
@@ -264,7 +268,7 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
 
         status = (await api.get(f"{BRAIN}/status")).json()
         assert status["paper_only"] and status["last_cycle"]["id"] == cycle["id"]
-        assert status["agents"] == {"registered": 20, "enabled": 20} and not status["running"]
+        assert status["agents"] == {"registered": 21, "enabled": 21} and not status["running"]
         assert status["open_predictions"] == len(preds) and "predictions graded" in status["learning"]
 
         agents = by((await api.get(f"{BRAIN}/agents")).json(), "id")
@@ -501,7 +505,7 @@ async def test_agent_controls_and_background_runs(tmp_path):
         assert (await api.get(f"{BRAIN}/agents/momentum")).json()["enabled"] is False
         assert (await api.get(f"{BRAIN}/agents/nobody")).status_code == 404
         assert (await api.post(f"{BRAIN}/agents/nobody", json={"enabled": True})).status_code == 404
-        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 20, "enabled": 19}
+        assert (await api.get(f"{BRAIN}/status")).json()["agents"] == {"registered": 21, "enabled": 20}
 
         cycle = await run_cycle(api, symbols=["DNA"])
         runs = by(cycle["runs"], "agent_id")

@@ -8,12 +8,13 @@ HOLD, and nothing here loosens a limit."""
 from datetime import UTC, datetime, timedelta
 
 from quantpulse.brain.consensus import build_consensus
-from quantpulse.brain.decisions import PORTFOLIO_VOL_CAP, book_volatility, plan
+from quantpulse.brain.decisions import DERISK_EVERY, PORTFOLIO_VOL_CAP, Proposal, book_volatility, plan
 from quantpulse.brain.improvement import ImprovementEngine, withheld
+from quantpulse.brain.store import BrainStore
 from quantpulse.brain.types import Action
 from quantpulse.db.models import BrainExecutionRow, BrainThesisRow
 from tests.unit.test_brain_agents import make_ctx, path
-from tests.unit.test_brain_research import account, op, planning_ctx, position
+from tests.unit.test_brain_research import account, bullish, op, planning_ctx, position
 
 PRICE = float(path(0.0005, 0.01, 13)[-1])
 TWIN_PRICE = float(path(0.0008, 0.012, 12)[-1])
@@ -49,6 +50,57 @@ def test_no_target_is_ever_invented():
     below = planning_ctx(held={"HOLD": (100, PRICE)})
     below.working.post("theses", {"HOLD": {"target_price": round(PRICE * 1.05, 4), "entry_qty": 100}})
     assert planned(below)["HOLD"].action is Action.HOLD
+
+
+# --------------------------------------------------------------------------- the no-trade band
+def test_a_bullish_holding_is_topped_up_only_when_well_short_of_its_target():
+    small = planning_ctx(held={"HOLD": (1, PRICE)})
+    tw = planned(small, {"HOLD": bullish("HOLD")})["HOLD"].target_weight
+    assert planned(small, {"HOLD": bullish("HOLD")})["HOLD"].action is Action.INCREASE
+    equity = small.portfolio.equity
+
+    def at(share: float) -> Action:
+        ctx = planning_ctx(held={"HOLD": (round(share * tw * equity / PRICE), PRICE)})
+        return planned(ctx, {"HOLD": bullish("HOLD")})["HOLD"].action
+
+    assert at(0.5) is Action.INCREASE  # half its target: topped up
+    # near its target (a few shares short after a price move): left alone, not a share bought every cycle
+    assert at(0.85) is Action.HOLD and at(0.95) is Action.HOLD
+
+
+# --------------------------------------------------------------------------- the defensive trim's pace
+def defensive(held, recently=()):
+    ctx = planning_ctx(held=held)
+    ctx.working.post("situation", {"posture": "defensive", "risk_scale": 0.0, "reasons": ["risk-off regime"]})
+    ctx.working.post("recently_derisked", list(recently))
+    return ctx
+
+
+def test_the_defensive_posture_trims_a_third_at_most_every_30_minutes():
+    p = planned(defensive({"HOLD": (90, PRICE)}))["HOLD"]
+    assert p.action is Action.DE_RISK and p.quantity == 30
+    # trimmed in the last 30 minutes: held, so 5-minute cycles cut a third per half hour, not per cycle
+    p = planned(defensive({"HOLD": (60, PRICE)}, recently=["HOLD"]))["HOLD"]
+    assert p.action is Action.HOLD and "the next third waits" in p.reasons[0]
+    assert timedelta(minutes=30) == DERISK_EVERY
+
+
+async def test_recent_trims_are_read_back_from_the_decision_record(database):
+    store = BrainStore(database)
+    now = datetime(2026, 9, 25, 15, 0, tzinfo=UTC)
+    trim = Proposal(
+        subject="HOLD", action=Action.DE_RISK, confidence=1.0, reasons=["t"], quantity=30.0, est_price=PRICE
+    )
+    hold = Proposal(subject="KEEP", action=Action.HOLD, confidence=1.0, reasons=["t"])
+    old = Proposal(
+        subject="OLD", action=Action.DE_RISK, confidence=1.0, reasons=["t"], quantity=10.0, est_price=PRICE
+    )
+    for at, proposals in ((now - timedelta(minutes=40), [old]), (now - timedelta(minutes=10), [trim, hold])):
+        cycle = await store.start_cycle(
+            kind="full", trigger="t", session="market_open", mode="dry_run", now=at
+        )
+        await store.save_decisions(cycle, proposals, {}, "dry_run", at)
+    assert await store.recent_subjects("de_risk", now - DERISK_EVERY) == ["HOLD"]
 
 
 # --------------------------------------------------------------------------- the overnight

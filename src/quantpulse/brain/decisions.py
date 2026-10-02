@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -55,6 +56,12 @@ REPLACE_MARGIN = 0.20  # a candidate this much stronger (score × confidence) ma
 SAME_BET_CORR = 0.85  # two holdings this correlated are one bet: together they respect the position limit
 PORTFOLIO_VOL_CAP = 0.35  # annualised: above this the book is trimmed at its largest risk contributor
 PROFIT_TAKEN = 0.75  # a position already cut to this share of its entry has taken its profit
+# a bullish holding is topped up only below this share of its target weight. Nearer, it is left alone: a
+# no-trade band, the mirror of the trim at 1.5× the target. Without it, every price tick would buy a share.
+TOP_UP_BELOW = 0.75
+# the defensive posture trims a third of a holding at most once in this long: the pace it had with
+# 30-minute cycles, so 5-minute cycles do not cut a position to almost nothing within the hour
+DERISK_EVERY = timedelta(minutes=30)
 
 
 @dataclass
@@ -273,6 +280,7 @@ def plan(
     theses = ctx.working.facts.get("thesis_checks")  # the Alpaca account's position theses (paper_execution)
     registry = ctx.working.facts.get("theses") or {}  # the theses themselves (entry, stop, target)
     near_close = ctx.working.facts.get("near_close")  # the last half hour of the session
+    recently_derisked = set(ctx.working.facts.get("recently_derisked") or ())  # see DERISK_EVERY
 
     def overnight(symbol: str) -> str | None:
         """Earnings before the next session, reviewed in the last half hour (once a day per holding)."""
@@ -406,17 +414,31 @@ def plan(
         elif posture == "defensive" and not (
             c is not None and c.actionable_view and c.stance is Stance.BULLISH
         ):
-            qty = _shares(pos.qty / 3, whole) or pos.qty
-            out.append(
-                Proposal(
-                    action=Action.DE_RISK,
-                    confidence=1.0,
-                    quantity=qty,
-                    target_weight=round(w * 2 / 3, 4),
-                    reasons=[f"trim a third: {posture_why}", *(c.reasons if c else ["no consensus"])],
-                    **base,
+            if s in recently_derisked:
+                out.append(
+                    Proposal(
+                        action=Action.HOLD,
+                        confidence=1.0,
+                        target_weight=round(w, 4),
+                        reasons=[
+                            f"already trimmed for the defensive posture in the last "
+                            f"{DERISK_EVERY.seconds // 60} minutes: the next third waits",
+                            posture_why,
+                        ],
+                        **base,
+                    )
                 )
-            )
+            else:
+                out.append(
+                    Proposal(
+                        action=Action.DE_RISK,
+                        confidence=1.0,
+                        quantity=_shares(pos.qty / 3, whole) or pos.qty,
+                        target_weight=round(w * 2 / 3, 4),
+                        reasons=[f"trim a third: {posture_why}", *(c.reasons if c else ["no consensus"])],
+                        **base,
+                    )
+                )
         elif (
             c is not None
             and c.actionable_view
@@ -459,7 +481,7 @@ def plan(
             tw = sized(s, c.confidence)
             add = min((tw - w) * eq, cash, per_order)
             qty = _shares(add / price, True)
-            if qty >= 1 and add >= ctx.limits.min_order_notional:
+            if w < TOP_UP_BELOW * tw and qty >= 1 and add >= ctx.limits.min_order_notional:
                 cash -= qty * price
                 out.append(
                     Proposal(

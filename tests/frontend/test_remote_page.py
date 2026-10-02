@@ -3,6 +3,7 @@ the Brain's latest decision, the stop button, and the details folded away."""
 
 import httpx
 
+from frontend.views.remote import _learning
 from tests.frontend.test_brain_page import _html, _texts, brain_server  # noqa: F401  (the module's fixture)
 from tests.frontend.test_pages import page
 
@@ -20,7 +21,7 @@ def test_home_shows_the_status_the_account_and_the_brain(brain_server):  # noqa:
     positions = next(d.value for d in at.dataframe if "Symbol" in d.value.columns)
     assert list(positions.columns) == ["Symbol", "Shares", "Value", "P&L", "Return"]
     assert "UPA" in set(positions["Symbol"])
-    assert "Supervisor" in html and "Next cycle" in html  # the Brain at a glance
+    assert "Supervisor" in html and "Next cycle" in html and "Learning" in html  # the Brain at a glance
     assert any("**Latest decision**" in m.value for m in at.markdown)
     assert any(b.label == "STOP BRAIN TRADING" for b in at.button)
     expanders = [e.label for e in [*at.expander, *at.status]]
@@ -46,3 +47,13 @@ def test_one_tap_stops_brain_trading_and_releasing_takes_a_deliberate_second_ste
     next(b for b in at.button if b.label == "Allow Brain orders again").click().run()
     assert not httpx.get(f"{url}/api/v1/brain/kill-switch").json()["active"]
     assert fake.orders == {}  # nothing was ever sent from this page
+
+
+def test_the_learning_line_calls_a_small_sample_unproven():
+    few = {"open": 40, "evaluated": 6, "hit_rate": 0.6667, "next_due": "2026-10-05"}
+    line = _learning({"predictions": few, "min_observations": 20})
+    assert line == "6 graded · 67% right (unproven) · 40 open · next graded 2026-10-05"
+    enough = {**few, "evaluated": 25, "hit_rate": 0.56}
+    assert "56% right ·" in _learning({"predictions": enough, "min_observations": 20})
+    assert _learning({"predictions": {"open": 3, "evaluated": 0, "hit_rate": None}}) == "0 graded · 3 open"
+    assert _learning(None) is None  # the API had nothing to say: the fact is left out

@@ -45,8 +45,11 @@ async def test_a_second_process_on_the_same_database_stands_by_and_sends_nothing
     with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
     fake, feed = shared(clock)
-    async for a in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED):
-        async for b in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED):
+    # the default 0.30 bar leaves more ideas than A's first cycle may open (two new positions), so the
+    # standby's cycle has real buys of its own to refuse
+    low = {"brain_min_confidence": 0.30}
+    async for a in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED, **low):
+        async for b in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED, **low):
             assert "cycle" in await a.container.brain.supervisor.tick()
             sent = order_posts(fake)
             assert sent > 0

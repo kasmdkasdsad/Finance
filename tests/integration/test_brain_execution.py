@@ -81,6 +81,34 @@ async def test_the_brain_trades_its_account_through_the_trading_service(tmp_path
         assert (await api.get(f"{API}/execution")).json()["blockers_scheduled"] == []
 
 
+async def test_at_the_default_confidence_bar_more_is_traded_but_no_cap_moves(tmp_path, monkeypatch):
+    """The default bar is 0.30 (the scenarios here were written around 0.45): two cycles five minutes apart
+    still open at most two new positions each, never spend more than the cash, never buy the same name twice,
+    and every order is approved by the risk engine and filled."""
+    from quantpulse.config import Settings
+
+    default = Settings.model_fields["brain_min_confidence"].default
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, **OWNS, **ENABLED, brain_min_confidence=default):
+        s = api.container.settings
+        assert s.brain_min_confidence == 0.30
+        cash = api.fake.cash
+        first = sent(await run_cycle(api))
+        clock.advance(s.brain_cycle_minutes * 60)
+        second = sent(await run_cycle(api))
+        assert first, "the default bar trades the clear uptrends"
+        for done in (first, second):
+            assert len([d for d in done if d["action"] == "buy"]) <= s.brain_max_new_positions_per_cycle
+            assert all(d["status"] == "filled" and d["execution"]["risk"] == "approved" for d in done)
+        orders = brain_orders(api.fake)
+        assert len({o["symbol"] for o in orders}) == len(orders)  # nothing bought twice
+        assert all(o["side"] == "buy" for o in orders)
+        spent = sum(float(o["qty"]) * api.fake.price(o["symbol"]) for o in orders)
+        assert 0 < spent <= cash and api.fake.cash >= 0  # never margin
+        assert len(api.fake.positions) <= s.trading_max_positions
+
+
 async def test_nothing_is_sent_unless_every_trading_switch_allows_it(tmp_path, monkeypatch):
     with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
