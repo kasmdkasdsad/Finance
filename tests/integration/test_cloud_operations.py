@@ -197,14 +197,17 @@ async def test_the_schedule_and_positions_are_recovered_after_a_restart(tmp_path
     with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
     fake, feed = shared(clock)
-    async for api in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED):
+    slow = {"brain_cycle_minutes": 30}  # 10 minutes pass: with 30-minute cycles the next one is not due yet
+    async for api in brain_client(tmp_path, clock, fake=fake, feed=feed, **slow, **OWNS, **ENABLED):
         assert "cycle" in await api.container.brain.supervisor.tick()
         cycles = len((await api.get(f"{API}/cycles")).json())
         held = set(fake.positions)
         assert held
     fake.hold("MIDC", 7, feed.live_price("MIDC"))  # bought by hand while QuantPulse was down
     clock.advance(10 * 60)
-    async for api in brain_client(tmp_path, clock, fake=fake, feed=feed, **OWNS, **ENABLED):  # a restart
+    async for api in brain_client(
+        tmp_path, clock, fake=fake, feed=feed, **slow, **OWNS, **ENABLED
+    ):  # a restart
         status = (await api.get(f"{API}/supervisor")).json()
         assert status["last"]["cycle"]  # the schedule survived in the database
         assert status["next_cycle_at"] == (NOW + timedelta(minutes=30)).isoformat()
