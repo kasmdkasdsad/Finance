@@ -213,7 +213,9 @@ async def test_a_shutdown_during_an_active_cycle_sends_no_new_order_and_hands_ov
     with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
     fake, feed = shared(clock)
-    gen, api = await start(tmp_path, clock, fake, feed)
+    # the cycle must be allowed to finish within the drain: a full cycle can take several seconds on a busy
+    # machine, longer than the 5 s the integration tests use by default (production allows 75 s)
+    gen, api = await start(tmp_path, clock, fake, feed, shutdown_drain_seconds=30)
     c = api.container
     sup = c.brain.supervisor
     real = sup._tick

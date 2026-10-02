@@ -231,6 +231,47 @@ def portfolio_risk(ctx: BrainContext, symbol: str, add_weight: float) -> dict[st
     }
 
 
+@dataclass
+class Headroom:
+    """What the risk engine will still allow on top of the book, from its own reading of the account:
+    long exposure left under the cap, room under the position cap per symbol, the cash left once the buys
+    still working are paid for, and the symbols with an order still working (it refuses a second one).
+    Sizing within it means the Brain stops proposing buys the risk engine is bound to refuse."""
+
+    exposure: float = 0.0
+    cash: float = 0.0
+    position_cap: float = 0.0
+    value: dict[str, float] = field(default_factory=dict)
+    working: set[str] = field(default_factory=set)
+
+    MARGIN = 0.99  # prices move between the plan and the order: stay a little inside the caps
+
+    @classmethod
+    def of(cls, ctx: BrainContext) -> Headroom:
+        account = ctx.portfolio.account
+        if account is None or ctx.portfolio.equity <= 0:
+            return cls()
+        L, eq = ctx.limits, ctx.portfolio.equity
+        book = RiskBook(L, account, ctx.portfolio.positions, ctx.portfolio.open_orders, ctx.market_open,
+                        ctx.kill_switch, quote_checks(ctx))  # fmt: skip
+        return cls(
+            exposure=max(L.max_total_exposure_pct * eq - book.exposure, 0.0) * cls.MARGIN,
+            cash=max(min(book.buying_power_left, book.cash_left - L.cash_buffer_pct * eq), 0.0),
+            position_cap=L.max_position_pct * eq,
+            value=dict(book.value),
+            working=set(book.working),
+        )
+
+    def for_symbol(self, symbol: str) -> float:
+        """The most another buy of ``symbol`` may cost within both caps."""
+        position = max(self.position_cap - self.value.get(symbol, 0.0), 0.0) * self.MARGIN
+        return min(self.exposure, position)
+
+    def take(self, symbol: str, notional: float) -> None:
+        self.exposure = max(self.exposure - notional, 0.0)
+        self.value[symbol] = self.value.get(symbol, 0.0) + notional
+
+
 def plan(
     ctx: BrainContext,
     consensus: dict[str, Consensus],
@@ -271,6 +312,8 @@ def plan(
     eq = ctx.portfolio.equity
     cash = float(constraints.get("spendable_cash", 0.0))  # shared by increases and new buys
     per_order = ctx.limits.max_order_notional  # sized to fit; a larger target is reached over cycles
+    room = Headroom.of(ctx)
+    cash = min(cash, room.cash)  # the cash the risk engine will count: after the buys still working
     hints = {
         s: o.meta.get("action_hint")
         for s in ctx.held
@@ -479,10 +522,23 @@ def plan(
             and not challenged(s)
         ):
             tw = sized(s, c.confidence)
-            add = min((tw - w) * eq, cash, per_order)
+            add = min((tw - w) * eq, cash, per_order, room.for_symbol(s))
             qty = _shares(add / price, True)
-            if w < TOP_UP_BELOW * tw and qty >= 1 and add >= ctx.limits.min_order_notional:
+            if s in room.working:
+                out.append(
+                    Proposal(
+                        action=Action.HOLD,
+                        confidence=c.confidence,
+                        target_weight=round(w, 4),
+                        reasons=[
+                            "bullish; an order for it is still working: no second order until it settles"
+                        ],
+                        **base,
+                    )
+                )
+            elif w < TOP_UP_BELOW * tw and qty >= 1 and add >= ctx.limits.min_order_notional:
                 cash -= qty * price
+                room.take(s, qty * price)
                 out.append(
                     Proposal(
                         action=Action.INCREASE,
@@ -565,6 +621,8 @@ def plan(
             blockers.append(posture_why)
         if challenged(s):
             blockers.append(challenged(s) or "")
+        if s in room.working:
+            blockers.append("an order for it is still working")
         if blockers:
             out.append(
                 Proposal(
@@ -582,6 +640,7 @@ def plan(
         cash += (
             freed  # an estimate: the risk engine re-checks the buy against the cash once the sale has filled
         )
+        room.exposure += freed
     rank = 0
     for _, s, c, base in sorted(candidates, key=lambda x: -x[0]):
         price = base["est_price"]
@@ -598,7 +657,7 @@ def plan(
                 )
             )
             continue
-        notional = min(tw * eq, cash, per_order) if eq > 0 else 0.0
+        notional = min(tw * eq, cash, per_order, room.for_symbol(s)) if eq > 0 else 0.0
         qty = _shares(notional / price, True) if price else 0.0
         rank += 1
         if rank > slots:
@@ -617,13 +676,18 @@ def plan(
                 Proposal(
                     action=Action.WATCH,
                     confidence=c.confidence,
-                    reasons=[f"bullish; not enough spendable cash (${cash:,.0f})"],
+                    reasons=[
+                        f"bullish; the book is at its {ctx.limits.max_total_exposure_pct:.0%} exposure limit"
+                        if room.exposure < ctx.limits.min_order_notional
+                        else f"bullish; not enough spendable cash (${cash:,.0f})"
+                    ],
                     fit=fit,
                     **base,
                 )
             )
         else:
             cash -= qty * price
+            room.take(s, qty * price)
             out.append(
                 Proposal(
                     action=Action.BUY,

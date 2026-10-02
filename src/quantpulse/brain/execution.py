@@ -183,6 +183,19 @@ def entry_halts(ctx: BrainContext) -> list[dict[str, str]]:
     return out
 
 
+def refused(p: Proposal) -> str:
+    """Why the risk preview refused a decision, naming the checks that failed (all of them are kept on the
+    decision's ``risk``)."""
+    risk = p.risk or {}
+    failed = [
+        f"{c['name'].replace('_', ' ')}: {c['detail']}"
+        for c in risk.get("checks") or []
+        if not c.get("passed")
+    ]
+    why = "; ".join(failed) or risk.get("summary") or "no reason was recorded"
+    return f"the risk preview did not approve it: {why}"
+
+
 def to_order(p: Proposal, ctx: BrainContext) -> BrainOrder:
     pos = ctx.portfolio.positions.get(p.subject)
     selling = p.action in SELLING
@@ -478,14 +491,14 @@ class BrainExecutor:
             if p.blocked_by:
                 return "blocked: " + "; ".join(p.blocked_by)
             if not p.risk_approved:
-                return "the risk preview did not approve it"
+                return refused(p)
             return None
         if p.protective:
             return None  # an exit at a stop or a broken thesis: the risk engine decides
         if p.blocked_by:
             return "blocked: " + "; ".join(p.blocked_by)
         if p.risk_approved is False:
-            return "the risk preview did not approve it"
+            return refused(p)
         return None
 
     async def execute(

@@ -1384,6 +1384,11 @@ The decision step now also:
 * trims a bullish holding that has grown to more than 1.5× its target weight (`REBALANCE`), and tops one up
   (`INCREASE`) only below 0.75× its target. In between it holds: a no-trade band, so five-minute cycles
   do not buy a share every time the price ticks;
+* sizes every buy within what the risk engine will allow: long exposure under its 95% cap (buys still
+  working included), room under the position cap, and the cash left once working buys are paid for.
+  It proposes no second order for a stock whose order is still working, so it no longer proposes the
+  same refused buy every cycle. A refusal that does happen names the checks that failed (for example
+  "total exposure: 97.9% long exposure after the order (limit 95%)");
 * when no position slot is free, closes the weakest *fading* holding (a weakening thesis, or no bullish
   consensus) for a candidate at least 0.20 stronger (score × confidence) — one per cycle; the sale goes
   first and the buy is re-checked by the risk engine once it has filled.
