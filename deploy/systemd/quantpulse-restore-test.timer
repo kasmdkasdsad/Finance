@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly QuantPulse backup restore test (Sundays)
+
+[Timer]
+OnCalendar=Sun *-*-* 09:40:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

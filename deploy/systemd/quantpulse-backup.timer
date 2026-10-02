@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly QuantPulse database backup (03:15 New York in summer, 02:15 in winter)
+
+[Timer]
+OnCalendar=*-*-* 07:15:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

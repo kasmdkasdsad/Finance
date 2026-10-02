@@ -1,0 +1,14 @@
+# HTTPS for the dashboard on your own domain name (only with `./qp start --public`).
+# Point a DNS "A" record for QP_PUBLIC_HOSTNAME at the server first; Caddy then gets a free Let's Encrypt
+# certificate by itself. Only the dashboard is published (with its password login); the API never is.
+{$QP_PUBLIC_HOSTNAME} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	reverse_proxy dashboard:8501
+}

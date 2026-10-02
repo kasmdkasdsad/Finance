@@ -1,0 +1,1272 @@
+"""ORM models for the QuantPulse data warehouse.
+
+Each group of tables is introduced by its own Alembic revision (see ``db/migrations/versions``).
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Any
+
+from sqlalchemy import JSON, Boolean, Date, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from quantpulse.core.clock import utcnow
+from quantpulse.db.base import Base, UTCDateTime
+
+# ----------------------------------------------------------------------------- 0001 market core
+
+
+class PriceBarRow(Base):
+    __tablename__ = "price_bars"
+    __table_args__ = (
+        UniqueConstraint("symbol", "interval", "ts"),
+        Index("ix_price_bars_symbol_interval_ts", "symbol", "interval", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    interval: Mapped[str] = mapped_column(String(8))
+    ts: Mapped[datetime] = mapped_column(UTCDateTime())
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float, default=0.0)
+    provider: Mapped[str] = mapped_column(String(32))
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class QuoteSnapshotRow(Base):
+    __tablename__ = "quote_snapshots"
+    __table_args__ = (Index("ix_quote_snapshots_symbol_quoted_at", "symbol", "quoted_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    price: Mapped[float] = mapped_column(Float)
+    previous_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    provider: Mapped[str] = mapped_column(String(32))
+    quoted_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class IngestionEventRow(Base):
+    __tablename__ = "ingestion_events"
+    __table_args__ = (Index("ix_ingestion_events_dataset_created_at", "dataset", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(40))
+    key: Mapped[str] = mapped_column(String(160))
+    provider: Mapped[str] = mapped_column(String(40))
+    rows: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+# ----------------------------------------------------------------------------- 0002 rates & options
+
+
+class YieldCurvePointRow(Base):
+    __tablename__ = "yield_curve_points"
+    __table_args__ = (UniqueConstraint("curve_date", "tenor"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    curve_date: Mapped[date] = mapped_column(Date, index=True)
+    tenor: Mapped[str] = mapped_column(String(16))
+    years: Mapped[float] = mapped_column(Float)
+    rate: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(String(32))
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class OptionSnapshotRow(Base):
+    __tablename__ = "option_snapshots"
+    __table_args__ = (
+        UniqueConstraint("contract_symbol", "snapshot_at"),
+        Index("ix_option_snapshots_underlying_snapshot_at", "underlying", "snapshot_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    underlying: Mapped[str] = mapped_column(String(16))
+    contract_symbol: Mapped[str] = mapped_column(String(40))
+    kind: Mapped[str] = mapped_column(String(4))
+    strike: Mapped[float] = mapped_column(Float)
+    expiration: Mapped[date] = mapped_column(Date)
+    bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
+    implied_volatility: Mapped[float | None] = mapped_column(Float, nullable=True)
+    underlying_price: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(String(32))
+    snapshot_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+# ----------------------------------------------------------------------------- 0003 fundamentals
+
+
+class CompanyRow(Base):
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), unique=True)
+    cik: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    shares_outstanding: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shares_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class FinancialStatementRow(Base):
+    __tablename__ = "financial_statements"
+    __table_args__ = (UniqueConstraint("symbol", "fiscal_year"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    fiscal_year: Mapped[int] = mapped_column(Integer)
+    period_end: Mapped[date] = mapped_column(Date)
+    form: Mapped[str] = mapped_column(String(12))
+    filed: Mapped[date | None] = mapped_column(Date, nullable=True)
+    accession: Mapped[str | None] = mapped_column(String(25), nullable=True)
+    revenue: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gross_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    operating_income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pretax_income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    income_tax: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interest_expense: Mapped[float | None] = mapped_column(Float, nullable=True)
+    depreciation_amortization: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_assets: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_liabilities: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stockholders_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cash: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_debt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_assets: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_liabilities: Mapped[float | None] = mapped_column(Float, nullable=True)
+    operating_cash_flow: Mapped[float | None] = mapped_column(Float, nullable=True)
+    capital_expenditure: Mapped[float | None] = mapped_column(Float, nullable=True)
+    diluted_eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    diluted_shares: Mapped[float | None] = mapped_column(Float, nullable=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class SecFilingRow(Base):
+    __tablename__ = "sec_filings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    cik: Mapped[str] = mapped_column(String(10))
+    accession: Mapped[str] = mapped_column(String(25), unique=True)
+    form: Mapped[str] = mapped_column(String(16))
+    filing_date: Mapped[date] = mapped_column(Date)
+    report_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    primary_document: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    url: Mapped[str | None] = mapped_column(String(400), nullable=True)
+
+
+class EstimateSnapshotRow(Base):
+    __tablename__ = "analyst_estimate_snapshots"
+    __table_args__ = (Index("ix_analyst_estimate_snapshots_symbol_captured_at", "symbol", "captured_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    provider: Mapped[str] = mapped_column(String(32))
+    captured_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+# ----------------------------------------------------------------------------- 0004 portfolio
+
+
+class PortfolioRow(Base):
+    __tablename__ = "portfolios"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    holdings: Mapped[list[HoldingRow]] = relationship(
+        back_populates="portfolio", cascade="all, delete-orphan", lazy="selectin", order_by="HoldingRow.id"
+    )
+
+
+class HoldingRow(Base):
+    __tablename__ = "holdings"
+    __table_args__ = (UniqueConstraint("portfolio_id", "symbol"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"), index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    quantity: Mapped[float] = mapped_column(Float)
+    cost_basis: Mapped[float | None] = mapped_column(Float, nullable=True)
+    portfolio: Mapped[PortfolioRow] = relationship(back_populates="holdings")
+
+
+# ----------------------------------------------------------------------------- 0005 vehicle
+
+
+class VehicleRow(Base):
+    __tablename__ = "vehicles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    nickname: Mapped[str] = mapped_column(String(80))
+    profile_id: Mapped[str] = mapped_column(String(80))
+    purchase_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    purchase_date: Mapped[date] = mapped_column(Date)
+    purchase_odometer: Mapped[float] = mapped_column(Float, default=0.0)
+    annual_miles: Mapped[float] = mapped_column(Float, default=12000.0)
+    city_share: Mapped[float] = mapped_column(Float, default=0.55)
+    fuel_region: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class TelemetryRow(Base):
+    __tablename__ = "telemetry_readings"
+    __table_args__ = (Index("ix_telemetry_readings_vehicle_id_recorded_at", "vehicle_id", "recorded_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"))
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    odometer: Mapped[float] = mapped_column(Float)
+    fuel_level_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(40), default="manual")
+
+
+class FuelLogRow(Base):
+    __tablename__ = "fuel_logs"
+    __table_args__ = (Index("ix_fuel_logs_vehicle_id_filled_at", "vehicle_id", "filled_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"))
+    filled_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    odometer: Mapped[float] = mapped_column(Float)
+    gallons: Mapped[float] = mapped_column(Float)
+    price_per_gallon: Mapped[float] = mapped_column(Float)
+    full_tank: Mapped[bool] = mapped_column(Boolean, default=True)
+    station: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+
+class MaintenanceRecordRow(Base):
+    __tablename__ = "maintenance_records"
+    __table_args__ = (Index("ix_maintenance_records_vehicle_id_service_code", "vehicle_id", "service_code"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"))
+    service_code: Mapped[str] = mapped_column(String(40))
+    performed_on: Mapped[date] = mapped_column(Date)
+    odometer: Mapped[float] = mapped_column(Float)
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FuelPriceRow(Base):
+    __tablename__ = "fuel_price_observations"
+    __table_args__ = (UniqueConstraint("region", "grade", "period"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    region: Mapped[str] = mapped_column(String(16))
+    region_name: Mapped[str] = mapped_column(String(80))
+    grade: Mapped[str] = mapped_column(String(16))
+    period: Mapped[date] = mapped_column(Date)
+    price: Mapped[float] = mapped_column(Float)
+    series_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+# ----------------------------------------------------------------------------- 0006 sports
+
+
+class SportsGameRow(Base):
+    __tablename__ = "sports_games"
+    __table_args__ = (Index("ix_sports_games_league_season", "league", "season"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(24), unique=True)
+    league: Mapped[str] = mapped_column(String(24))
+    season: Mapped[int] = mapped_column(Integer)
+    season_type: Mapped[int] = mapped_column(Integer)
+    week: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_time: Mapped[datetime] = mapped_column(UTCDateTime())
+    home_team_id: Mapped[str] = mapped_column(String(16))
+    away_team_id: Mapped[str] = mapped_column(String(16))
+    home_name: Mapped[str] = mapped_column(String(80))
+    away_name: Mapped[str] = mapped_column(String(80))
+    home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state: Mapped[str] = mapped_column(String(8))
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    neutral_site: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class TeamRatingRow(Base):
+    __tablename__ = "team_ratings"
+    __table_args__ = (UniqueConstraint("league", "season", "team_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    league: Mapped[str] = mapped_column(String(24))
+    season: Mapped[int] = mapped_column(Integer)
+    team_id: Mapped[str] = mapped_column(String(16))
+    team_name: Mapped[str] = mapped_column(String(80))
+    rating: Mapped[float] = mapped_column(Float)
+    games: Mapped[int] = mapped_column(Integer, default=0)
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    losses: Mapped[int] = mapped_column(Integer, default=0)
+    ties: Mapped[int] = mapped_column(Integer, default=0)
+    computed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+# ----------------------------------------------------------------------------- 0007 trading sandbox
+
+
+class SandboxAccountRow(Base):
+    __tablename__ = "sandbox_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    mode: Mapped[str] = mapped_column(String(10))
+    starting_cash: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    auto_trade: Mapped[bool] = mapped_column(Boolean, default=True)
+    allow_synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
+    strategy: Mapped[dict[str, Any]] = mapped_column(JSON)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class SandboxPositionRow(Base):
+    __tablename__ = "sandbox_positions"
+    __table_args__ = (UniqueConstraint("account_id", "symbol"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("sandbox_accounts.id", ondelete="CASCADE"), index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    quantity: Mapped[float] = mapped_column(Float)
+    avg_cost: Mapped[float] = mapped_column(Float)
+
+
+class SandboxTradeRow(Base):
+    __tablename__ = "sandbox_trades"
+    __table_args__ = (Index("ix_sandbox_trades_account_id_executed_at", "account_id", "executed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("sandbox_accounts.id", ondelete="CASCADE"))
+    executed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    symbol: Mapped[str] = mapped_column(String(16))
+    side: Mapped[str] = mapped_column(String(4))
+    quantity: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    reference_price: Mapped[float] = mapped_column(Float)
+    commission: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    data_status: Mapped[str] = mapped_column(String(10))
+    source: Mapped[str] = mapped_column(String(10))
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SandboxEquityRow(Base):
+    __tablename__ = "sandbox_equity"
+    __table_args__ = (Index("ix_sandbox_equity_account_id_recorded_at", "account_id", "recorded_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("sandbox_accounts.id", ondelete="CASCADE"))
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    equity: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    benchmark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    data_status: Mapped[str] = mapped_column(String(10))
+
+
+class SandboxJournalRow(Base):
+    __tablename__ = "sandbox_journal"
+    __table_args__ = (Index("ix_sandbox_journal_account_id_created_at", "account_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("sandbox_accounts.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    kind: Mapped[str] = mapped_column(String(16))
+    summary: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class PredictionRow(Base):
+    """One logged prediction and, once its target date has passed, how it turned out."""
+
+    __tablename__ = "predictions"
+    __table_args__ = (
+        UniqueConstraint("symbol", "source", "horizon_days", "made_on"),
+        Index("ix_predictions_status_target_date", "status", "target_date"),
+        Index("ix_predictions_symbol_made_on", "symbol", "made_on"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    made_on: Mapped[date] = mapped_column(Date)
+    target_date: Mapped[date] = mapped_column(Date)
+    symbol: Mapped[str] = mapped_column(String(16))
+    source: Mapped[str] = mapped_column(String(16))
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    reference_price: Mapped[float] = mapped_column(Float)
+    benchmark: Mapped[str] = mapped_column(String(16))
+    benchmark_reference: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prob_up: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prob_outperform: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q05: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q25: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q50: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q75: Mapped[float | None] = mapped_column(Float, nullable=True)
+    q95: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_version: Mapped[str] = mapped_column(String(40))
+    data_status: Mapped[str] = mapped_column(String(10))
+    origin: Mapped[str] = mapped_column(String(10), default="live", server_default="live")
+    status: Mapped[str] = mapped_column(String(10), default="open")
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    realized_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_realized: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_up: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    outcome_outperform: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    in_50: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    in_90: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class CompanyProfileRow(Base):
+    """SEC registrant profile (SIC and Fama-French sector) plus the scan window of its earnings events."""
+
+    __tablename__ = "company_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), unique=True)
+    cik: Mapped[str] = mapped_column(String(10))
+    name: Mapped[str] = mapped_column(String(200))
+    sic: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    sic_description: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    sector: Mapped[str] = mapped_column(String(8))
+    earnings_since: Mapped[date] = mapped_column(Date)
+    provider: Mapped[str] = mapped_column(String(32))
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class EarningsEventRow(Base):
+    __tablename__ = "earnings_events"
+    __table_args__ = (UniqueConstraint("symbol", "announced_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    announced_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class ReferenceBlobRow(Base):
+    """Small reference datasets stored whole (e.g. the S&P 500 constituents and change log)."""
+
+    __tablename__ = "reference_blobs"
+
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    provider: Mapped[str] = mapped_column(String(32))
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class FundamentalFactRow(Base):
+    """One XBRL value from an SEC frame: (tag, calendar frame, company) → value for the period."""
+
+    __tablename__ = "fundamental_facts"
+    __table_args__ = (
+        UniqueConstraint("tag", "frame", "cik"),
+        Index("ix_fundamental_facts_cik_tag", "cik", "tag"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tag: Mapped[str] = mapped_column(String(96))
+    frame: Mapped[str] = mapped_column(String(12))
+    cik: Mapped[int] = mapped_column(Integer)
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date] = mapped_column(Date)
+    value: Mapped[float] = mapped_column(Float)
+    accn: Mapped[str] = mapped_column(String(25))
+
+
+# ----------------------------------------------------------------------------- 0010 Alpaca paper trading
+
+
+class TradingCycleRow(Base):
+    """One strategy cycle against the Alpaca paper account (dry run or executed) and everything it saw."""
+
+    __tablename__ = "trading_cycles"
+    __table_args__ = (Index("ix_trading_cycles_started_at", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_key: Mapped[str] = mapped_column(String(48), unique=True)
+    trigger: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(12))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cash: Mapped[float | None] = mapped_column(Float, nullable=True)
+    buying_power: Mapped[float | None] = mapped_column(Float, nullable=True)
+    long_market_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    data_status: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    regime: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    positions: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    signals: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    targets: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    trades: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    plan: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    notes: Mapped[list[Any]] = mapped_column(JSON, default=list)
+
+
+class BrokerOrderRow(Base):
+    """An order QuantPulse sent to (or found on) the Alpaca paper account. Alpaca is authoritative; this
+    row is kept in step with it by reconciliation."""
+
+    __tablename__ = "broker_orders"
+    __table_args__ = (
+        Index("ix_broker_orders_symbol_created_at", "symbol", "created_at"),
+        Index("ix_broker_orders_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_order_id: Mapped[str] = mapped_column(String(128), unique=True)
+    alpaca_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("trading_cycles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # a stock, an option contract (OCC, 21 characters) or a multi-leg order's record symbol (AAPL:MLEG)
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(4))
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional: Mapped[float | None] = mapped_column(Float, nullable=True)
+    asset_class: Mapped[str] = mapped_column(String(12), default="us_equity", server_default="us_equity")
+    order_class: Mapped[str] = mapped_column(String(8), default="simple", server_default="simple")
+    position_intent: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # a multi-leg order's legs: [{symbol, side, ratio_qty, position_intent, filled_qty, filled_avg_price}]
+    legs: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    order_type: Mapped[str] = mapped_column(String(20))
+    time_in_force: Mapped[str] = mapped_column(String(8), default="day")
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(24))
+    filled_quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    average_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    filled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    canceled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    strategy: Mapped[str] = mapped_column(String(32))
+    kind: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class TradingEventRow(Base):
+    """Audit trail: signals, proposals, risk decisions, orders, fills, kill switch, reconciliation."""
+
+    __tablename__ = "trading_events"
+    __table_args__ = (Index("ix_trading_events_created_at", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("trading_cycles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(40))
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class TradingStateRow(Base):
+    """Small persistent trading state (runtime kill switch, per-position memory, P/L baseline)."""
+
+    __tablename__ = "trading_state"
+
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+# ----------------------------------------------------------------------------- brain (multi-agent)
+class BrainAgentRow(Base):
+    """A registered agent (code-defined) and whether it is enabled; its spec is stored per version."""
+
+    __tablename__ = "brain_agents"
+
+    id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    family: Mapped[str] = mapped_column(String(16))
+    version: Mapped[str] = mapped_column(String(16))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    registered_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class BrainCycleRow(Base):
+    """One brain cycle: what it perceived, which agents it chose and why, and what it concluded."""
+
+    __tablename__ = "brain_cycles"
+    __table_args__ = (Index("ix_brain_cycles_started_at", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    trigger: Mapped[str] = mapped_column(String(96))  # e.g. "supervisor: PriceMoveDetected"
+    session: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(12))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    market: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    portfolio: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data_quality: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    focus: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    agents: Mapped[list[Any]] = mapped_column(JSON, default=list)  # selected / skipped, with reasons
+    summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    notes: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BrainAgentRunRow(Base):
+    """One agent's run within a cycle: status, timing and cost (failures are recorded, never hidden)."""
+
+    __tablename__ = "brain_agent_runs"
+    __table_args__ = (Index("ix_brain_agent_runs_agent", "agent_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[str] = mapped_column(String(48))
+    agent_version: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(12))  # ok | failed | timeout | skipped
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    subjects: Mapped[int] = mapped_column(Integer, default=0)
+    opinions: Mapped[int] = mapped_column(Integer, default=0)
+    model_tier: Mapped[str] = mapped_column(String(16))
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class BrainOpinionRow(Base):
+    """An agent's structured finding on one subject (a symbol, @market or @portfolio)."""
+
+    __tablename__ = "brain_opinions"
+    __table_args__ = (
+        Index("ix_brain_opinions_subject", "subject", "created_at"),
+        Index("ix_brain_opinions_agent", "agent_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    agent_id: Mapped[str] = mapped_column(String(48))
+    agent_version: Mapped[str] = mapped_column(String(16))
+    subject: Mapped[str] = mapped_column(String(24))
+    stance: Mapped[str] = mapped_column(String(10))
+    score: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    thesis: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    data_missing: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    data_quality: Mapped[str] = mapped_column(String(16))
+    invalidation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    veto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainConsensusRow(Base):
+    """The team's combined view on one subject, with the disagreement kept visible."""
+
+    __tablename__ = "brain_consensus"
+    __table_args__ = (Index("ix_brain_consensus_subject", "subject", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    subject: Mapped[str] = mapped_column(String(24))
+    stance: Mapped[str] = mapped_column(String(10))
+    score: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    unknown: Mapped[bool] = mapped_column(Boolean, default=False)
+    supporting: Mapped[int] = mapped_column(Integer, default=0)
+    neutral: Mapped[int] = mapped_column(Integer, default=0)
+    opposing: Mapped[int] = mapped_column(Integer, default=0)
+    abstaining: Mapped[int] = mapped_column(Integer, default=0)
+    disagreement: Mapped[float] = mapped_column(Float, default=0.0)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # sides, weights, primary conflict
+    vetoes: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    data_quality: Mapped[str] = mapped_column(String(16))
+    reasons: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainDecisionRow(Base):
+    """A proposed portfolio action, the deterministic risk engine's verdict on it, and (later) what happened.
+    The brain never sends an order itself."""
+
+    __tablename__ = "brain_decisions"
+    __table_args__ = (Index("ix_brain_decisions_subject", "subject", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    consensus_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_consensus.id", ondelete="SET NULL"), nullable=True
+    )
+    subject: Mapped[str] = mapped_column(String(24))
+    action: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(24))
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    est_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rationale: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    risk_approved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    risk: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    execution: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    outcome: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrainPredictionRow(Base):
+    """A gradeable claim: direction of ``subject`` relative to the benchmark over ``horizon_days`` sessions.
+    Written when made; the outcome columns stay empty until the horizon has passed and it is evaluated."""
+
+    __tablename__ = "brain_predictions"
+    __table_args__ = (
+        Index("ix_brain_predictions_due", "status", "due_date"),
+        Index("ix_brain_predictions_source", "source_type", "source_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_cycles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_type: Mapped[str] = mapped_column(String(16))  # agent | consensus | decision | strategy
+    source_id: Mapped[str] = mapped_column(String(48))
+    source_version: Mapped[str] = mapped_column(String(16))
+    subject: Mapped[str] = mapped_column(String(24))
+    direction: Mapped[int] = mapped_column(Integer)  # +1 outperform, −1 underperform the benchmark
+    score: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    benchmark: Mapped[str] = mapped_column(String(16))
+    regime: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    made_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    due_date: Mapped[date] = mapped_column(Date)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_benchmark: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(12))  # open | evaluated | void
+    realized_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_relative: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # the source's measured mean relative return for calls like this one; None until it is calibrated
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class BrainReflectionRow(Base):
+    """An append-only lesson about a decision, prediction or cycle (the original reasoning is never edited)."""
+
+    __tablename__ = "brain_reflections"
+    __table_args__ = (Index("ix_brain_reflections_subject", "subject_type", "subject_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject_type: Mapped[str] = mapped_column(String(16))  # decision | prediction | cycle | system
+    subject_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    category: Mapped[str] = mapped_column(String(32))
+    decision_quality: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    outcome_quality: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    questions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    lessons: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainAgentPerformanceRow(Base):
+    """Measured track record of one agent version (optionally per regime) — computed only from evaluated
+    predictions; nothing is written until there are observations."""
+
+    __tablename__ = "brain_agent_performance"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "agent_version", "regime", "horizon_days", "window", name="uq_brain_agent_performance"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(48))
+    agent_version: Mapped[str] = mapped_column(String(16))
+    regime: Mapped[str] = mapped_column(String(24))  # "all" or a regime label
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    window: Mapped[str] = mapped_column(String(16))  # e.g. "all", "90d"
+    n: Mapped[int] = mapped_column(Integer)
+    hits: Mapped[int] = mapped_column(Integer)
+    hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    brier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ic: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibration: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    reliability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    # independent observations (overlapping calls on one subject count once) and what they support
+    n_effective: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ci_low: Mapped[float | None] = mapped_column(Float, nullable=True)  # 95% Wilson interval of the hit rate
+    ci_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # two-sided, against a coin flip
+    q_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # false-discovery adjusted
+    verdict: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    mean_excess: Mapped[float | None] = mapped_column(Float, nullable=True)  # mean favourable relative return
+    mean_excess_z: Mapped[float | None] = mapped_column(Float, nullable=True)  # the same in units of risk
+
+
+class BrainImprovementRow(Base):
+    """A proposed improvement (agent, data, routing, strategy) and its test result; never self-applied to
+    risk controls."""
+
+    __tablename__ = "brain_improvements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    target: Mapped[str] = mapped_column(String(48))
+    title: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    proposal: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16))  # proposed | testing | validated | rejected | applied
+    test_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    decided_by: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainMemoryRow(Base):
+    """Structured, searchable memory (short-term, working, long-term, strategy and agent tiers). Short
+    summaries plus data — never raw model transcripts."""
+
+    __tablename__ = "brain_memory"
+    __table_args__ = (
+        Index("ix_brain_memory_tier_subject", "tier", "subject"),
+        Index("ix_brain_memory_key", "tier", "key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tier: Mapped[str] = mapped_column(String(16))
+    kind: Mapped[str] = mapped_column(String(24))
+    subject: Mapped[str] = mapped_column(String(24))
+    key: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    summary: Mapped[str] = mapped_column(Text)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    tags: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    importance: Mapped[float] = mapped_column(Float, default=0.5)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_cycles.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrainEventRow(Base):
+    """Something that happened (a quote went stale, a regime changed, an order filled, a prediction matured)."""
+
+    __tablename__ = "brain_events"
+    __table_args__ = (Index("ix_brain_events_type_created", "type", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    type: Mapped[str] = mapped_column(String(40))
+    subject: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    cycle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_cycles.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainStateRow(Base):
+    """Brain controls and scheduler state (started / paused, last job runs)."""
+
+    __tablename__ = "brain_state"
+
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainOpportunityRow(Base):
+    """An idea the brain found itself, and how far it got: detection → data validation → agents → research →
+    bull/bear/devil's advocate → consensus → portfolio fit → risk preview."""
+
+    __tablename__ = "brain_opportunities"
+    __table_args__ = (Index("ix_brain_opportunities_kind_created", "kind", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    subject: Mapped[str] = mapped_column(String(48))
+    symbols: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    direction: Mapped[int] = mapped_column(Integer, default=0)
+    strength: Mapped[float] = mapped_column(Float)
+    headline: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(24))
+    stages: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainDebateRow(Base):
+    """The adversarial review of one subject's consensus: bull case, bear case, devil's advocate."""
+
+    __tablename__ = "brain_debates"
+    __table_args__ = (Index("ix_brain_debates_subject", "subject", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("brain_cycles.id", ondelete="CASCADE"), index=True)
+    subject: Mapped[str] = mapped_column(String(24))
+    stance_before: Mapped[str] = mapped_column(String(10))
+    confidence_before: Mapped[float] = mapped_column(Float)
+    confidence_after: Mapped[float] = mapped_column(Float)
+    verdict: Mapped[str] = mapped_column(String(24))
+    bull: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    bear: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    objections: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    change_our_mind: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainStrategyRow(Base):
+    """A versioned strategy in the lab. A version's spec never changes; its status moves through
+    proposed → validated / rejected → paper → promoted (or retired), and promotion is always a person's call."""
+
+    __tablename__ = "brain_strategies"
+    __table_args__ = (UniqueConstraint("strategy_id", "version", name="uq_brain_strategies_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String(48))
+    version: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(120))
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(
+        String(16)
+    )  # proposed | validated | rejected | paper | promoted | retired
+    source: Mapped[str] = mapped_column(String(24))  # template | user | improvement
+    parent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    validation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # verdict, gates, key metrics
+    paper: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # shadow-portfolio performance
+    decided_by: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    promoted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrainStrategyRunRow(Base):
+    """One lab run of a strategy version: a full validation report or a paper (shadow) rebalance."""
+
+    __tablename__ = "brain_strategy_runs"
+    __table_args__ = (Index("ix_brain_strategy_runs_kind", "strategy_row_id", "kind", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_row_id: Mapped[int] = mapped_column(
+        ForeignKey("brain_strategies.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16))  # validation | paper
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainBookPositionRow(Base):
+    """A position in the Brain's hypothetical paper book (never an Alpaca position)."""
+
+    __tablename__ = "brain_book_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(24), unique=True)
+    qty: Mapped[float] = mapped_column(Float)
+    avg_cost: Mapped[float] = mapped_column(Float)  # per share, including simulated slippage and costs
+    last_price: Mapped[float] = mapped_column(Float)
+    opened_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    invalidation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    thesis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    horizon_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    review_after: Mapped[date | None] = mapped_column(Date, nullable=True)
+    entry_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class BrainBookTradeRow(Base):
+    """A simulated fill in the Brain's paper book: what was proposed, what the simulation paid, and why."""
+
+    __tablename__ = "brain_book_trades"
+    __table_args__ = (Index("ix_brain_book_trades_symbol", "symbol", "executed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    executed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    symbol: Mapped[str] = mapped_column(String(24))
+    side: Mapped[str] = mapped_column(String(4))  # buy | sell
+    action: Mapped[str] = mapped_column(String(16))
+    qty: Mapped[float] = mapped_column(Float)
+    proposed_price: Mapped[float] = mapped_column(Float)
+    fill_price: Mapped[float] = mapped_column(Float)
+    notional: Mapped[float] = mapped_column(Float)
+    slippage_bps: Mapped[float] = mapped_column(Float)  # fill vs proposed, positive = worse
+    cost: Mapped[float] = mapped_column(Float)  # simulated fees
+    price_source: Mapped[str] = mapped_column(String(64))
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holding_days: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BrainBookEquityRow(Base):
+    """The paper book marked to market after a cycle (the last one of each day is that day's close)."""
+
+    __tablename__ = "brain_book_equity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    equity: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    invested: Mapped[float] = mapped_column(Float)
+    positions: Mapped[int] = mapped_column(Integer)
+    benchmark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class BrainThesisRow(Base):
+    """Why the Brain holds a position on the Alpaca paper account, what would end it, and how it is doing.
+    One row per holding period (open until the position is gone); Alpaca's positions are authoritative."""
+
+    __tablename__ = "brain_theses"
+    __table_args__ = (Index("ix_brain_theses_symbol_status", "symbol", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(12))  # open | closed
+    origin: Mapped[str] = mapped_column(String(12))  # brain | inherited | adopted
+    opened_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    entry_price: Mapped[float] = mapped_column(Float)
+    entry_qty: Mapped[float] = mapped_column(Float)
+    entry_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    thesis: Mapped[str] = mapped_column(Text)
+    invalidation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    horizon_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    supporting: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    opposing: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    regime: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    sector: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    benchmark_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    qty: Mapped[float] = mapped_column(Float)
+    avg_price: Mapped[float] = mapped_column(Float)
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    check: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # the latest thesis check
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exit_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    history: Mapped[list[Any]] = mapped_column(JSON, default=list)
+
+
+class BrainSessionRow(Base):
+    """One trading day of the Alpaca paper account: the pre-market check, the close (account, benchmark,
+    orders, halts, data blocks). What the 60-session evaluation is computed from."""
+
+    __tablename__ = "brain_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, unique=True)
+    owner: Mapped[str] = mapped_column(String(16))  # brain | strategy
+    equity_open: Mapped[float | None] = mapped_column(Float, nullable=True)  # Alpaca's last_equity
+    equity_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    day_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    benchmark_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exposure: Mapped[float | None] = mapped_column(Float, nullable=True)
+    positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    orders_sent: Mapped[int] = mapped_column(Integer, default=0)
+    orders_filled: Mapped[int] = mapped_column(Integer, default=0)
+    traded_notional: Mapped[float] = mapped_column(Float, default=0.0)
+    cycles: Mapped[int] = mapped_column(Integer, default=0)
+    data_blocked_cycles: Mapped[int] = mapped_column(Integer, default=0)
+    halts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # entry-halt code -> cycles
+    premarket: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    near_close: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # overnight risk, hold or reduce
+    close: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainExecutionRow(Base):
+    """One Brain order, from the decision to its final state: what was expected, what the market looked like
+    as it left, what Alpaca did, how long it took, and how good the execution was — independent of whether
+    the trade made money. Kept in step with the order records by reconciliation."""
+
+    __tablename__ = "brain_executions"
+    __table_args__ = (Index("ix_brain_executions_symbol", "symbol", "submitted_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_order_id: Mapped[str] = mapped_column(String(128), unique=True)
+    alpaca_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    brain_cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trading_cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    symbol: Mapped[str] = mapped_column(String(24))
+    side: Mapped[str] = mapped_column(String(4))
+    action: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consensus: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    qty: Mapped[float] = mapped_column(Float)
+    order_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    expected_price: Mapped[float | None] = mapped_column(Float, nullable=True)  # what the decision assumed
+    submitted_price: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # the limit (market: the quote)
+    quote_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_age_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_source: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    submit_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_to_submit_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filled_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    filled_avg_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    seconds_to_fill: Mapped[float | None] = mapped_column(Float, nullable=True)
+    partial: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(24))
+    final: Mapped[bool] = mapped_column(Boolean, default=False)
+    slippage_bps: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # vs the expected price (+: worse)
+    cost_vs_quote_bps: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # vs the midpoint as it left
+    grade: Mapped[str | None] = mapped_column(String(12), nullable=True)  # good | fair | poor | unknown
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainOpportunityOutcomeRow(Base):
+    """One idea the Brain considered on one day — taken or not, and why not — graded later against the
+    benchmark, so it learns from the trades it rejected as well as from those it made. Repeated detections of
+    the same idea (kind, symbol, direction) on the same day are one record (``repeats``), never a bigger
+    sample."""
+
+    __tablename__ = "brain_opportunity_outcomes"
+    __table_args__ = (
+        Index("ix_brain_opportunity_outcomes_key", "kind", "symbol", "direction", "day", unique=True),
+        Index("ix_brain_opportunity_outcomes_state", "state", "due_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    opportunity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # the first detection
+    cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    symbol: Mapped[str] = mapped_column(String(24))
+    direction: Mapped[int] = mapped_column(Integer)  # +1 an idea to own it, −1 an idea to avoid / sell it
+    day: Mapped[date] = mapped_column(Date)  # New York date of the first detection
+    detected_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    strength: Mapped[float] = mapped_column(Float)
+    headline: Mapped[str] = mapped_column(Text)
+    taken: Mapped[bool] = mapped_column(
+        Boolean, default=False
+    )  # a trade on it went out (any detection that day)
+    reason: Mapped[str] = mapped_column(String(32))  # why not taken (a category), or "taken"
+    reason_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stopped_at: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )  # the pipeline stage it stopped at
+    status: Mapped[str] = mapped_column(String(24))  # the opportunity's status at its last detection that day
+    repeats: Mapped[int] = mapped_column(Integer, default=0)
+    regime: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    vol_env: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    market_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    due_date: Mapped[date] = mapped_column(Date)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_benchmark: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vol: Mapped[float | None] = mapped_column(Float, nullable=True)  # annualised, at detection
+    state: Mapped[str] = mapped_column(String(12))  # open | evaluated | void
+    realized_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    relative: Mapped[float | None] = mapped_column(Float, nullable=True)  # vs the benchmark over the horizon
+    favourable: Mapped[float | None] = mapped_column(Float, nullable=True)  # direction × relative
+    z: Mapped[float | None] = mapped_column(Float, nullable=True)  # favourable in units of the horizon's risk
+    verdict: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrainReviewRow(Base):
+    """An automatic review of the Brain's own results — daily after the close, weekly after the week's last
+    session: what happened, what it means, the lessons (structured, deterministic) and the proposals it led
+    to. Append-only: a review is never rewritten, a new one is added."""
+
+    __tablename__ = "brain_reviews"
+    __table_args__ = (Index("ix_brain_reviews_kind_period", "kind", "period_end"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(12))  # daily | weekly
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    headline: Mapped[str] = mapped_column(Text)
+    body: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    lessons: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    proposals: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class ServiceLeaseRow(Base):
+    """A lease that at most one process holds at a time (the Brain supervisor and its order submission):
+    who holds it, since when, when it was last renewed and when it lapses if it is not renewed."""
+
+    __tablename__ = "service_leases"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(128))
+    acquired_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+# the options layer (revision 0023), market evolution with the model registry (revision 0024) and the 24/7
+# research subsystem (revision 0025) live in their own modules; importing them registers their tables
+from quantpulse.db import evolution_models as evolution_models  # noqa: E402
+from quantpulse.db import options_models as options_models  # noqa: E402
+from quantpulse.db import research_models as research_models  # noqa: E402

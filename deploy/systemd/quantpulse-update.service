@@ -1,0 +1,16 @@
+# Installed by `./qp install-timers`. Deploys the followed branch's newest commit only when GitHub CI passed every
+# required job (ARM64 included) on exactly that commit, outside market hours; builds and checks it before the
+# switch, verifies after, rolls back by itself. Pulls over HTTPS: GitHub never reaches this server.
+[Unit]
+Description=QuantPulse automatic deploy of CI-verified commits
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DEPLOY@
+ExecStart=@DEPLOY@/qp auto-update
+TimeoutStartSec=90min
+Nice=10

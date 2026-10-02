@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    # Render deploys the branch it follows only after these checks pass (render.yaml: autoDeployTrigger: checksPass)
+    branches: [main, "claude/**"]
+  # No pull_request trigger: a PR from one of these branches would run twice per push (and email twice).
+  # Its checks come from the push run on its head commit.
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    env:
+      # Tests never touch the network: every provider is mocked with respx.
+      QP_ENABLE_LIVE_DATA: "false"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[frontend,dev]" -c constraints.txt
+      - name: Lint
+        run: |
+          ruff check src frontend tests
+          ruff format --check src frontend tests
+      - name: Type-check
+        run: mypy
+      - name: Migrations apply cleanly
+        run: |
+          QP_DATABASE_URL=sqlite+aiosqlite:///./ci.db quantpulse-migrate
+          QP_DATABASE_URL=sqlite+aiosqlite:///./ci.db quantpulse-migrate base --downgrade
+      - name: Tests
+        run: pytest -q
+
+  postgres:
+    # The cloud runs on PostgreSQL: migrations up and down, schema drift, and every cloud / deployment test
+    # (single supervisor, restarts, deploy overlap, crash recovery, kill switch, health, history transfer).
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      QP_ENABLE_LIVE_DATA: "false"
+      QP_TEST_POSTGRES_URL: postgresql+asyncpg://postgres@localhost:5432
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[frontend,dev]" -c constraints.txt
+      - name: Migrations on PostgreSQL (up, down, up)
+        run: |
+          psql -h localhost -U postgres -c "CREATE DATABASE ci_migrate"
+          QP_DATABASE_URL=postgresql://postgres@localhost:5432/ci_migrate quantpulse-migrate
+          QP_DATABASE_URL=postgresql://postgres@localhost:5432/ci_migrate quantpulse-migrate base --downgrade
+          QP_DATABASE_URL=postgresql://postgres@localhost:5432/ci_migrate quantpulse-migrate
+      - name: Cloud and deployment tests on PostgreSQL
+        run: >-
+          pytest -q tests/integration/test_cloud_operations.py tests/integration/test_cloud_health.py
+          tests/integration/test_cloud_security.py tests/integration/test_cloud_database.py
+          tests/integration/test_render_deploy.py tests/integration/test_migrations.py
+          tests/integration/test_brain_execution.py tests/integration/test_brain_supervisor.py
+          tests/unit/test_lease.py tests/integration/test_options_execution.py
+          tests/integration/test_options_brain.py tests/integration/test_evolution_service.py
+          tests/integration/test_watchdog.py
+      - name: Backup and restore with the production PostgreSQL tools (pg_dump, pg_restore from postgres:16-alpine)
+        env:
+          QP_TEST_PG_TOOLS: docker
+        run: pytest -q tests/integration/test_backup_restore.py
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build image
+        run: docker build -t quantpulse-terminal:ci .
+      - name: Smoke-test the API container
+        run: |
+          docker run -d --name qp -e QP_ENABLE_LIVE_DATA=false -e QP_POLLING_ENABLED=false -p 8000:8000 quantpulse-terminal:ci
+          for i in $(seq 1 30); do curl -fs localhost:8000/health && break; sleep 1; done
+          curl -fs localhost:8000/api/v1/market/quote/AAPL | python -c "import json,sys; assert json.load(sys.stdin)['meta']['status']=='synthetic'"
+          docker rm -f qp
+
+  docker-arm64:
+    # The Oracle Cloud Always Free server is ARM (Ampere A1): the production image is built for linux/arm64 and its
+    # API smoke-tested under emulation. The server deploys a commit only when this job passed on it (deploy/qpops.py).
+    name: docker (arm64)
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the production image for linux/arm64
+        run: docker buildx build --platform linux/arm64 --load -t quantpulse:arm64 .
+      - name: The image is arm64
+        run: test "$(docker image inspect --format '{{.Architecture}}' quantpulse:arm64)" = arm64
+      - name: Smoke-test the API container (emulated arm64)
+        run: |
+          docker run -d --platform linux/arm64 --name qp -e QP_ENABLE_LIVE_DATA=false -e QP_POLLING_ENABLED=false \
+            -p 8000:8000 quantpulse:arm64
+          for i in $(seq 1 90); do curl -fs localhost:8000/health && break; sleep 2; done
+          curl -fs localhost:8000/health
+          curl -fs localhost:8000/api/v1/market/quote/AAPL | python3 -c "import json,sys; assert json.load(sys.stdin)['meta']['status']=='synthetic'"
+          docker exec qp python -c "import platform, numpy, scipy, pandas, sklearn, asyncpg, pyarrow; assert platform.machine() == 'aarch64', platform.machine()"
+          docker rm -f qp
