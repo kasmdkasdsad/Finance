@@ -199,7 +199,7 @@ def _performance(account_id: int, benchmark: str) -> None:
         )
         return
     df = pd.DataFrame(points)
-    df["recorded_at"] = pd.to_datetime(df["recorded_at"])
+    ui.et_times(df, ["recorded_at"])
     df = df.set_index("recorded_at")
     idx = pd.DataFrame(index=df.index)
     idx["Strategy"] = df["equity"] / df["equity"].iloc[0] * 100
@@ -372,7 +372,7 @@ def _trades(account_id: int) -> None:
         st.info("No trades yet.", icon=":material/receipt_long:")
         return
     df = pd.DataFrame(trades)
-    df["executed_at"] = pd.to_datetime(df["executed_at"])
+    ui.et_times(df, ["executed_at"])
     st.dataframe(
         df[
             [
@@ -403,7 +403,7 @@ def _trades(account_id: int) -> None:
 def _journal(account_id: int) -> None:
     entries = guarded(lambda: api().get(f"{BASE}/{account_id}/journal", limit=200), "journal") or []
     for e in entries:
-        when = pd.Timestamp(e["created_at"]).strftime("%Y-%m-%d %H:%M UTC")
+        when = ui.when(e["created_at"])
         icon = KIND_ICON.get(e["kind"], ":material/notes:")
         st.markdown(f"{icon} **{e['kind'].capitalize()}** · {when}  \n{e['summary']}")
 

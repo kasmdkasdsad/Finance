@@ -9,10 +9,14 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 import streamlit as st
 
 STYLE = Path(__file__).with_name("style.css")
+ET = ZoneInfo("America/New_York")  # every time on the dashboard is New York time, the market's own clock
+TIME_FORMAT = "MMM D, h:mm A"  # tables (momentJS)
 
 
 def inject_css() -> None:
@@ -114,15 +118,52 @@ def section(title: str, caption: str | None = None) -> None:
         st.caption(md(caption))
 
 
-def when(ts: str | None) -> str:
-    """``2026-10-01T14:05:09Z`` → ``Oct 1, 14:05 UTC``."""
+def eastern(ts: str | datetime | None) -> datetime | None:
+    """An API time (ISO 8601, UTC unless it says otherwise) in New York time; ``None`` if there is none."""
     if not ts:
-        return "—"
-    try:
-        moment = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
-        return ts[:16].replace("T", " ")
-    return f"{moment:%b} {moment.day}, {moment:%H:%M} UTC"
+        return None
+    if isinstance(ts, datetime):
+        moment = ts
+    else:
+        try:
+            moment = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(ET)
+
+
+def when(ts: str | datetime | None, seconds: bool = False) -> str:
+    """``2026-10-01T14:05:09Z`` → ``Oct 1, 10:05 AM ET`` (Eastern time, daylight saving included)."""
+    m = eastern(ts)
+    if m is None:
+        return str(ts)[:16].replace("T", " ") if ts else "—"
+    clock = f"{m.hour % 12 or 12}:{m:%M}" + (f":{m:%S}" if seconds else "")
+    return f"{m:%b} {m.day}, {clock} {m:%p} ET"
+
+
+def day(ts: str | datetime | None) -> str:
+    """The New York date of an API time: ``2026-10-02T01:30:00Z`` → ``2026-10-01``."""
+    m = eastern(ts)
+    return m.date().isoformat() if m is not None else (str(ts)[:10] if ts else "—")
+
+
+def et_times(df: pd.DataFrame, columns: Iterable[str] | None = None) -> dict[str, Any]:
+    """Convert a table's time columns (``at`` and ``…_at``, or ``columns``) to New York time in place.
+    Returns their column config, labelled "(ET)"; they stay real times, so they still sort."""
+    cols = (
+        list(columns)
+        if columns is not None
+        else [c for c in df.columns if c == "at" or str(c).endswith("_at")]
+    )
+    config: dict[str, Any] = {}
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], utc=True, errors="coerce", format="ISO8601").dt.tz_convert(ET)
+            label = "When" if c == "at" else str(c).removesuffix("_at").replace("_", " ").capitalize()
+            config[c] = st.column_config.DatetimeColumn(f"{label} (ET)", format=TIME_FORMAT)
+    return config
 
 
 def since(ts: str | None) -> str:

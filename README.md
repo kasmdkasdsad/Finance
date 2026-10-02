@@ -1830,6 +1830,8 @@ The dashboard is one calm layout on a desktop and on a phone (light or dark, fol
 * **Every page** opens with the same header: its title, the **Paper** pill (Alpaca paper only) and one
   line saying what the page is for. A status line says what matters first, KPI cards hold the numbers (two
   per line on a phone), and details are folded away in expanders. Tabs compute only the tab that is open.
+  Every time is New York (Eastern) time, the market's own clock, daylight saving included: "Oct 1, 10:05
+  AM ET" in text, and "(ET)" columns in tables.
 * **Home** is the page to open first: one status line (green: trading on its own; yellow: healthy but not
   trading now, and why; red: stopped or broken), equity and P&L, the positions (read live from Alpaca with
   the account, so they always agree: each one's change today and gain since bought, and a line splitting

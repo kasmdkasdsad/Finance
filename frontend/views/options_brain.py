@@ -21,7 +21,7 @@ def _table(
     df = pd.DataFrame(rows)
     if cols:
         df = df[[c for c in cols if c in df.columns]]
-    st.dataframe(df, width="stretch", hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True, column_config=ui.et_times(df))
 
 
 CLEARED = ("PAPER_SHADOW", "PAPER_ACTIVE", "PROVEN")

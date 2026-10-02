@@ -21,7 +21,8 @@ def _table(rows: list[dict[str, Any]] | None, cols: list[str], empty: str) -> No
         st.caption(empty)
         return
     df = pd.DataFrame(rows)
-    st.dataframe(df[[c for c in cols if c in df.columns]], width="stretch", hide_index=True)
+    df = df[[c for c in cols if c in df.columns]]
+    st.dataframe(df, width="stretch", hide_index=True, column_config=ui.et_times(df))
 
 
 def _operating(status: dict[str, Any]) -> None:

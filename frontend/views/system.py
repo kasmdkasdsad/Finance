@@ -45,7 +45,7 @@ def render() -> None:
                 "ok": p["successes"],
                 "failed": p["failures"],
                 "avg_ms": p["avg_latency_ms"],
-                "last_success": p["last_success_at"],
+                "last_success": ui.when(p["last_success_at"]),
                 "last_error": p["last_error"],
             }
         )

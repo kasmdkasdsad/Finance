@@ -603,7 +603,7 @@ def _execution_tab() -> None:
         ok = latest["ok"]
         (st.success if ok else st.error)(
             _md(
-                f"{latest['purpose'].replace('_', ' ')} audit at {latest['at'][:19].replace('T', ' ')} UTC: "
+                f"{latest['purpose'].replace('_', ' ')} audit at {ui.when(latest['at'], seconds=True)}: "
                 + ("every check passed" if ok else "FAILED — " + "; ".join(latest["failed"]))
             ),
             icon=":material/verified_user:" if ok else ":material/gpp_bad:",
@@ -676,7 +676,7 @@ def _execution_tab() -> None:
             pd.DataFrame(
                 [
                     {
-                        "decided": (r.get("decided_at") or "")[:19].replace("T", " "),
+                        "decided": ui.when(r.get("decided_at"), seconds=True),
                         "symbol": r["symbol"],
                         "action": r["action"],
                         "qty": r["qty"],
@@ -784,7 +784,7 @@ def _positions() -> None:
                     st.markdown(_md("**Check:** " + "; ".join(check["reasons"])))
                 st.caption(
                     _md(
-                        f"Opened {r['opened_at'][:16].replace('T', ' ')} UTC at {money(r['entry_price'])} · "
+                        f"Opened {ui.when(r['opened_at'])} at {money(r['entry_price'])} · "
                         f"entry order {r.get('entry_order_id') or '—'} · decision #{r.get('entry_decision_id') or '—'}"
                     )
                 )
@@ -796,8 +796,8 @@ def _positions() -> None:
                 [
                     {
                         "symbol": r["symbol"],
-                        "opened": r["opened_at"][:10],
-                        "closed": (r.get("closed_at") or "")[:10],
+                        "opened": ui.day(r["opened_at"]),
+                        "closed": ui.day(r.get("closed_at")),
                         "entry": money(r["entry_price"]),
                         "exit": money(r.get("exit_price")),
                         "realised": money(r.get("realized_pnl")),
@@ -831,7 +831,7 @@ def _audit() -> None:
         st.caption("No trade decisions yet.")
         return
     labels = {
-        t["decision_id"]: f"#{t['decision_id']} · {t['at'][:16].replace('T', ' ')} · {t['action']} "
+        t["decision_id"]: f"#{t['decision_id']} · {ui.when(t['at'])} · {t['action']} "
         f"{t['quantity']:g} {t['subject']} · {'sent' if t['sent'] else 'not sent'} ({t['status']})"
         for t in trades
     }
@@ -1304,7 +1304,7 @@ def _learning() -> None:
     )
     last = state.get("last_run")
     st.caption(
-        f"Last learning pass: {last['at'][:16].replace('T', ' ')} UTC · graded {last['evaluated']}, reflections "
+        f"Last learning pass: {ui.when(last['at'])} · graded {last['evaluated']}, reflections "
         f"{last['reflections']}"
         if last
         else "No learning pass yet."
@@ -1373,7 +1373,7 @@ def _learning() -> None:
             pd.DataFrame(
                 [
                     {
-                        "when": r["created_at"][:10],
+                        "when": ui.day(r["created_at"]),
                         "subject": (r.get("evidence") or {}).get("subject"),
                         "quadrant": QUADRANT.get(r["category"], r["category"]),
                         "decision": r["decision_quality"],
@@ -1387,7 +1387,7 @@ def _learning() -> None:
             use_container_width=True,
         )
     for r in (x for x in reflections if x["category"] == "failure_analysis"):
-        with st.expander(f"Failure analysis · {r['created_at'][:10]}", icon=":material/troubleshoot:"):
+        with st.expander(f"Failure analysis · {ui.day(r['created_at'])}", icon=":material/troubleshoot:"):
             for lesson in r["lessons"]:
                 st.markdown(_md(f"- {lesson}"))
     if not decisions and not overall:
@@ -1593,9 +1593,7 @@ def _operations() -> None:
             st.dataframe(
                 pd.DataFrame(sup["recent"][::-1]).astype(str), hide_index=True, use_container_width=True
             )
-        st.caption(
-            _md("Last runs: " + ", ".join(f"{k} {v[:16].replace('T', ' ')}" for k, v in sup["last"].items()))
-        )
+        st.caption(_md("Last runs: " + ", ".join(f"{k} {ui.when(v)}" for k, v in sup["last"].items())))
     _sessions()
     _models()
     kind = st.selectbox(
@@ -1634,7 +1632,7 @@ def _operations() -> None:
             pd.DataFrame(
                 [
                     {
-                        "when": r["created_at"][:19].replace("T", " "),
+                        "when": ui.when(r["created_at"], seconds=True),
                         "event": r["type"],
                         "subject": r["subject"],
                         "source": (r.get("payload") or {}).get("source"),
@@ -1697,7 +1695,7 @@ def _memory() -> None:
         pd.DataFrame(
             [
                 {
-                    "when": r["updated_at"],
+                    "when": ui.when(r["updated_at"]),
                     "kind": r["kind"],
                     "subject": r["subject"],
                     "summary": r["summary"],
@@ -1721,7 +1719,7 @@ def _history(cycles: list[dict[str, Any]]) -> None:
             [
                 {
                     "cycle": c["id"],
-                    "started": c["started_at"],
+                    "started": ui.when(c["started_at"]),
                     "kind": c["kind"],
                     "trigger": c["trigger"],
                     "session": c["session"],

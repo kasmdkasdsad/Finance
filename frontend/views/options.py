@@ -28,6 +28,8 @@ def _price_chart(symbol: str) -> None:
     if not hist or not hist["data"]["bars"]:
         return
     df = pd.DataFrame(hist["data"]["bars"])
+    if interval in ("5m", "1h"):  # intraday bars on New York time (daily and weekly bars keep their date)
+        ui.et_times(df, ["timestamp"])
     t = charts.theme()
     fig = go.Figure(
         go.Candlestick(
@@ -230,7 +232,7 @@ def _chain(symbol: str) -> None:
     ]
     calls = df[df["kind"] == "call"][cols].sort_values("strike")
     puts = df[df["kind"] == "put"][cols].sort_values("strike")
-    st.caption(f"Underlying {num(spot)} · as of {chain['as_of'][:19].replace('T', ' ')} UTC")
+    st.caption(f"Underlying {num(spot)} · as of {ui.when(chain['as_of'], seconds=True)}")
     cfg = {
         c: st.column_config.NumberColumn(format="%.4f")
         for c in ("implied_volatility", "model_iv", "delta", "gamma", "theta_per_day", "vega_per_pct")

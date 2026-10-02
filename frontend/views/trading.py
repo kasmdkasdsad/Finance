@@ -106,10 +106,6 @@ def _setup_help() -> None:
     )
 
 
-def _when(stamp: str | None, fmt: str = "%a %H:%M ET") -> str:
-    return pd.Timestamp(stamp).tz_convert("America/New_York").strftime(fmt) if stamp else "—"
-
-
 def _status_row(status: dict[str, Any]) -> None:
     if not status["scheduler_enabled"]:
         sched = "off (manual cycles only)"
@@ -130,9 +126,9 @@ def _status_row(status: dict[str, Any]) -> None:
             ("Kill switch", "ON" if status["kill_switch"]["active"] else "off"),
             ("Strategy scheduler", sched),
             ("Market", "open" if market.get("is_open") else "closed"),
-            ("Last cycle", (_when(last["started_at"]) + f" · {last['orders_submitted']} sent / {last['trades_proposed']} proposed") if last else "—"),
-            ("Next cycle", _when(status.get("next_cycle_at")) if status["scheduler_enabled"] else "—"),
-            ("Last reconciled", _when(status.get("last_reconciled_at"), "%H:%M:%S ET")),
+            ("Last cycle", (ui.when(last["started_at"]) + f" · {last['orders_submitted']} sent / {last['trades_proposed']} proposed") if last else "—"),
+            ("Next cycle", ui.when(status.get("next_cycle_at")) if status["scheduler_enabled"] else "—"),
+            ("Last reconciled", ui.when(status.get("last_reconciled_at"), seconds=True)),
         ]
     )  # fmt: skip
 
@@ -146,7 +142,7 @@ def _account(acct: dict[str, Any]) -> None:
                 "Total P/L",
                 money(acct["total_pl"]),
                 pct(acct["total_pl_pct"], signed=True) if acct["total_pl_pct"] is not None else None,
-                help=f"Since QuantPulse first recorded {money(acct['baseline_equity'])} on {acct['baseline_at']}",
+                help=f"Since QuantPulse first recorded {money(acct['baseline_equity'])} on {ui.when(acct['baseline_at'])}",
             ),
             ui.Kpi("Buying power", money(acct["buying_power"]), f"cash {money(acct['cash'])}", delta_color="off",
                    arrow="off"),
@@ -290,7 +286,7 @@ def _strategy() -> None:
         return
     st.caption(
         f"Cycle {cycle['cycle_key']} · {cycle['trigger']} · {'DRY RUN' if cycle['mode'] == 'dry_run' else 'PAPER'} · "
-        f"{cycle['status']} · started {cycle['started_at']} · prices {str(cycle['data_status'] or '—').upper()}"
+        f"{cycle['status']} · started {ui.when(cycle['started_at'])} · prices {str(cycle['data_status'] or '—').upper()}"
     )
     regime = cycle.get("regime")
     if regime:
@@ -387,6 +383,7 @@ def _orders() -> None:
         st.caption("No orders on the Alpaca paper account yet.")
         return
     df = pd.DataFrame(orders)
+    ui.et_times(df, ["submitted_at", "filled_at"])
     st.dataframe(
         df[
             [
@@ -430,8 +427,8 @@ def _orders() -> None:
             "filled_qty": st.column_config.NumberColumn("Filled", format="%g"),
             "limit_price": st.column_config.NumberColumn("Limit", format="dollar"),
             "filled_avg_price": st.column_config.NumberColumn("Avg fill", format="dollar"),
-            "submitted_at": st.column_config.DatetimeColumn("Submitted", format="MMM D HH:mm:ss"),
-            "filled_at": st.column_config.DatetimeColumn("Filled", format="MMM D HH:mm:ss"),
+            "submitted_at": st.column_config.DatetimeColumn("Submitted (ET)", format="MMM D, h:mm:ss A"),
+            "filled_at": st.column_config.DatetimeColumn("Filled (ET)", format="MMM D, h:mm:ss A"),
         },
     )
 
@@ -502,8 +499,10 @@ def _activity() -> None:
     cycles = guarded(lambda: api().get(f"{BASE}/cycles", limit=50), "cycles") or []
     st.markdown("#### Cycles")
     if cycles:
+        runs = pd.DataFrame(cycles)
+        ui.et_times(runs, ["started_at"])
         st.dataframe(
-            pd.DataFrame(cycles)[
+            runs[
                 [
                     "cycle_key",
                     "trigger",
@@ -521,7 +520,7 @@ def _activity() -> None:
             hide_index=True,
             width="stretch",
             column_config={
-                "started_at": st.column_config.DatetimeColumn("Started", format="MMM D HH:mm"),
+                "started_at": st.column_config.DatetimeColumn("Started (ET)", format=ui.TIME_FORMAT),
                 "trades_proposed": "Proposed",
                 "trades_approved": "Risk approved",
                 "orders_submitted": st.column_config.NumberColumn(
@@ -535,13 +534,15 @@ def _activity() -> None:
         st.caption("No cycles yet.")
     st.markdown("#### Audit trail")
     if events:
+        trail = pd.DataFrame(events)[["created_at", "kind", "symbol", "message", "client_order_id"]]
+        ui.et_times(trail, ["created_at"])
         st.dataframe(
-            pd.DataFrame(events)[["created_at", "kind", "symbol", "message", "client_order_id"]],
+            trail,
             hide_index=True,
             width="stretch",
             height=420,
             column_config={
-                "created_at": st.column_config.DatetimeColumn("When", format="MMM D HH:mm:ss"),
+                "created_at": st.column_config.DatetimeColumn("When (ET)", format="MMM D, h:mm:ss A"),
                 "message": st.column_config.TextColumn("What happened", width="large"),
             },
         )
@@ -794,7 +795,7 @@ def _diagnostics(status: dict[str, Any]) -> None:
         with st.expander("Configuration the API is running with", icon=":material/settings:"):
             st.caption(
                 _md(
-                    f".env file: {cfg['env_file'] or 'none found'} · read at {cfg['loaded_at'] or '—'} · "
+                    f".env file: {cfg['env_file'] or 'none found'} · read at {ui.when(cfg['loaded_at'])} · "
                     f"database: {cfg['database']}"
                 )
             )

@@ -92,7 +92,7 @@ def render() -> None:
             "closed": "Market closed",
         }
         st.caption(
-            f"{labels.get(session['session'], session['session'])} · next open {session['next_open'][:16].replace('T', ' ')} ET"
+            f"{labels.get(session['session'], session['session'])} · next open {ui.when(session['next_open'])}"
         )
 
     symbols = st.text_input(
