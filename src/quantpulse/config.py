@@ -542,7 +542,7 @@ class Settings(BaseSettings):
         "Positions stay where they are; the trading kill switch and close-all still work.",
     )
     brain_focus_candidates: int = Field(
-        default=8,
+        default=16,
         ge=0,
         le=50,
         description="Non-held symbols studied closely per cycle (best of a pre-screen).",
@@ -565,7 +565,7 @@ class Settings(BaseSettings):
     )
     brain_max_new_positions_per_cycle: int = Field(default=2, ge=0, le=20)
     brain_max_opportunities: int = Field(
-        default=6,
+        default=10,
         ge=0,
         le=30,
         description="Detected opportunities added to a cycle's focus (strongest first).",
@@ -585,7 +585,13 @@ class Settings(BaseSettings):
         description="Run the brain by market session and by event while the server runs (in paper_execution "
         "its approved decisions go to the trading service). Can be paused at runtime.",
     )
-    brain_cycle_minutes: int = Field(default=30, ge=5, le=390, description="Full cycles in the session.")
+    brain_cycle_minutes: int = Field(
+        default=5,
+        ge=5,
+        le=390,
+        description="A full cycle this often in the session; Brain orders are deduplicated per slot of this length. "
+        "The risk limits, the per-cycle caps and the no-reversal cooldown apply as always.",
+    )
     brain_lease_seconds: int = Field(
         default=180,
         ge=30,

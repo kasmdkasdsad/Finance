@@ -20,6 +20,9 @@ from .test_cloud_operations import order_posts, shared
 
 WATCHDOG = "/api/v1/system/watchdog"
 FAST_STOP = {"shutdown_drain_seconds": 0.2, "polling_enabled": True}
+# the restart test's clock moves 22 minutes: with 30-minute cycles the next one is not due yet, so any order sent
+# after the restart could only be a re-send (the default 5-minute cadence would legitimately trade again)
+SLOW_CYCLES = {"brain_cycle_minutes": 30}
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +52,9 @@ async def test_a_stalled_supervisor_is_detected_and_a_restart_recovers_it(tmp_pa
     with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
     fake, feed = shared(clock)
-    async for a in brain_client(tmp_path, clock, fake=fake, feed=feed, **FAST_STOP, **OWNS, **ENABLED):
+    async for a in brain_client(
+        tmp_path, clock, fake=fake, feed=feed, **FAST_STOP, **SLOW_CYCLES, **OWNS, **ENABLED
+    ):
         sup = a.container.brain.supervisor
         assert (await verdict(a))["verdict"] == "starting"
         assert "cycle" in await sup.tick()  # the leader has traded normally
@@ -87,7 +92,9 @@ async def test_a_stalled_supervisor_is_detected_and_a_restart_recovers_it(tmp_pa
     assert hung.cancelled()
 
     clock.advance(60)
-    async for b in brain_client(tmp_path, clock, fake=fake, feed=feed, **FAST_STOP, **OWNS, **ENABLED):
+    async for b in brain_client(
+        tmp_path, clock, fake=fake, feed=feed, **FAST_STOP, **SLOW_CYCLES, **OWNS, **ENABLED
+    ):
         sup = b.container.brain.supervisor
         assert (await verdict(b))["verdict"] == "starting"
         done = await sup.tick()

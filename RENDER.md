@@ -9,7 +9,7 @@ deployment refuses to start unless that is verifiably true, and no setting point
                           ▼
                    quantpulse-api  (always on, 1 CPU / 2 GB, exactly one instance)
                    ├─ the QuantPulse API (/health, /api/v1/…, token required)
-                   ├─ the Brain supervisor: pre-market checks, cycles every 30 min in the session, quote monitor,
+                   ├─ the Brain supervisor: pre-market checks, cycles every 5 min in the session, quote monitor,
                    │  reconciliation every 5 min, near-close review, close, grading, learning, reviews
                    └─ background jobs: health checks and alerts every minute, the stock model, predictions
                           │                                  │
@@ -187,7 +187,7 @@ autonomous execution is permitted (every reason if not), and ends `OK` or `NOT O
 `/api/v1/brain/cloud-status` with the token. What to look for:
 
 * **Running:** `supervisor.last_tick_age_seconds` under ~60–120; `last_result` changes over the day; *Logs* show
-  `supervisor.tick`, `brain.cycle` (every 30 minutes in the session), `trading.reconciliation_completed`.
+  `supervisor.tick`, `brain.cycle` (every 5 minutes in the session), `trading.reconciliation_completed`.
 * **PAPER:** `alpaca.paper_endpoint_verified: true` and `endpoint: https://paper-api.alpaca.markets`; the deploy log
   shows the preflight's `[ok] paper_client` and `[ok] paper_key` lines; your Alpaca dashboard shows the orders under
   *Paper Trading*. (A live key cannot work: paper key ids start with `PK`, and the client only talks to the paper API.)

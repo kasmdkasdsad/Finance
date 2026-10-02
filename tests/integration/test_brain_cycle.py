@@ -153,7 +153,10 @@ async def test_a_full_cycle_perceives_thinks_proposes_and_sends_nothing(tmp_path
         assert any("QP_ALPACA_TRADING_ENABLED=false" in b for b in controls["blockers"])
         focus = [f["symbol"] for f in cycle["focus"]]
         assert focus[0] == "UPA" and cycle["focus"][0]["reason"] == "held position"
-        assert 1 < len(focus) <= 1 + 6 + 8 and "SPY" not in focus  # holding + opportunities + pre-screen
+        cap = (
+            1 + api.container.settings.brain_max_opportunities + api.container.settings.brain_focus_candidates
+        )
+        assert 1 < len(focus) <= cap and "SPY" not in focus  # holding + opportunities + pre-screen
 
         # every agent ran and its run is persisted
         assert {a["agent_id"] for a in cycle["agents"]} == AGENTS

@@ -66,7 +66,8 @@ async def test_a_healthy_deployment_reports_every_part(tmp_path, monkeypatch):
         assert got["scheduler"] == "warn"  # background jobs are off in the tests
         assert report["status"] == "warn" and report["order_blockers"] == []
         sup = report["parts"]["supervisor"]
-        assert sup["lease"]["mine"] and sup["next_cycle_at"] == (NOW + timedelta(minutes=30)).isoformat()
+        every = timedelta(minutes=api.container.settings.brain_cycle_minutes)  # 5 by default
+        assert sup["lease"]["mine"] and sup["next_cycle_at"] == (NOW + every).isoformat()
         assert report["parts"]["market_data"]["status"] in ("ok", "warn")
         assert (
             "postgresql" in report["parts"]["database"]["detail"]

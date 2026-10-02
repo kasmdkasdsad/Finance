@@ -7,6 +7,7 @@ from quantpulse.brain.context import PortfolioState
 from quantpulse.brain.decisions import Proposal
 from quantpulse.brain.execution import DATA_BLOCKED, BrainExecutor, Gate, entry_halts, to_order
 from quantpulse.brain.types import MARKET, Action, BrainMode, Opinion, Stance
+from quantpulse.config import Settings
 from quantpulse.services.trading import brain_slot
 from tests.unit.test_brain_core import make_ctx
 from tests.unit.test_trading_risk import account, position
@@ -106,3 +107,12 @@ def test_the_order_slot_floors_new_york_time():
     assert brain_slot(at, 30) == "brain-20260925T1030"
     assert brain_slot(at, 15) == "brain-20260925T1030"
     assert brain_slot(datetime(2026, 9, 25, 14, 45, tzinfo=UTC), 15) == "brain-20260925T1045"
+    assert brain_slot(at, 5) == "brain-20260925T1040"  # the default cadence: one slot per 5 minutes
+
+
+def test_the_default_cadence_is_faster_but_no_protected_cap_moved():
+    s = Settings(_env_file=None)
+    assert (s.brain_cycle_minutes, s.brain_focus_candidates, s.brain_max_opportunities) == (5, 16, 10)
+    # more cycles, same guard rails: per-cycle caps, the no-reversal cooldown and the stop-loss are unchanged
+    assert s.brain_max_new_positions_per_cycle == 2 and s.trading_max_cycle_turnover_pct == 0.6
+    assert s.trading_cooldown_minutes == 120.0

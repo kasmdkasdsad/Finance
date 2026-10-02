@@ -1491,7 +1491,7 @@ market session and by event, and never runs every agent all the time:
 | Session | What it does |
 |---|---|
 | Pre-market (from 08:30 New York) | Once a day. When the Brain owns the account, first **execution readiness** (see [The 24/7 operating model](#the-247-operating-model-execution-and-research)), which runs the **pre-market check**: the SDK client points at the paper API, Alpaca's view of the account (blocked?), reconciliation of orders and positions, the calendar (Alpaca's clock, an early close), market data (the vendors' feeds, a live benchmark quote), overnight changes against the last close, and orders still open before the bell — kept with the day (`GET /brain/sessions`). Then a learning pass and a full cycle to prepare the session. Nothing is executable while the market is closed |
-| Market open | A full cycle every `QP_BRAIN_CYCLE_MINUTES` (30). A quote monitor for holdings and the last focus every `QP_BRAIN_MONITOR_MINUTES` (5): a move of ≥ 3 daily σ or a stale quote becomes an event. When the Brain owns the account, a reconciliation with Alpaca (and the execution ledger) every 5 minutes. It reads the trading service's audit trail for orders, fills and risk limits. Event wake-ups run focused cycles, at most `QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR` (4). From 30 minutes before the close, once a day: the **near-close review** — a portfolio cycle that de-risks what should not be held into an overnight earnings release, then records the day's decision state (each holding: held overnight or reduced, and why) |
+| Market open | A full cycle every `QP_BRAIN_CYCLE_MINUTES` (5), studying the holdings plus `QP_BRAIN_FOCUS_CANDIDATES` (16) of the pre-screen's best and up to `QP_BRAIN_MAX_OPPORTUNITIES` (10) detected opportunities. A quote monitor for holdings and the last focus every `QP_BRAIN_MONITOR_MINUTES` (5): a move of ≥ 3 daily σ or a stale quote becomes an event. When the Brain owns the account, a reconciliation with Alpaca (and the execution ledger) every 5 minutes. It reads the trading service's audit trail for orders, fills and risk limits. Event wake-ups run focused cycles, at most `QP_BRAIN_MAX_EVENT_CYCLES_PER_HOUR` (4). From 30 minutes before the close, once a day: the **near-close review** — a portfolio cycle that de-risks what should not be held into an overnight earnings release, then records the day's decision state (each holding: held overnight or reduced, and why) |
 | After hours (from 16:40) | Once a day. When the Brain owns the account, first the **close**: reconcile, then record the day — equity, the day's return and the benchmark's, exposure, positions, the Brain's orders sent and filled and their notional, cycles run and how many had new positions halted and why (`brain_sessions`, what the 60-session evaluation reads). Then a learning pass, **trade lessons** (every position closed since the last pass becomes a long-term memory: the thesis, how it ended, its return against the benchmark, and its execution grades — outcome and execution kept apart), a portfolio review, the strategy lab's paper portfolios and the improvement review (proposals only) |
 | Weekends and holidays | Once a day: a learning pass, then a deep research cycle (twice the pre-screen and opportunity budget) |
 
@@ -2453,7 +2453,7 @@ tests/                   unit · providers · integration · frontend · fixture
     marketable-limit prices use the IEX bid/ask, which can be wider than the national best. With a paid
     plan, set `QP_ALPACA_STOCK_FEED=sip`. Daily bars (volume, highs, lows) already come from SIP for free;
     Alpaca's paper fills are matched against the national best bid and offer whatever the data plan.
-  * Stops are evaluated at every cycle (every 30 minutes by default), not held as resting stop orders
+  * Stops are evaluated at every cycle (every 5 minutes by default), not held as resting stop orders
     at Alpaca, so a gap can fill well beyond the 8% level.
   * The stock model and fundamentals are as of the last close; only the momentum, trend, volume and VWAP
     signals see today's session. Revenue growth and analyst estimate revisions are not part of the
@@ -2496,7 +2496,7 @@ tests/                   unit · providers · integration · frontend · fixture
   * Event days are detected from prices (a benchmark move ≥ 2 daily σ or VIX ≥ 30), not from a macro
     calendar; ideas are graded at one horizon per kind of idea; past checkpoint windows have no unrealised
     P&L (positions are not re-marked historically).
-  * Stops and thesis checks run at each cycle (every 30 minutes by default, or on a monitored price move),
+  * Stops and thesis checks run at each cycle (every 5 minutes by default, or on a monitored price move),
     not as resting stop orders at Alpaca, so a gap can fill well beyond the stop.
   * In the modes where the strategy owns the account, the paper book's fills are modelled (spread,
     slippage, fees); real fills can differ, especially in thin names or fast markets. The replaced

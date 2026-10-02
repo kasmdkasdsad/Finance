@@ -35,7 +35,7 @@
 |---|---|---|---|
 | **Recommended** | Hetzner Cloud **CX23** (2 vCPU, 4 GB RAM, 40 GB SSD), Germany or Finland | **≈ €6** (€5.49 + €0.50 IPv4) | Reliable, simple, billed by the hour; plenty for QuantPulse. If the stock model ever runs out of memory, resize to CX33 (8 GB, €8.49) in two clicks. |
 | Free | Oracle Cloud *Always Free* ARM instance (VM.Standard.A1.Flex, 2 OCPU · 6 GB of the 2 OCPU · 12 GB allowance) | €0 | See [`ORACLE.md`](ORACLE.md). No SLA; creating the VM can fail for lack of capacity (retry); Oracle may stop a VM whose CPU, network and memory all stay under 20% for a week — QuantPulse is light, so this is a real risk; `./qp status` shows it and the server warns you. |
-| US-based alternatives | DigitalOcean / AWS Lightsail, 2 vCPU · 4 GB | ≈ $24 | Closer to the US markets (latency does not matter for 30-minute cycles). |
+| US-based alternatives | DigitalOcean / AWS Lightsail, 2 vCPU · 4 GB | ≈ $24 | Closer to the US markets (latency does not matter for 5-minute cycles). |
 | Tailscale (phone ↔ server) | Personal plan | €0 | |
 | ntfy (phone alerts), healthchecks.io (server-down alert) | Free plans | €0 | Optional |
 
