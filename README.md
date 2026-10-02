@@ -1831,7 +1831,9 @@ The dashboard is one calm layout on a desktop and on a phone (light or dark, fol
   line saying what the page is for. A status line says what matters first, KPI cards hold the numbers (two
   per line on a phone), and details are folded away in expanders. Tabs compute only the tab that is open.
 * **Home** is the page to open first: one status line (green: trading on its own; yellow: healthy but not
-  trading now, and why; red: stopped or broken), equity and P&L, the positions, the Brain's latest decision,
+  trading now, and why; red: stopped or broken), equity and P&L, the positions (read live from Alpaca with
+  the account, so they always agree: each one's change today and gain since bought, and a line splitting
+  today's P&L into the open positions and the rest), the Brain's latest decision,
   its recent trades and its learning so far (predictions graded, how often right, when the next are due),
   links to the details, and **STOP BRAIN TRADING**. Every part's health, the cloud, the
   switches and the alerts are under *System details* and *Recent alerts*. It refreshes itself every 30 s.

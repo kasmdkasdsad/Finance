@@ -9,11 +9,13 @@ orders at once. In the other modes nothing reaches Alpaca.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, Path, Query, Request
 
 from quantpulse.api.deps import ContainerDep, local_only_allowed
+from quantpulse.providers.alpaca_trading import BrokerError
 from quantpulse.schemas.brain import (
     AgentToggleIn,
     BookResetIn,
@@ -202,8 +204,16 @@ async def execution(c: Container = ContainerDep) -> dict[str, Any]:
 @router.get(
     "/positions", summary="The Alpaca account's positions and their theses (open and recently closed)"
 )
-async def positions(closed: int = Query(50, ge=0, le=500), c: Container = ContainerDep) -> dict[str, Any]:
-    return await c.brain.theses.positions(closed=closed)
+async def positions(
+    closed: int = Query(50, ge=0, le=500),
+    live: bool = Query(True, description="Show the open positions at Alpaca's prices now (a read-only call)"),
+    c: Container = ContainerDep,
+) -> dict[str, Any]:
+    marks = None
+    if live:
+        with contextlib.suppress(BrokerError):  # Alpaca unreachable: the marks of the last cycle
+            marks = await c.trading.positions()
+    return await c.brain.theses.positions(closed=closed, live=marks)
 
 
 @router.post(

@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from frontend import charts, ui
-from frontend.components import api, guarded, money, num, pct
+from frontend.components import api, guarded, money, num, pct, today_split
 
 BASE = "/trading"
 VIEWS = [
@@ -174,8 +174,8 @@ def _portfolio() -> None:
         st.info("No open positions on the Alpaca paper account.", icon=":material/inventory_2:")
         return
     df = pd.DataFrame(positions)
-    shown = ["symbol", "qty", "avg_entry_price", "current_price", "market_value", "weight", "unrealized_pl",
-             "unrealized_plpc", "target_weight", "signal_score", "stop_loss_price"]  # fmt: skip
+    shown = ["symbol", "qty", "avg_entry_price", "current_price", "market_value", "weight", "intraday_pl",
+             "unrealized_pl", "unrealized_plpc", "target_weight", "signal_score", "stop_loss_price"]  # fmt: skip
     # the Brain sets no target weight or score: an empty column only adds noise
     shown = [c for c in shown if c not in ("target_weight", "signal_score") or df[c].notna().any()]
     st.dataframe(
@@ -189,13 +189,18 @@ def _portfolio() -> None:
             "current_price": st.column_config.NumberColumn("Price", format="dollar"),
             "market_value": st.column_config.NumberColumn("Market value", format="dollar"),
             "weight": st.column_config.NumberColumn("Weight", format="percent"),
-            "unrealized_pl": st.column_config.NumberColumn("Unrealized P/L", format="dollar"),
-            "unrealized_plpc": st.column_config.NumberColumn("P/L %", format="percent"),
+            "intraday_pl": st.column_config.NumberColumn("Today", format="dollar", help="Change today"),
+            "unrealized_pl": st.column_config.NumberColumn("Total P/L", format="dollar", help="Since bought"),
+            "unrealized_plpc": st.column_config.NumberColumn("P/L %", format="percent", help="Since bought"),
             "target_weight": st.column_config.NumberColumn("Target", format="percent"),
             "signal_score": st.column_config.NumberColumn("Score", format="%+.2f"),
             "stop_loss_price": st.column_config.NumberColumn("Stop-loss", format="dollar"),
         },
     )
+    acct = guarded(lambda: api().get(f"{BASE}/account"), "account")
+    split = today_split((acct or {}).get("day_pl"), positions)
+    if split:
+        st.caption(split)
     if df["target_weight"].isna().all():  # the Brain sets no target weights: nothing to compare
         return
     fig = go.Figure()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
@@ -146,6 +146,23 @@ def money(v: float | None, digits: int = 2) -> str:
         if v >= scale:
             return f"{sign}${v / scale:,.{digits}f}{unit}"
     return f"{sign}${v:,.{digits}f}"
+
+
+def signed_money(v: float | None, digits: int = 2) -> str:
+    return "—" if v is None else ("+" if v >= 0 else "") + money(v, digits)
+
+
+def today_split(day_pl: float | None, positions: Iterable[Mapping[str, Any]] | None) -> str | None:
+    """Today's P&L split into what the open positions moved today and the rest (positions closed today,
+    fees). Both parts come from the same live Alpaca reads as the account, so they always add up."""
+    if day_pl is None or positions is None:
+        return None
+    held = sum(float(p.get("intraday_pl") or 0.0) for p in positions)
+    rest = day_pl - held
+    parts = [f"open positions {signed_money(held)}"]
+    if abs(rest) >= 0.5:
+        parts.append(f"closed trades and fees {signed_money(rest)}")
+    return f"Today's P&L {signed_money(day_pl)}: {', '.join(parts)}"
 
 
 def pct(v: float | None, digits: int = 2, signed: bool = False) -> str:

@@ -178,6 +178,26 @@ def view(row: BrainThesisRow) -> dict[str, Any]:
     }
 
 
+def _live(v: dict[str, Any], marks: dict[str, Any]) -> dict[str, Any]:
+    """A thesis view at Alpaca's prices now (``marks``: Alpaca's live positions by symbol). The benchmark
+    comparison stays as of the last cycle."""
+    pos = marks.get(v["symbol"])
+    if pos is None:
+        return {**v, "live": False, "note": "no longer held on Alpaca: closed at the next cycle"}
+    entry = v.get("entry_price")
+    return {
+        **v,
+        "live": True,
+        "qty": pos.qty,
+        "last_price": pos.current_price,
+        "market_value": pos.market_value,
+        "weight": round(pos.weight, 5),
+        "unrealized_pnl": pos.unrealized_pl,
+        "intraday_pnl": pos.intraday_pl,
+        "return_pct": round(pos.current_price / entry - 1, 5) if entry else v.get("return_pct"),
+    }
+
+
 class ThesisBook:
     def __init__(self, settings: Settings, db: Database, clock: Clock) -> None:
         self._s = settings
@@ -190,7 +210,9 @@ class ThesisBook:
             rows = (await s.scalars(select(BrainThesisRow).where(BrainThesisRow.status == "open"))).all()
         return {r.symbol: r for r in rows}
 
-    async def positions(self, closed: int = 50) -> dict[str, Any]:
+    async def positions(self, closed: int = 50, live: Sequence[Any] | None = None) -> dict[str, Any]:
+        """Open and recently closed theses. With ``live`` (Alpaca's positions, read now), the open ones are
+        shown at Alpaca's current prices; otherwise as marked at the Brain's last cycle (``marked``)."""
         async with self._db.session() as s:
             opened = (
                 await s.scalars(
@@ -210,13 +232,15 @@ class ThesisBook:
         from .store import BrainStore
 
         state = await BrainStore(self._db).get_state(STATE_KEY) or {}
+        marks = {p.symbol: p for p in live} if live is not None else None
         return {
             "owner": "the Brain"
             if self._s.brain_owns_account
             else "the trading strategy (theses are not kept)",
             "took_over_at": state.get("took_over_at"),
             "unexpected": state.get("unexpected") or [],
-            "open": [view(r) for r in opened],
+            "marked": "live" if live is not None else "at the last cycle",
+            "open": [_live(view(r), marks) if marks is not None else view(r) for r in opened],
             "closed": [view(r) for r in done],
         }
 

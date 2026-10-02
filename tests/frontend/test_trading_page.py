@@ -198,6 +198,8 @@ def test_with_the_brain_in_charge_there_is_nothing_of_the_strategy_to_run(brain_
     assert views == ["Positions", "Orders", "Performance", "Risk", "History", "Controls"]
     positions = next(d.value for d in at.dataframe if "symbol" in d.value.columns)
     assert "target_weight" not in positions.columns and "signal_score" not in positions.columns
+    assert "intraday_pl" in positions.columns  # today's change beside the gain since bought
+    assert any(c.value.startswith("Today's P&L") for c in at.caption)
     assert not at.get("plotly_chart")  # nothing to compare against
     at.segmented_control(key="trade_view").set_value("Controls").run()
     assert_ok(at)

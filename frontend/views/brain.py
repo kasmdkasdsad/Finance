@@ -750,6 +750,7 @@ def _positions() -> None:
                 "origin": r["origin"],
                 "qty": r["qty"],
                 "weight": pct(r.get("weight"), 1),
+                "today": money(r.get("intraday_pnl")) if r.get("live") else "—",
                 "P&L": money(r.get("unrealized_pnl")),
                 "return": pct(r.get("return_pct"), 1),
                 "vs benchmark": pct(r.get("relative_return"), 1),
@@ -765,6 +766,13 @@ def _positions() -> None:
             for r in rows
         ]
         st.dataframe(pd.DataFrame(table).astype(str), hide_index=True, use_container_width=True)
+        st.caption(
+            "Prices live from Alpaca; the benchmark comparison is as of the last cycle."
+            if data.get("marked") == "live"
+            else "Prices as of the Brain's last cycle (Alpaca could not be read just now)."
+        )
+        for note in [f"{r['symbol']}: {r['note']}" for r in rows if r.get("note")]:
+            st.caption(_md(note))
         for r in rows:
             check = r.get("check") or {}
             with st.expander(

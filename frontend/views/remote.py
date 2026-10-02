@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from frontend import ui
-from frontend.components import api, guarded, money, pct
+from frontend.components import api, guarded, money, pct, today_split
 
 BASE = "/brain"
 MARK = {"ok": "✓", "warn": "!", "fail": "✗", "standby": "‖", "n/a": "–"}
@@ -57,27 +57,39 @@ def _account(acct: dict[str, Any] | None) -> None:
     )
 
 
-def _positions(positions: dict[str, Any] | None, orders: list[Any] | None) -> None:
-    rows = (positions or {}).get("open") or []
+def _positions(
+    live: list[dict[str, Any]] | None,
+    acct: dict[str, Any] | None,
+    theses: dict[str, Any] | None,
+    orders: list[Any] | None,
+) -> None:
+    """Alpaca's positions, read live alongside the account above, so the two always agree. "Today" is each
+    position's change today; "Total" its gain since it was bought."""
+    rows = live or []
     ui.section(f"Positions ({len(rows)})" if rows else "Positions")
     if rows:
         st.dataframe(
             pd.DataFrame(
                 [{"Symbol": p["symbol"], "Shares": p.get("qty"), "Value": p.get("market_value"),
-                  "P&L": p.get("unrealized_pnl"), "Return": p.get("return_pct")} for p in rows]
+                  "Today": p.get("intraday_pl"), "Total": p.get("unrealized_pl"),
+                  "Return": p.get("unrealized_plpc")} for p in rows]
             ),
             hide_index=True,
             width="stretch",
             column_config={
                 "Shares": st.column_config.NumberColumn(format="%g"),
                 "Value": st.column_config.NumberColumn(format="dollar"),
-                "P&L": st.column_config.NumberColumn(format="dollar"),
-                "Return": st.column_config.NumberColumn(format="percent"),
+                "Today": st.column_config.NumberColumn(format="dollar", help="Change today"),
+                "Total": st.column_config.NumberColumn(format="dollar", help="Gain since bought"),
+                "Return": st.column_config.NumberColumn(format="percent", help="Since bought"),
             },
         )  # fmt: skip
-    else:
+    elif live is not None:
         st.caption("No open positions.")
-    unexpected = (positions or {}).get("unexpected") or []
+    split = today_split((acct or {}).get("day_pl"), live)
+    if split and (rows or abs((acct or {}).get("day_pl") or 0.0) >= 0.5):
+        st.caption(split)
+    unexpected = (theses or {}).get("unexpected") or []
     if unexpected:
         st.warning(
             ui.md(f"Not opened by the Brain: {', '.join(map(str, unexpected))}"), icon=":material/help:"
@@ -261,9 +273,14 @@ def _page() -> None:
     ex = guarded(lambda: api().get(f"{BASE}/execution"), "Brain execution")
     report = guarded(lambda: api().get("/system/health"), "health")
     _status(cs, ex, report)
-    _account(guarded(lambda: api().get("/trading/account"), "account"))
+    # the account and its positions are read live from Alpaca together, so the cards and the table agree
+    acct = guarded(lambda: api().get("/trading/account"), "account")
+    live = guarded(lambda: api().get("/trading/positions"), "positions")
+    _account(acct)
     _positions(
-        guarded(lambda: api().get(f"{BASE}/positions"), "positions"),
+        live,
+        acct,
+        guarded(lambda: api().get(f"{BASE}/positions", closed=0, live="false"), "Brain positions"),
         guarded(lambda: api().get("/trading/orders"), "orders"),
     )
     _brain(cs, guarded(lambda: api().get(f"{BASE}/supervisor"), "supervisor"))

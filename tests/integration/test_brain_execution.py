@@ -365,6 +365,37 @@ async def test_every_position_gets_a_thesis_reconciled_with_alpaca(tmp_path, mon
         assert closed[gone]["exit_reason"].startswith("closed outside the Brain")
 
 
+async def test_positions_are_shown_at_alpacas_prices_now_not_the_last_cycles(tmp_path, monkeypatch):
+    """After the close (no more cycles) prices keep moving at Alpaca: the positions read live, so they
+    agree with the account, and today's P&L splits exactly into the positions' moves and the rest."""
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, **OWNS, **ENABLED):
+        bought = sorted(d["subject"] for d in sent(await run_cycle(api)) if d["action"] == "buy")
+        assert bought
+        clock.advance(api.container.settings.brain_cycle_minutes * 60)
+        await run_cycle(api)  # the theses of the first cycle's buys are recorded at the next cycle
+        sym = bought[0]
+        marked = {r.symbol: r.last_price for r in (await api.container.brain.theses.open_rows()).values()}
+        api.fake.prices[sym] = round(api.fake.price(sym) * 1.07, 4)  # it moves after the cycle
+        pos = (await api.get(f"{API}/positions")).json()
+        live = {p["symbol"]: p for p in (await api.get(f"{TRADING}/positions")).json()}
+        assert pos["marked"] == "live"
+        t = next(p for p in pos["open"] if p["symbol"] == sym)
+        assert t["live"] and t["last_price"] == api.fake.price(sym) != marked[sym]
+        assert t["unrealized_pnl"] == live[sym]["unrealized_pl"]
+        assert t["market_value"] == live[sym]["market_value"]
+        assert t["intraday_pnl"] == live[sym]["intraday_pl"]
+        # reading wrote nothing: the stored marks are the cycle's until the next cycle
+        assert (await api.container.brain.theses.open_rows())[sym].last_price == marked[sym]
+        stored = (await api.get(f"{API}/positions", params={"live": "false"})).json()
+        assert stored["marked"] == "at the last cycle"
+        assert next(p for p in stored["open"] if p["symbol"] == sym)["last_price"] == marked[sym]
+        acct = (await api.get(f"{TRADING}/account")).json()
+        assert sum(p["market_value"] for p in live.values()) == pytest.approx(acct["long_market_value"])
+        assert acct["day_pl"] == pytest.approx(acct["equity"] - acct["last_equity"])
+
+
 async def test_an_unexpected_position_halts_new_positions_until_it_is_adopted(tmp_path, monkeypatch):
     with_stock_model(monkeypatch)
     clock = FakeClock(NOW)
