@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, money, num, pct
 from frontend.views.picks import FACTOR_LABELS
 
@@ -509,7 +509,7 @@ def _actions(account: dict[str, Any]) -> None:
 
 
 def render() -> None:
-    st.title("Trading Sandbox")
+    ui.header("Trading sandbox")
     st.caption(
         "Paper trading with simulated money. The agent ranks stocks with the Daily Picks factors, trades a "
         "paper book at live quotes ± slippage, then scores each decision against what the market did next and "

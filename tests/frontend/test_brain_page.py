@@ -7,6 +7,7 @@ import httpx
 import pytest
 import uvicorn
 
+from frontend.views import brain as brain_view
 from quantpulse.api.app import create_app
 from quantpulse.config import Settings
 from quantpulse.core.clock import FakeClock
@@ -20,10 +21,27 @@ from tests.integration.conftest import NOW
 from tests.integration.test_brain_cycle import STOCKS, WIDE
 
 
+def _html(at) -> str:
+    """The page's own HTML pieces (status lines, facts)."""
+    return "\n".join(e.proto.body for e in at.get("html"))
+
+
 def _texts(at) -> str:
     parts = [m.value for m in at.markdown] + [c.value for c in at.caption] + [i.value for i in at.info]
-    parts += [str(m.value) for m in at.metric] + [m.label for m in at.metric]
+    parts += [str(m.value) for m in at.metric] + [m.label for m in at.metric] + [_html(at)]
     return "\n".join(parts)
+
+
+def _every_view(url: str) -> list:
+    """The Brain page once per tab (and per Learning view): only the open tab is computed."""
+    runs = []
+    for tab in brain_view.TABS:
+        for view in brain_view.LEARNING_VIEWS if tab == "Learning" else [None]:
+            state = {"brain_tab": tab, **({"brain_learn_view": view} if view else {})}
+            at = page("brain", url, state).run()
+            assert_clean(at)
+            runs.append(at)
+    return runs
 
 
 @pytest.fixture(scope="module")
@@ -84,18 +102,22 @@ def test_empty_brain_explains_itself(api_server):
     assert (
         "the trading service executes the Brain's decisions" in text and "The Brain has not run yet" in text
     )
-    assert any("orders are not sent right now" in w.value for w in at.warning)  # no Alpaca keys
+    assert "orders are not sent right now" in _html(at)  # no Alpaca keys
 
 
 def test_every_layer_is_shown_and_kept_apart(brain_server):
     url, fake = brain_server
-    at = page("brain", url).run()
-    assert_clean(at)
-    text = _texts(at)
+    runs = _every_view(url)
+    text = "\n".join(_texts(at) for at in runs)
+    markdown = [m.value for at in runs for m in at.markdown]
+    captions = [c.value for at in runs for c in at.caption]
+    infos = [i.value for at in runs for i in at.info]
+    frames = [d.value for at in runs for d in at.dataframe]
+    expanders = [e.label for at in runs for e in [*at.expander, *at.status]]  # with an icon: at.status
     for layer in ("Agent analysis", "Consensus", "risk preview", "Broker execution"):
         assert layer.lower() in text.lower(), layer
-    assert "Orders sent by the Brain" in text and "Mode" in text
-    frames = [d.value for d in at.dataframe]
+    assert "Orders sent by the Brain" in text and "**Mode**" in text
+    assert len(brain_view.TABS) == 6  # was 18: the same content, grouped
     agents = next(f for f in frames if "track record" in f.columns)
     assert len(agents) == 20 and set(agents["this cycle"]) <= {"ok", "skipped", "failed", "timeout", "—"}
     assert (agents["track record"] == "unproven (no evaluated predictions yet)").all()
@@ -113,44 +135,49 @@ def test_every_layer_is_shown_and_kept_apart(brain_server):
     assert len(opportunities) and {"kind", "subject", "idea", "strength", "what"} <= set(
         opportunities.columns
     )
-    assert any("Risk posture" in m.value for m in at.markdown)
-    assert any("detection" in m.value for m in at.markdown)  # one idea followed through the pipeline
-    assert any("Bull case" in m.value for m in at.markdown) and any(
-        "Bear case" in m.value for m in at.markdown
-    )
-    assert any("matured predictions graded against real closing prices" in m.value for m in at.markdown)
-    assert any("executed by the trading service" in m.value for m in at.markdown if "supervisor" in m.value)
-    assert any("only a person can promote" in m.value for m in at.markdown)
-    assert any("Nothing is applied automatically" in m.value for m in at.markdown)
-    assert any("Every analysis is deterministic" in i.value for i in at.info)  # no language model configured
-    assert "Language models: not in use" in text
-    assert any("The Brain's paper book" in m.value for m in at.markdown)  # its own, hypothetical portfolio
-    assert any("owned by the Brain" in e.label for e in at.expander)
-    assert any("**Audit trail**" in m.value for m in at.markdown)
-    assert any("SIP report" in m.value for m in at.markdown) and any(
-        "Decision." in m.value for m in at.markdown
-    )
-    assert any("**Trading days**" in m.value for m in at.markdown)
-    assert any(e.label == "Known limitations" for e in at.expander)
-    assert any("60-session evaluation" in m.value for m in at.markdown)
-    assert any("Positions and their theses" in m.value for m in at.markdown)
-    assert any(b.label == "STOP BRAIN ORDERS" for b in at.button)  # always one click away
+    assert any("Risk posture" in m for m in markdown)
+    assert any("detection" in m for m in markdown)  # one idea followed through the pipeline
+    assert any("Bull case" in m for m in markdown) and any("Bear case" in m for m in markdown)
+    assert any("matured predictions graded against real closing prices" in m for m in markdown)
+    assert any("executed by the trading service" in m for m in markdown if "supervisor" in m)
+    assert any("only a person can promote" in m for m in markdown)
+    assert any("Nothing is applied automatically" in m for m in markdown)
+    assert any("Every analysis is deterministic" in i for i in infos)  # no language model configured
+    assert any(m.startswith("**Language models** not in use") for m in markdown)
+    assert any("The Brain's paper book" in m for m in markdown)  # its own, hypothetical portfolio
+    assert any("owned by the Brain" in e for e in expanders)
+    assert any("**Audit trail**" in m for m in markdown)
+    assert any("SIP report" in m for m in markdown) and any("Decision." in m for m in markdown)
+    assert any("**Trading days**" in m for m in markdown)
+    assert "Known limitations" in expanders and "How the Brain decides" in expanders
+    assert any("60-session evaluation" in m for m in markdown)
+    assert any("Positions and their theses" in m for m in markdown)
+    assert all(any(b.label == "STOP BRAIN ORDERS" for b in at.button) for at in runs)  # on every tab
     # why it traded or not (trading is disabled here: nothing can be sent), and the execution tab
-    assert any(i.value.startswith("no ") for i in at.info), [i.value for i in at.info]
-    assert any("**Final execution audit**" in m.value for m in at.markdown)
-    assert any("**Execution ledger**" in m.value for m in at.markdown)
-    assert any("execution quality is unproven" in c.value for c in at.caption)
-    # the experiment tab: checkpoints, reviews, the record, ideas, behaviour, data — nothing declared
-    assert any("**The paper experiment**" in m.value for m in at.markdown)
-    assert any("20 / 40 / 60-session checkpoints" in m.value for m in at.markdown)
-    assert any("**What the record says**" in m.value for m in at.markdown)
-    assert any("**Behaviour**" in m.value for m in at.markdown)
-    assert any("When data stopped trading" in m.value for m in at.markdown)
-    assert any("never solved by a looser" in c.value for c in at.caption)
-    assert any("Traceability:" in c.value for c in at.caption)
+    assert any(i.startswith("no ") for i in infos), infos
+    assert any("**Final execution audit**" in m for m in markdown)
+    assert any("**Execution ledger**" in m for m in markdown)
+    assert any("execution quality is unproven" in c for c in captions)
+    # the experiment view: checkpoints, reviews, the record, ideas, behaviour, data — nothing declared
+    assert any("**The paper experiment**" in m for m in markdown)
+    assert any("20 / 40 / 60-session checkpoints" in m for m in markdown)
+    assert any("**What the record says**" in m for m in markdown)
+    assert any("**Behaviour**" in m for m in markdown)
+    assert any("When data stopped trading" in m for m in markdown)
+    assert any("never solved by a looser" in c for c in captions)
+    assert any("Traceability:" in c for c in captions)
     events = next(f for f in frames if "event" in f.columns and "source" in f.columns)
     assert "AgentCompleted" in set(events["event"])
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}
+
+
+def test_only_the_open_tab_is_computed(brain_server):
+    """A lazy page: the first view asks the API for the status, the account state and the cycle only."""
+    url, _ = brain_server
+    at = page("brain", url).run()
+    assert_clean(at)
+    assert not any("track record" in d.value.columns for d in at.dataframe)  # the Agents tab was not computed
+    assert any("④ execution" in d.value.columns for d in at.dataframe)  # the Decision tab was
 
 
 def test_running_a_cycle_from_the_page_sends_no_order(brain_server):

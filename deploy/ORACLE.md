@@ -288,7 +288,7 @@ merging, so that nothing that failed CI (ARM64 included) can be merged either.
 
 ## Everyday use
 
-| From the iPhone | Open the Tailscale app (connected), then Safari → `https://quantpulse.<tailnet>.ts.net` → log in. The **Remote** page shows the health, the Brain and the paper account; **STOP BRAIN TRADING** holds new Brain orders and cancels working ones. Add it to the home screen (Share → Add to Home Screen). |
+| From the iPhone | Open the Tailscale app (connected), then Safari → `https://quantpulse.<tailnet>.ts.net` → sign in (it stays signed in for 30 days). **Home** shows the status, the paper account and the Brain; **STOP BRAIN TRADING** holds new Brain orders and cancels working ones. Add it to the home screen (Share → Add to Home Screen). |
 |---|---|
 | On the server | `./qp status` · `./qp logs` · `./qp stop-trading` · `./qp start-trading` · `journalctl -u 'quantpulse-*' -e` (timers) |
 

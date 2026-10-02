@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, pct, status_badge
 
 DEFAULT_WATCHLIST = "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META"
@@ -82,7 +82,7 @@ def _regime() -> None:
 
 
 def render() -> None:
-    st.title("Command Center")
+    ui.header("Market overview")
     session = guarded(lambda: api().get("/market/session"), "market session")
     if session:
         labels = {

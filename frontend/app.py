@@ -1,6 +1,8 @@
-"""QuantPulse Terminal — Streamlit entry point.
+"""QuantPulse dashboard — the entry point: ``streamlit run frontend/app.py`` (the API must be running).
 
-Run with ``streamlit run frontend/app.py`` (the API must be running: ``make api``).
+Serves the Streamlit pages (``frontend/dashboard.py``) and the two sign-in routes, ``POST /auth/login`` and
+``POST /auth/logout``. The dashboard server checks the password itself and keeps the sign-in in an HttpOnly
+cookie, so closing the tab or the browser does not sign anyone out (see ``frontend/auth.py``).
 """
 
 from __future__ import annotations
@@ -15,134 +17,5 @@ if str(ROOT) not in sys.path:  # allow `streamlit run frontend/app.py` from the 
     sys.path.insert(0, str(ROOT))
 
 from frontend import auth  # noqa: E402
-from frontend.api_client import ApiClient, ApiError  # noqa: E402
-from frontend.views import (  # noqa: E402
-    brain,
-    evolution,
-    model_lab,
-    options,
-    options_brain,
-    overview,
-    picks,
-    portfolio,
-    remote,
-    research,
-    sandbox,
-    sports,
-    stock,
-    system,
-    track_record,
-    trading,
-    valuation,
-    vehicle,
-)
 
-ICON = ROOT / "assets" / "quantpulse.png"
-st.set_page_config(
-    page_title="QuantPulse Terminal · PAPER",
-    page_icon=str(ICON) if ICON.is_file() else ":material/monitoring:",
-    layout="wide",
-)
-
-
-def sidebar() -> None:
-    with st.sidebar:
-        st.markdown("### QuantPulse Terminal")
-        # Always visible, on every page: QuantPulse only ever trades Alpaca's paper account.
-        st.badge("PAPER TRADING · simulated money", icon=":material/science:", color="orange")
-        st.caption("Alpaca paper account only: there is no live-money path.")
-        if auth.cloud():
-            # the server's own API, with the server's token: neither can be changed (or seen) from a browser,
-            # so the token can never be sent anywhere else
-            url, token = ApiClient().base_url, ""
-        else:
-            st.session_state.setdefault("api_url", ApiClient().base_url)
-            url = st.text_input("API URL", st.session_state["api_url"])
-            token = st.text_input(
-                "API token",
-                st.session_state.get("api_token", ""),
-                type="password",
-                help="Only if QP_API_TOKEN is set",
-            )
-        st.session_state["api_url"], st.session_state["api_token"] = url.rstrip("/"), token
-        if auth.password_hash() and st.button("Sign out", icon=":material/logout:", key="qp_sign_out"):
-            auth.sign_out()
-            st.rerun()
-        try:
-            health = ApiClient(url, token or None, timeout=5).health()
-            st.badge(f"API online · v{health['version']}", icon=":material/check_circle:", color="green")
-        except ApiError:
-            st.badge("API offline", icon=":material/cloud_off:", color="red")
-        live = st.toggle("Auto-refresh live panels", value=True)
-        seconds = st.select_slider(
-            "Refresh every", [5, 10, 15, 30, 60], value=15, disabled=not live, format_func=lambda s: f"{s}s"
-        )
-        st.session_state["refresh_seconds"] = seconds if live else None
-        st.caption(
-            "Badges: LIVE = fetched now · CACHED = recent live fetch · STALE = last good value after a failure · "
-            "SYNTHETIC = simulated fallback. Hover a badge for the per-provider trail."
-        )
-
-
-auth.require_login()  # nothing below renders (no page, no data, no control) before the password is verified
-sidebar()
-if ICON.is_file():
-    st.logo(str(ICON), size="large")
-# A compact reminder on top of every page (the trading page adds its own full banners).
-st.badge("ALPACA PAPER TRADING · SIMULATED MONEY", icon=":material/science:", color="orange")
-pages = {
-    "Markets": [
-        st.Page(
-            overview.render, title="Command Center", icon=":material/dashboard:", default=not auth.cloud()
-        ),
-        st.Page(options.render, title="Options Lab", icon=":material/candlestick_chart:", url_path="options"),
-    ],
-    "Predictions": [
-        st.Page(stock.render, title="Stock Intelligence", icon=":material/query_stats:", url_path="stock"),
-        st.Page(picks.render, title="Daily Picks", icon=":material/star:", url_path="picks"),
-        st.Page(model_lab.render, title="Model Lab", icon=":material/model_training:", url_path="model-lab"),
-        st.Page(
-            track_record.render, title="Track Record", icon=":material/fact_check:", url_path="track-record"
-        ),
-        st.Page(sandbox.render, title="Trading Sandbox", icon=":material/smart_toy:", url_path="sandbox"),
-    ],
-    "Alpaca Paper Trading": [
-        # the phone page: health, the stop button, P&L; the landing page in the cloud
-        st.Page(
-            remote.render,
-            title="Remote",
-            icon=":material/phone_iphone:",
-            url_path="remote",
-            default=auth.cloud(),
-        ),
-        st.Page(brain.render, title="Brain", icon=":material/psychology:", url_path="brain"),
-        st.Page(
-            options_brain.render,
-            title="Options Intelligence",
-            icon=":material/stacked_line_chart:",
-            url_path="options-intelligence",
-        ),
-        st.Page(evolution.render, title="Market Evolution", icon=":material/timeline:", url_path="evolution"),
-        st.Page(research.render, title="Research (24/7)", icon=":material/science:", url_path="research"),
-        st.Page(
-            trading.render,
-            title="Paper Trading (Alpaca)",
-            icon=":material/candlestick_chart:",
-            url_path="trading",
-        ),
-    ],
-    "Corporate & Risk": [
-        st.Page(
-            valuation.render, title="Valuation Suite", icon=":material/account_balance:", url_path="valuation"
-        ),
-        st.Page(portfolio.render, title="Risk Laboratory", icon=":material/insights:", url_path="portfolio"),
-    ],
-    "Operations": [
-        st.Page(
-            vehicle.render, title="Asset Lifecycle", icon=":material/directions_car:", url_path="vehicle"
-        ),
-        st.Page(sports.render, title="Sports Hub", icon=":material/sports_football:", url_path="sports"),
-        st.Page(system.render, title="System Status", icon=":material/monitor_heart:", url_path="system"),
-    ],
-}
-st.navigation(pages).run()
+app = st.App(Path(__file__).with_name("dashboard.py"), routes=auth.routes())

@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, guarded, money, num, pct
 
 BASE = "/trading"
@@ -55,15 +55,9 @@ def _md(text: str) -> str:
 
 
 def _banners(status: dict[str, Any]) -> None:
-    st.warning(f"**{status['banner']}**", icon=":material/science:")
-    if status["mode"] == "paper":
-        st.error(f"**{status['mode_banner']}**", icon=":material/send:")
-    else:
-        st.info(f"**{status['mode_banner']}**", icon=":material/visibility:")
-    if status.get("owner") == "brain":
-        st.success(_md(status.get("owner_note") or ""), icon=":material/smart_toy:")
-    elif status.get("owner_note"):
-        st.caption(_md(status["owner_note"]))
+    """One status line (who trades and whether orders go out), then only what needs attention."""
+    tone = "green" if status["mode"] == "paper" and status["broker_configured"] else "gray"
+    ui.status(tone, status["mode_banner"], status["banner"])
     ks = status["kill_switch"]
     if ks["active"]:
         st.error(
@@ -101,91 +95,58 @@ def _when(stamp: str | None, fmt: str = "%a %H:%M ET") -> str:
 
 
 def _status_row(status: dict[str, Any]) -> None:
-    c = st.columns(5)
-    c[0].metric(
-        "Mode",
-        "Paper" if status["mode"] == "paper" else "Dry run",
-        "orders are sent" if status["mode"] == "paper" else "nothing is sent",
-        delta_color="off",
-    )
-    c[1].metric(
-        "Broker",
-        "Alpaca paper" if status["broker_configured"] else "not configured",
-        status["endpoint"].removeprefix("https://"),
-        delta_color="off",
-        help="QuantPulse only ever uses Alpaca's paper endpoint (TradingClient(paper=True)).",
-    )
-    c[2].metric(
-        "Trading enabled",
-        "yes" if status["trading_enabled"] else "no",
-        "QP_ALPACA_TRADING_ENABLED",
-        delta_color="off",
-    )
-    c[3].metric("Dry run", "yes" if status["dry_run"] else "no", "QP_TRADING_DRY_RUN", delta_color="off")
-    c[4].metric("Kill switch", "ON" if status["kill_switch"]["active"] else "off")
-    d = st.columns(5)
     if not status["scheduler_enabled"]:
-        sched, sched_note = "off", "manual cycles only"
+        sched = "off (manual cycles only)"
     elif status.get("scheduled_mode") == "paper":
-        sched, sched_note = "on", "sends orders"
+        sched = "on · sends orders"
     elif status["mode"] == "paper" and not status.get("scheduler_armed", True):
-        sched, sched_note = "on", "dry runs until armed"
+        sched = "on · dry runs until armed"
     else:
-        sched, sched_note = "on", "dry runs"
-    d[0].metric(
-        "Scheduler",
-        sched,
-        sched_note,
-        delta_color="off",
-        help="Scheduled cycles only send orders once paper execution has been used by hand "
-        "(a manual paper cycle or the confirmed test order).",
-    )
+        sched = "on · dry runs"
     market = status.get("market") or {}
-    d[1].metric(
-        "Market", "open" if market.get("is_open") else "closed", market.get("source"), delta_color="off"
-    )
     last = status.get("last_cycle")
-    d[2].metric(
-        "Last cycle",
-        _when(last["started_at"]) if last else "—",
-        (
-            f"{'paper' if last['mode'] == 'paper' else 'dry run'}: {last['orders_submitted']} sent / "
-            f"{last['trades_proposed']} proposed"
-        )
-        if last
-        else None,
-        delta_color="off",
-    )
-    d[3].metric(
-        "Next cycle",
-        _when(status.get("next_cycle_at")),
-        f"every {status['interval_minutes']} min" if status["scheduler_enabled"] else "scheduler off",
-        delta_color="off",
-    )
-    d[4].metric("Last reconciled", _when(status.get("last_reconciled_at"), "%H:%M:%S ET"))
+    ui.facts(
+        [
+            ("Mode", "Paper: orders are sent" if status["mode"] == "paper" else "Dry run: nothing is sent"),
+            ("Broker", status["endpoint"].removeprefix("https://") if status["broker_configured"] else "not configured"),
+            ("Trading enabled", "yes" if status["trading_enabled"] else "no"),
+            ("Dry run", "yes" if status["dry_run"] else "no"),
+            ("Kill switch", "ON" if status["kill_switch"]["active"] else "off"),
+            ("Strategy scheduler", sched),
+            ("Market", "open" if market.get("is_open") else "closed"),
+            ("Last cycle", (_when(last["started_at"]) + f" · {last['orders_submitted']} sent / {last['trades_proposed']} proposed") if last else "—"),
+            ("Next cycle", _when(status.get("next_cycle_at")) if status["scheduler_enabled"] else "—"),
+            ("Last reconciled", _when(status.get("last_reconciled_at"), "%H:%M:%S ET")),
+        ]
+    )  # fmt: skip
 
 
 def _account(acct: dict[str, Any]) -> None:
-    c = st.columns(5)
-    c[0].metric("Equity", money(acct["equity"]))
-    c[1].metric("Cash", money(acct["cash"]))
-    c[2].metric("Buying power", money(acct["buying_power"]))
-    c[3].metric("Today's P/L", money(acct["day_pl"]), pct(acct["day_pl_pct"], signed=True))
-    c[4].metric(
-        "Total P/L",
-        money(acct["total_pl"]),
-        pct(acct["total_pl_pct"], signed=True) if acct["total_pl_pct"] is not None else None,
-        help=f"Since QuantPulse first recorded {money(acct['baseline_equity'])} on {acct['baseline_at']}",
-    )
-    st.caption(
-        _md(
-            f"Alpaca paper account {acct['account_number']} · {acct['status']} · long market value "
-            f"{money(acct['long_market_value'])} · exposure {pct(acct['exposure_pct'], 1)} · day trades "
-            f"{acct['daytrade_count']}"
-            + (" · TRADING BLOCKED BY ALPACA" if acct["trading_blocked"] else "")
-            + (" · cash is negative (margin): QuantPulse never buys on margin" if acct["cash"] < 0 else "")
-        )
-    )
+    ui.kpis(
+        [
+            ui.Kpi("Equity", money(acct["equity"])),
+            ui.Kpi("Today's P/L", money(acct["day_pl"]), pct(acct["day_pl_pct"], signed=True)),
+            ui.Kpi(
+                "Total P/L",
+                money(acct["total_pl"]),
+                pct(acct["total_pl_pct"], signed=True) if acct["total_pl_pct"] is not None else None,
+                help=f"Since QuantPulse first recorded {money(acct['baseline_equity'])} on {acct['baseline_at']}",
+            ),
+            ui.Kpi("Buying power", money(acct["buying_power"]), f"cash {money(acct['cash'])}", delta_color="off",
+                   arrow="off"),
+        ],
+        key="trade_account",
+    )  # fmt: skip
+    notes = [
+        f"Account {acct['account_number']} · {acct['status']}",
+        f"long {money(acct['long_market_value'])} · exposure {pct(acct['exposure_pct'], 1)}",
+        f"day trades {acct['daytrade_count']}",
+    ]
+    if acct["trading_blocked"]:
+        notes.append("TRADING BLOCKED BY ALPACA")
+    if acct["cash"] < 0:
+        notes.append("cash is negative (margin): QuantPulse never buys on margin")
+    st.caption(_md(" · ".join(notes)))
 
 
 # ----------------------------------------------------------------------------- views
@@ -860,12 +821,7 @@ def _diagnostics(status: dict[str, Any]) -> None:
 
 
 def render() -> None:
-    st.title("Alpaca Paper Trading")
-    st.caption(
-        "QuantPulse's automated strategy on your Alpaca **paper** account: it ranks a liquid universe, sizes a "
-        "concentrated portfolio by conviction and volatility, passes every order through the risk engine and "
-        "reconciles fills with Alpaca. Simulated money only — there is no live-money path."
-    )
+    ui.header("Portfolio", "The Alpaca paper account: positions, orders, risk and performance.")
     status = guarded(lambda: api().get(f"{BASE}/status"), "trading status")
     if status is None:
         return
@@ -873,10 +829,13 @@ def render() -> None:
     if not status["broker_configured"]:
         _setup_help()
         return
-    _status_row(status)
     acct = guarded(lambda: api().get(f"{BASE}/account"), "Alpaca paper account")
     if acct:
         _account(acct)
+    with st.expander("Switches and schedule", icon=":material/tune:"):
+        if status.get("owner_note"):
+            st.caption(_md(status["owner_note"]))
+        _status_row(status)
     view = st.segmented_control("View", VIEWS, default="Portfolio", key="trade_view") or "Portfolio"
     if view == "Portfolio":
         _portfolio()

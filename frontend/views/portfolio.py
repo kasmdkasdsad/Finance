@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, money, num, pct
 
 DEFAULT = pd.DataFrame(
@@ -67,7 +67,7 @@ def _holdings_editor() -> list[dict]:
 
 
 def render() -> None:
-    st.title("Risk Laboratory")
+    ui.header("Risk lab")
     holdings = _holdings_editor()
     with st.form("risk"):
         c = st.columns(5)

@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, money, num, status_badge
 
 STATUS_LABEL = {
@@ -85,7 +85,7 @@ def _log_forms(vid: int, codes: list[str], odometer: float) -> None:
 
 
 def render() -> None:
-    st.title("Asset Lifecycle · 2025 Hyundai Elantra Limited")
+    ui.header("Asset lifecycle · 2025 Hyundai Elantra Limited")
     vehicles = guarded(lambda: api().get("/vehicles"), "vehicles")
     if vehicles is None:
         return

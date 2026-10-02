@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, money, num, pct
 
 HORIZON_LABEL = {5: "1 week", 21: "1 month", 63: "3 months"}
@@ -259,7 +259,7 @@ def _earnings(symbol: str, fc: dict[str, Any]) -> None:
 
 
 def render() -> None:
-    st.title("Stock Intelligence")
+    ui.header("Stock intelligence")
     c = st.columns([2, 1, 1, 1, 1], vertical_alignment="bottom")
     symbol = c[0].text_input("Ticker", st.session_state.get("stock_symbol", "AAPL"), key="stock_symbol_input")
     symbol = symbol.strip().upper() or "AAPL"

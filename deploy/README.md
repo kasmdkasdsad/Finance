@@ -25,7 +25,7 @@
 |---|---|
 | `api` | The QuantPulse API, the Brain supervisor (one tick a minute), background jobs, health checks, alerts |
 | `db` | PostgreSQL 16: cycles, agents, opinions, consensus, decisions, predictions, outcomes, reflections, performance, the execution ledger, positions and theses, evaluations, opportunities, events, the strategy shadow |
-| `dashboard` | The Streamlit dashboard, behind a password; the **Remote** page is made for the phone |
+| `dashboard` | The Streamlit dashboard, behind a password; **Home** is made for the phone; the sign-in lasts 30 days |
 | `backup` | The database tools: `./qp backup`, and the nightly backup timer (`./qp install-timers`), write verified dumps into `deploy/backups/` (14 days kept), optionally uploaded off the server |
 | `caddy` | Optional (`--public`): HTTPS on your own domain name instead of Tailscale |
 
@@ -168,11 +168,11 @@ On the PC, to keep QuantPulse from trading there by accident, set `QP_BRAIN_MODE
 1. Install **Tailscale** from the App Store and sign in with the same account as in step 4.
 2. Open Safari → the address from `./qp tailscale` → sign in with the dashboard password.
 3. *Share* → **Add to Home Screen**: QuantPulse is now an icon on the phone.
-4. The **Remote** page opens first: health of every part, **STOP BRAIN TRADING**, the supervisor's last and next
-   cycle, P&L, positions and working orders, the last cycle's agents and consensus, opportunities, data-quality
-   blocks, the 20/40/60-session progress and recent alerts. Every other page of the dashboard is in the menu.
+4. **Home** opens first: one status line, equity and P&L, positions and working orders, the Brain's latest
+   decision and recent trades, **STOP BRAIN TRADING**, and (folded away) the health of every part and recent
+   alerts. Every other page is in the menu. You stay signed in for 30 days, even after closing Safari.
 
-**To stop the Brain from the phone:** Remote → **STOP BRAIN TRADING**. One tap: no new Brain orders, and its
+**To stop the Brain from the phone:** Home → **STOP BRAIN TRADING**. One tap: no new Brain orders, and its
 working orders are canceled; positions stay. It survives restarts. To allow orders again: tick *I have looked*,
 then *Allow Brain orders again*.
 
@@ -205,7 +205,7 @@ From PowerShell on the PC, one line each (no need to log in first):
 | Back up the database now | `ssh root@203.0.113.10 /opt/quantpulse/deploy/qp backup` |
 | Stop everything | `ssh root@203.0.113.10 /opt/quantpulse/deploy/qp down` |
 | Start everything | `ssh root@203.0.113.10 /opt/quantpulse/deploy/qp start` |
-| Change the dashboard password | `ssh -t root@203.0.113.10 /opt/quantpulse/deploy/qp password` |
+| Change the dashboard password (signs every browser out) | `ssh -t root@203.0.113.10 /opt/quantpulse/deploy/qp password` |
 | Copy a backup to the PC | `scp root@203.0.113.10:/opt/quantpulse/deploy/backups/<file>.dump .` |
 
 Tip: add a shortcut to `C:\Users\<you>\.ssh\config` so `ssh quantpulse` works:
@@ -269,6 +269,6 @@ Tailscale remains the safer choice: nothing is reachable from the internet at al
 * **Health shows `supervisor: waiting`** — startup recovery has not passed yet (usually Alpaca unreachable or a
   failed safety check); the detail says which. It retries every minute and sends nothing meanwhile.
 * **Health shows `standby`** — another QuantPulse process on this database holds the supervisor lease.
-* **Brain kill switch ON with "automatic: …"** — read the reason (Remote page); fix the cause; then release it.
+* **Brain kill switch ON with "automatic: …"** — read the reason (Home page); fix the cause; then release it.
 * **The stock model runs out of memory** — `./qp logs` shows the api restarting; resize the server to CX33.
 * **Forgot the dashboard password** — `./qp password`.

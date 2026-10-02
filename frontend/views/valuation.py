@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, money, num, pct, status_badge
 
 
@@ -240,7 +240,7 @@ def _estimates(symbol: str) -> None:
 
 
 def render() -> None:
-    st.title("Valuation Suite")
+    ui.header("Valuation")
     symbol = (
         st.text_input("Company ticker", st.session_state.get("val_symbol", "AAPL"), key="val_symbol_input")
         .strip()

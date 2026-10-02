@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, num
 
 
@@ -84,7 +84,7 @@ def _game_card(g: dict) -> None:
 
 
 def render() -> None:
-    st.title("Sports Hub")
+    ui.header("Sports hub")
     league = st.segmented_control(
         "League",
         ["nfl", "college-football"],

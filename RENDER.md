@@ -144,17 +144,14 @@ Brain kill switch on by itself.
 
 1. Safari → `https://quantpulse-dashboard-….onrender.com` → sign in with the dashboard password.
 2. *Share → Add to Home Screen*.
-3. The **Remote** page opens first. Its first line is the one to read: 🟢 *Healthy — the Brain may trade the PAPER
+3. **Home** opens first (you stay signed in for 30 days). Its first line is the one to read: 🟢 *Healthy — the Brain may trade the PAPER
    account on its own* (or *the market is closed*), 🟡 *healthy, not trading on its own right now — why* (starting
    up, a data warning), 🔴 *STOPPED OR BROKEN — why* (database, Alpaca, kill switch, failed reconciliation, no
-   supervisor, trading switched off). Below it: equity, buying power, today's and total P&L, health of every part,
-   **STOP BRAIN TRADING**, *Autonomous PAPER execution:
-   PERMITTED / not permitted* (with every reason), CLOUD (version, uptime, database, supervisor leader, last tick,
-   last reconciliation, last Brain cycle), TRADING (paper endpoint verified, market, orders and fills today, open
-   orders, switches, data freshness, latest trade, decision and rejection), positions, orders, the last cycle's
-   agents and consensus,
-   learning, opportunities and the 20/40/60-session progress. The **Brain** page has everything else (agents,
-   consensus and debate, risk, executions, learning, evaluation, audit trail).
+   supervisor, trading switched off). Below it: equity and P&L, positions and working orders, the Brain's latest
+   decision and recent trades, and **STOP BRAIN TRADING**. *System details* (folded) holds the health of every
+   part, autonomous PAPER execution (permitted or not, with every reason), the version, database, supervisor
+   lease, reconciliation and switches; *Recent alerts* the alerts. The **Brain** page has everything else
+   (agents, consensus and debate, risk, executions, learning, evaluation, audit trail).
 
 The dashboard sleeps after 15 minutes without visitors (free instance): the first visit then takes about a minute.
 **The Brain does not sleep** — it runs in `quantpulse-api`, which is always on.
@@ -163,8 +160,8 @@ The dashboard sleeps after 15 minutes without visitors (free instance): the firs
 
 | To … | Do this |
 |---|---|
-| **Stop the Brain now** | Remote → **STOP BRAIN TRADING**. One tap: no new Brain orders, working Brain orders canceled (retried every minute if Alpaca is unreachable). Survives restarts and deploys. |
-| Allow it again | Remote → tick *I have looked* → **Allow Brain orders again** |
+| **Stop the Brain now** | Home → **STOP BRAIN TRADING**. One tap: no new Brain orders, working Brain orders canceled (retried every minute if Alpaca is unreachable). Survives restarts and deploys. |
+| Allow it again | Home → tick *I have looked* → **Allow Brain orders again** |
 | A harder stop (only released in Render) | *quantpulse-api → Environment* → `QP_BRAIN_KILL_SWITCH=true` → Save (redeploys) |
 | Observe only (no orders at all) | *quantpulse-api → Environment* → `QP_ALPACA_TRADING_ENABLED=false` → Save |
 | Pause the supervisor (no cycles) | Brain page → *Supervisor & events* → pause (the API: `POST /api/v1/brain/supervisor {"paused": true}`) |
@@ -212,7 +209,7 @@ autonomous execution is permitted (every reason if not), and ends `OK` or `NOT O
 * **Alpaca or the market data is down:** the Brain holds new orders (health: `alpaca failing`, reconciliation failed,
   stale data → no new buys) and resumes by itself when they answer. Nothing to do.
 * **Brain kill switch ON with "automatic: …":** read the reason (repeated rejections, or orders from another
-  installation). Fix the cause, then release it on the Remote page.
+  installation). Fix the cause, then release it on the Home page.
 
 ## Deploying updates safely
 

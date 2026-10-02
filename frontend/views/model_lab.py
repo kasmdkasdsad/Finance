@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, num, pct
 
 FEATURE_LABELS = {
@@ -444,7 +444,7 @@ def _signals_view() -> None:
 
 
 def render() -> None:
-    st.title("Model Lab")
+    ui.header("Model lab")
     st.caption(
         "The stock models are trained walk-forward: every number here comes from predictions made before the returns "
         "they are scored on. With the S&P 500 universe each stock only counts while it was in the index, so the "

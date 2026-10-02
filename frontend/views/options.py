@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, num, pct, status_badge
 
 
@@ -243,7 +243,7 @@ def _chain(symbol: str) -> None:
 
 
 def render() -> None:
-    st.title("Options Lab")
+    ui.header("Options lab")
     symbol = (
         st.text_input("Underlying", st.session_state.get("opt_symbol", "AAPL"), key="opt_symbol_input")
         .strip()

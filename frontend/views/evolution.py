@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from frontend import ui
 from frontend.components import api, guarded
 
 
@@ -20,23 +21,26 @@ def _table(rows: list[dict[str, Any]] | None, cols: list[str], empty: str) -> No
 
 
 def render() -> None:
-    st.title("Market Evolution")
+    ui.header("Market evolution", "Structural changes in the market, each with its competing explanations.")
     status = guarded(lambda: api().get("/evolution/status"), "evolution status")
     if status is None:
         return
-    c = st.columns(3)
-    c[0].metric("Days measured", status.get("days_measured", 0))
-    c[1].metric("Active changes", status.get("active_changes", 0))
-    c[2].metric("Last day", status.get("last_day") or "—")
+    ui.kpis(
+        [
+            ui.Kpi("Days measured", status.get("days_measured", 0)),
+            ui.Kpi("Active changes", status.get("active_changes", 0)),
+            ui.Kpi("Last day", status.get("last_day") or "—"),
+        ],
+        key="evolution_status",
+    )
     if status.get("note"):
         st.caption(status["note"])
-    st.caption(
-        "Changes are reported only after a false-discovery-rate control across everything measured; each comes "
-        "with every competing explanation marked consistent, inconsistent or untestable. None is assumed — "
-        "automated liquidity provision included, which prices alone cannot identify."
-    )
     tabs = st.tabs(["Changes", "Relationships", "Model registry"])
     with tabs[0]:
+        st.caption(
+            "Reported only after a false-discovery-rate control across everything measured; no explanation is "
+            "assumed."
+        )
         rows = guarded(lambda: api().get("/evolution/changes"), "changes") or []
         _table(rows, ["detected_at", "dimension", "subject", "metric", "timescale", "kind", "effect_sd", "q_value",
                       "persisted", "status"], "No structural change detected.")  # fmt: skip

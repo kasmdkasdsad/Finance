@@ -19,6 +19,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from frontend import ui
 from frontend.components import api, guarded, money, num, pct
 
 BASE = "/brain"
@@ -72,27 +73,26 @@ def _layers_banner(owns: bool) -> None:
         "while every trading switch allows it."
         if owns
         else "**none** — the Brain never sends an order in this mode (proposals only, simulated in its paper "
-        "book); orders only come from the Paper Trading (Alpaca) page."
+        "book); orders only come from the Portfolio page."
     )
-    st.info(
-        "**How to read this page.** ① *Agent analysis* is what each specialist concludes on its own. "
-        "② *Consensus* combines them and shows where they disagree. ③ *Risk preview* is the deterministic risk "
-        f"engine's verdict on each proposed trade — the same checks that guard real orders. ④ *Broker execution*: "
-        f"{execution}",
-        icon=":material/psychology:",
-    )
+    with st.expander("How the Brain decides", icon=":material/psychology:"):
+        st.markdown(
+            "① *Agent analysis* is what each specialist concludes on its own. ② *Consensus* combines them and "
+            "shows where they disagree. ③ *Risk preview* is the deterministic risk engine's verdict on each "
+            f"proposed trade — the same checks that guard real orders. ④ *Broker execution*: {execution}"
+        )
 
 
 def _execution_panel(ex: dict[str, Any]) -> None:
-    """Who owns the account, the Brain kill switch (always one click away) and what stops Brain orders."""
+    """Who owns the account and whether its orders go out — one line; what halts new positions."""
     kill = ex["brain_kill_switch"]
     last = ex.get("last_cycle") or {}
     if not ex["owns_account"]:
-        st.caption(
-            _md(
-                f"QP_BRAIN_MODE={ex['mode']}: the Brain proposes only (its paper book); the strategy owns the "
-                "Alpaca paper account."
-            )
+        ui.status(
+            "gray",
+            "Proposals only: the Brain sends no orders",
+            f"QP_BRAIN_MODE={ex['mode']}: its decisions are simulated in its paper book; the strategy owns the "
+            "Alpaca paper account.",
         )
     elif kill["active"]:
         st.error(
@@ -100,18 +100,13 @@ def _execution_panel(ex: dict[str, Any]) -> None:
             icon=":material/block:",
         )
     elif ex["blockers_scheduled"]:
-        st.warning(
-            _md(
-                "The Brain owns the Alpaca PAPER account; its orders are not sent right now: "
-                + "; ".join(ex["blockers_scheduled"])
-            ),
-            icon=":material/pause_circle:",
+        ui.status(
+            "yellow",
+            "The Brain owns the Alpaca PAPER account; its orders are not sent right now",
+            "; ".join(ex["blockers_scheduled"]),
         )
     else:
-        st.success(
-            "The Brain owns the Alpaca PAPER account and executes its decisions through the trading service.",
-            icon=":material/smart_toy:",
-        )
+        ui.status("green", "The Brain owns the Alpaca PAPER account and trades on its own")
     halts = last.get("entry_halts") or []
     if ex["owns_account"] and halts:
         data = [h for h in halts if h["code"] == "data_quality"]
@@ -123,72 +118,83 @@ def _execution_panel(ex: dict[str, Any]) -> None:
                 _md("New positions halted (exits still allowed): " + "; ".join(h["reason"] for h in others)),
                 icon=":material/front_hand:",
             )
-    if kill["active"]:
-        if kill["source"] == "env":
-            st.caption("Set by QP_BRAIN_KILL_SWITCH=true: change the setting and restart to release it.")
-        elif st.button(
-            "Allow Brain orders again", icon=":material/lock_open:", key="brain_release"
-        ) and guarded(lambda: api().post(f"{BASE}/kill-switch", {"active": False}), "Brain kill switch"):
-            st.rerun()
-    elif ex["owns_account"]:
-        c1, c2 = st.columns([3, 1])
-        reason = c1.text_input("Reason (optional)", key="brain_kill_reason", label_visibility="collapsed",
-                               placeholder="Why stop the Brain? (optional)")  # fmt: skip
-        body = {"active": True, "reason": reason or None, "cancel_open_orders": True}
-        stop = c2.button(
-            "STOP BRAIN ORDERS",
-            icon=":material/block:",
-            type="primary",
-            key="brain_kill",
-            use_container_width=True,
-        )
-        if stop and guarded(lambda: api().post(f"{BASE}/kill-switch", body), "Brain kill switch"):
-            st.rerun()
-        st.caption(
-            "Stops every new Brain-originated order at once and cancels the Brain's working orders. Positions "
-            "stay as they are; the trading kill switch and close-all on the Paper Trading page still work."
+
+
+def _actions(ex: dict[str, Any] | None) -> None:
+    """Run a cycle (in a popover) and the Brain kill switch, always one click away."""
+    with st.container(horizontal=True, gap="small"):
+        with st.popover("Run a cycle", icon=":material/play_arrow:"):
+            out = _run_controls()
+        kill = (ex or {}).get("brain_kill_switch") or {}
+        if kill.get("active"):
+            if (
+                kill["source"] != "env"
+                and st.button("Allow Brain orders again", icon=":material/lock_open:", key="brain_release")
+                and guarded(lambda: api().post(f"{BASE}/kill-switch", {"active": False}), "Brain kill switch")
+            ):
+                st.rerun()
+        elif ex and ex["owns_account"]:
+            body = {"active": True, "reason": None, "cancel_open_orders": True}
+            if st.button(
+                "STOP BRAIN ORDERS",
+                icon=":material/block:",
+                type="primary",
+                key="brain_kill",
+                help="Stops every new Brain order at once and cancels its working orders. Positions stay as they "
+                "are; the trading kill switch and close-all on the Portfolio page still work.",
+            ) and guarded(lambda: api().post(f"{BASE}/kill-switch", body), "Brain kill switch"):
+                st.rerun()
+    if kill.get("active") and kill.get("source") == "env":
+        st.caption("Set by QP_BRAIN_KILL_SWITCH=true: change the setting and restart to release it.")
+    if out:
+        summary = out.get("summary") or {}
+        st.success(
+            f"Cycle #{out['id']} {out['status']}: {summary.get('trades_proposed', 0)} trades proposed, "
+            f"{summary.get('orders_sent', 0)} orders sent.",
+            icon=":material/check_circle:",
         )
 
 
 def _status(status: dict[str, Any], ex: dict[str, Any] | None) -> None:
-    cols = st.columns(5)
-    cols[0].metric("Mode", status["mode"].replace("_", " "))
-    agents = status["agents"]
-    cols[1].metric("Agents enabled", f"{agents['enabled']} / {agents['registered']}")
     last = status.get("last_cycle")
-    cols[2].metric("Last cycle", f"#{last['id']} · {last['status']}" if last else "none yet")
-    cols[3].metric("Open predictions", status["open_predictions"])
-    sent = ((ex or {}).get("last_cycle") or {}).get("orders_sent", 0)
-    cols[4].metric("Orders sent by the Brain", sent, help="in the latest cycle (through the trading service)")
-    st.caption(
-        _md(
-            f"Orders: {status['orders']}. Learning: {status['learning']}. "
-            f"Language models: {status.get('language_models', 'unknown')}."
-        )
-    )
+    latest = (ex or {}).get("last_cycle") or {}
+    ui.kpis(
+        [
+            ui.Kpi("Last cycle", f"#{last['id']}" if last else "none yet", last["status"] if last else None,
+                   delta_color="off", arrow="off"),
+            ui.Kpi("Orders sent by the Brain", latest.get("orders_sent", 0), help="in the latest cycle"),
+            ui.Kpi("Open predictions", status["open_predictions"]),
+            ui.Kpi("Agents", f"{status['agents']['enabled']} / {status['agents']['registered']}", "enabled",
+                   delta_color="off", arrow="off"),
+        ],
+        key="brain_status",
+    )  # fmt: skip
 
 
-def _run_controls() -> None:
-    with st.form("brain-run", border=True):
-        c1, c2, c3 = st.columns([3, 1, 1])
-        symbols = c1.text_input(
+def _about(status: dict[str, Any]) -> None:
+    with st.expander("About this Brain", icon=":material/info:"):
+        st.markdown(_md(f"**Mode** {status['mode'].replace('_', ' ')}"))
+        st.markdown(_md(f"**Orders** {status['orders']}"))
+        st.markdown(_md(f"**Learning** {status['learning']}"))
+        st.markdown(_md(f"**Language models** {status.get('language_models', 'unknown')}"))
+
+
+def _run_controls() -> dict[str, Any] | None:
+    with st.form("brain-run", border=False):
+        symbols = st.text_input(
             "Also study these symbols (optional)",
             placeholder="NVDA, MSFT",
             help="Holdings and the best of a quick pre-screen are always studied.",
         )
-        kind = c2.selectbox("Kind", ["full", "portfolio", "deep"], index=0)
-        go = c3.form_submit_button("Run a cycle now", icon=":material/play_arrow:", use_container_width=True)
-    if go:
-        body = {"kind": kind, "symbols": [s.strip().upper() for s in symbols.split(",") if s.strip()][:25]}
-        out = guarded(lambda: api().post(f"{BASE}/run", body, wait=60), "brain cycle")
-        if out:
-            st.session_state["brain_cycle_id"] = out["id"]
-            summary = out.get("summary") or {}
-            st.success(
-                f"Cycle #{out['id']} {out['status']}: {summary.get('trades_proposed', 0)} trades proposed, "
-                f"{summary.get('orders_sent', 0)} orders sent.",
-                icon=":material/check_circle:",
-            )
+        kind = st.selectbox("Kind", ["full", "portfolio", "deep"], index=0)
+        go = st.form_submit_button("Run a cycle now", icon=":material/play_arrow:", type="primary")
+    if not go:
+        return None
+    body = {"kind": kind, "symbols": [s.strip().upper() for s in symbols.split(",") if s.strip()][:25]}
+    out = guarded(lambda: api().post(f"{BASE}/run", body, wait=60), "brain cycle")
+    if out:
+        st.session_state["brain_cycle_id"] = out["id"]
+    return out
 
 
 def _why(cycle: dict[str, Any]) -> None:
@@ -212,93 +218,94 @@ def _overview(cycle: dict[str, Any]) -> None:
     regime = cycle.get("regime") or {}
     market = cycle.get("market") or {}
     _why(cycle)
-    c = st.columns(4)
-    c[0].metric("Regime", (regime.get("label") or "unknown").replace("_", " "))
-    c[1].metric("Market", "open" if market.get("open") else "closed", help=f"clock: {market.get('clock')}")
-    c[2].metric("Session", cycle["session"].replace("_", " "))
-    c[3].metric("Duration", f"{(cycle.get('duration_ms') or 0) / 1000:.1f}s")
-    if regime.get("description"):
-        st.markdown(_md(f"**{regime['description']}.** " + "; ".join(regime.get("reasons") or [])))
     situation = market.get("situation") or {}
-    if situation:
-        posture = situation.get("posture", "normal")
+    posture = situation.get("posture", "normal") if situation else None
+    ui.facts(
+        [
+            ("Regime", (regime.get("label") or "unknown").replace("_", " ")),
+            ("Market", "open" if market.get("open") else "closed"),
+            ("Session", cycle["session"].replace("_", " ")),
+            ("Duration", f"{(cycle.get('duration_ms') or 0) / 1000:.1f}s"),
+            ("Agents run · failed · skipped",
+             f"{summary.get('agents_run', 0)} · {summary.get('agents_failed', 0)} · {summary.get('agents_skipped', 0)}"),
+            ("Subjects studied", summary.get("subjects", 0)),
+            ("\"I don't know\"", summary.get("unknown", 0)),
+            ("Disagreements", summary.get("disagreements", 0)),
+            ("Trades proposed", summary.get("trades_proposed", 0)),
+            ("Risk engine would allow", summary.get("risk_approved", 0)),
+            ("Predictions recorded", summary.get("predictions_recorded", 0)),
+            ("Orders sent", summary.get("orders_sent", 0)),
+        ]
+    )  # fmt: skip
+    if posture:
         color = {"normal": "green", "cautious": "orange", "defensive": "red"}.get(posture, "gray")
         st.badge(f"Risk posture: {posture}", icon=":material/shield:", color=color)
         if situation.get("reasons"):
             st.caption(_md("Why: " + "; ".join(situation["reasons"])))
-    c = st.columns(6)
-    c[0].metric("Agents run", summary.get("agents_run", 0))
-    c[1].metric("Failed", summary.get("agents_failed", 0))
-    c[2].metric("Skipped", summary.get("agents_skipped", 0))
-    c[3].metric("Subjects", summary.get("subjects", 0))
-    c[4].metric('"I don\'t know"', summary.get("unknown", 0))
-    c[5].metric("Disagreements", summary.get("disagreements", 0))
-    c = st.columns(4)
-    c[0].metric("Trades proposed", summary.get("trades_proposed", 0))
-    c[1].metric("Risk engine would allow", summary.get("risk_approved", 0))
-    c[2].metric("Predictions recorded", summary.get("predictions_recorded", 0))
-    c[3].metric("Orders sent", summary.get("orders_sent", 0))
+    if regime.get("description"):
+        st.caption(_md(f"**{regime['description']}.** " + "; ".join(regime.get("reasons") or [])))
 
-    left, right = st.columns(2)
-    with left:
-        st.subheader("The Brain's paper book (hypothetical)")
-        pf = cycle.get("portfolio") or {}
+
+def _cycle_book(cycle: dict[str, Any]) -> None:
+    st.subheader("The Brain's paper book (hypothetical)", anchor=False)
+    pf = cycle.get("portfolio") or {}
+    st.caption(
+        "Owned by the Brain: its decisions are simulated here at modelled prices after the risk engine allows "
+        "them. Never sent to a broker."
+    )
+    st.markdown(
+        f"Equity **{money(pf.get('equity'))}** · cash {money(pf.get('cash'))} · "
+        f"{len(pf.get('positions') or {})} positions · {len((pf.get('book') or {}).get('fills') or [])} "
+        "simulated fills this cycle"
+    )
+    rows = [{"symbol": s, **p} for s, p in (pf.get("positions") or {}).items()]
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    cons = pf.get("constraints") or {}
+    if cons:
         st.caption(
-            "Owned by the Brain: its decisions are simulated here at modelled prices after the risk engine allows "
-            "them. Never sent to a broker."
+            f"Exposure {pct(cons.get('exposure'), 1)} · spendable cash {money(cons.get('spendable_cash'))} · "
+            f"free slots {cons.get('free_slots')} · beta {num(cons.get('beta'))}"
         )
-        st.markdown(
-            f"Equity **{money(pf.get('equity'))}** · cash {money(pf.get('cash'))} · "
-            f"{len(pf.get('positions') or {})} positions · {len((pf.get('book') or {}).get('fills') or [])} "
-            "simulated fills this cycle"
-        )
-        rows = [{"symbol": s, **p} for s, p in (pf.get("positions") or {}).items()]
-        if rows:
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-        cons = pf.get("constraints") or {}
-        if cons:
-            st.caption(
-                f"Exposure {pct(cons.get('exposure'), 1)} · spendable cash {money(cons.get('spendable_cash'))} · "
-                f"free slots {cons.get('free_slots')} · beta {num(cons.get('beta'))}"
-            )
-        alpaca = pf.get("alpaca_account") or {}
-        owner = alpaca.get("owner") or "the trading strategy (the Brain only reads it)"
-        with st.expander(_md(f"Alpaca paper account — owned by {owner}")):
-            if not alpaca.get("available"):
-                st.warning(_md(f"Unavailable: {alpaca.get('error')}"), icon=":material/cloud_off:")
-            else:
-                st.markdown(
-                    f"Equity {money(alpaca.get('equity'))} · cash {money(alpaca.get('cash'))} · "
-                    f"{len(alpaca.get('positions') or {})} positions · {alpaca.get('open_orders', 0)} open orders. "
-                    + (
-                        "The Brain manages this account; its orders go through the trading service."
-                        if "Brain" in owner
-                        else "The Brain makes no decisions for this account."
-                    )
+    alpaca = pf.get("alpaca_account") or {}
+    owner = alpaca.get("owner") or "the trading strategy (the Brain only reads it)"
+    with st.expander(_md(f"Alpaca paper account — owned by {owner}")):
+        if not alpaca.get("available"):
+            st.warning(_md(f"Unavailable: {alpaca.get('error')}"), icon=":material/cloud_off:")
+        else:
+            st.markdown(
+                f"Equity {money(alpaca.get('equity'))} · cash {money(alpaca.get('cash'))} · "
+                f"{len(alpaca.get('positions') or {})} positions · {alpaca.get('open_orders', 0)} open orders. "
+                + (
+                    "The Brain manages this account; its orders go through the trading service."
+                    if "Brain" in owner
+                    else "The Brain makes no decisions for this account."
                 )
-    with right:
-        st.subheader("Data quality")
-        dq = cycle.get("data_quality") or {}
-        market_view = dq.get("market") or {}
-        if market_view.get("veto"):
-            st.warning(_md(f"Market-wide veto: {market_view['veto']}"), icon=":material/block:")
-        elif market_view:
-            st.success(_md(market_view.get("thesis", "")), icon=":material/verified:")
-        states = dq.get("states") or {}
-        if states:
-            counts = pd.Series(states).value_counts()
-            for state, n in counts.items():
-                st.badge(f"{state}: {n}", color=QUALITY_COLOR.get(str(state), "gray"))
-        feed = dq.get("feed") or {}
-        if feed:
-            st.markdown(_md(f"**What the data is:** {feed.get('headline', '')}"))
-            for cause in (feed.get("causes") or [])[1:]:
-                st.caption(_md(f"• {cause}"))
-            skew = feed.get("clock_skew_s")
-            if skew is not None:
-                st.caption(f"This computer's clock vs Alpaca's: {skew:+.1f}s")
-        for source, err in (dq.get("provider_errors") or {}).items():
-            st.caption(_md(f"✗ {source}: {err}"))
+            )
+
+
+def _cycle_data(cycle: dict[str, Any]) -> None:
+    dq = cycle.get("data_quality") or {}
+    market_view = dq.get("market") or {}
+    if market_view.get("veto"):
+        st.warning(_md(f"Market-wide veto: {market_view['veto']}"), icon=":material/block:")
+    elif market_view:
+        st.success(_md(market_view.get("thesis", "")), icon=":material/verified:")
+    states = dq.get("states") or {}
+    if states:
+        counts = pd.Series(states).value_counts()
+        for state, n in counts.items():
+            st.badge(f"{state}: {n}", color=QUALITY_COLOR.get(str(state), "gray"))
+    feed = dq.get("feed") or {}
+    if feed:
+        st.markdown(_md(f"**What the data is:** {feed.get('headline', '')}"))
+        for cause in (feed.get("causes") or [])[1:]:
+            st.caption(_md(f"• {cause}"))
+        skew = feed.get("clock_skew_s")
+        if skew is not None:
+            st.caption(f"This computer's clock vs Alpaca's: {skew:+.1f}s")
+    for source, err in (dq.get("provider_errors") or {}).items():
+        st.caption(_md(f"✗ {source}: {err}"))
     diagnosis = (cycle.get("data_quality") or {}).get("diagnosis") or {}
     if diagnosis:
         with st.expander("Quote diagnosis for the symbols studied"):
@@ -321,11 +328,16 @@ def _overview(cycle: dict[str, Any]) -> None:
                 hide_index=True,
                 use_container_width=True,
             )
-    if cycle.get("focus"):
-        st.subheader("What it studied")
-        st.dataframe(pd.DataFrame(cycle["focus"]), hide_index=True, use_container_width=True)
-    for note in cycle.get("notes") or []:
-        st.caption(_md(f"• {note}"))
+
+
+def _focus(cycle: dict[str, Any]) -> None:
+    if not cycle.get("focus") and not cycle.get("notes"):
+        return
+    with st.expander("What it studied", icon=":material/manage_search:"):
+        if cycle.get("focus"):
+            st.dataframe(pd.DataFrame(cycle["focus"]), hide_index=True, use_container_width=True)
+        for note in cycle.get("notes") or []:
+            st.caption(_md(f"• {note}"))
 
 
 def _agents(cycle: dict[str, Any], agents: list[dict[str, Any]]) -> None:
@@ -1147,10 +1159,9 @@ def _decisions(cycle: dict[str, Any]) -> None:
             "No proposed actions (research-only mode, or nothing to do).", icon=":material/do_not_disturb_on:"
         )
         return
-    st.markdown(
-        "**Proposed portfolio actions → ③ risk preview → ④ execution.** The risk preview is the deterministic "
-        "risk engine's answer. The Brain has no order access: an allowed trade is only *simulated* in its paper "
-        "book, and nothing is ever sent to Alpaca."
+    st.caption(
+        "Proposed portfolio actions → ③ risk preview (the deterministic risk engine's answer) → ④ execution "
+        "(through the trading service, only when the Brain owns the paper account and every switch allows it)."
     )
     rows = [
         {
@@ -1721,25 +1732,39 @@ def _history(cycles: list[dict[str, Any]]) -> None:
     )
 
 
+TABS = ["Decision", "Agents", "Positions", "Execution", "Learning", "Activity"]
+LEARNING_VIEWS = ["Record", "Evaluation", "Experiment", "Strategy lab", "Improvements", "Memory"]
+
+
+def _learning_tab() -> None:
+    view = st.segmented_control("Show", LEARNING_VIEWS, default="Record", key="brain_learn_view") or "Record"
+    {
+        "Record": _learning,
+        "Evaluation": _evaluation,
+        "Experiment": _experiment,
+        "Strategy lab": _lab,
+        "Improvements": _improvements,
+        "Memory": _memory,
+    }[view]()
+
+
 def render() -> None:
-    st.title("QuantPulse Brain", anchor=False)
-    st.caption("Specialist agents · consensus · proposals checked by the risk engine · Alpaca PAPER only")
+    ui.header(
+        "Brain",
+        "Specialist agents study the market, debate, and propose trades; the risk engine checks each one.",
+    )
     status = guarded(lambda: api().get(f"{BASE}/status"), "brain status")
     if status is None:
         return
     ex = guarded(lambda: api().get(f"{BASE}/execution"), "Brain execution")
     if ex is not None:
         _execution_panel(ex)
-    _layers_banner(bool(status.get("owns_account")))
+    _actions(ex)
     _status(status, ex)
-    if status.get("limitations"):
-        with st.expander("Known limitations"):
-            for item in status["limitations"]:
-                st.markdown(_md(f"- {item}"))
-    _run_controls()
     cycles = guarded(lambda: api().get(f"{BASE}/cycles", limit=50), "cycle history") or []
     if not cycles:
         st.info("The Brain has not run yet. Run a cycle above.", icon=":material/lightbulb:")
+        _layers_banner(bool(status.get("owns_account")))
         return
     ids = [c["id"] for c in cycles]
     wanted = st.session_state.get("brain_cycle_id")
@@ -1748,7 +1773,7 @@ def render() -> None:
         ids,
         index=ids.index(wanted) if wanted in ids else 0,
         format_func=lambda i: next(
-            f"#{c['id']} · {c['started_at'][:16].replace('T', ' ')} UTC · {c['kind']} · {c['status']}"
+            f"#{c['id']} · {ui.when(c['started_at'])} · {c['kind']} · {c['status']}"
             for c in cycles
             if c["id"] == i
         ),
@@ -1758,62 +1783,45 @@ def render() -> None:
         return
     if cycle["status"] == "failed":
         st.error(_md(f"This cycle failed: {cycle.get('error')}"), icon=":material/error:")
-    agents = guarded(lambda: api().get(f"{BASE}/agents"), "agents") or []
-    tabs = st.tabs(
-        [
-            "Overview",
-            "Opportunities",
-            "Agents",
-            "Consensus & debate",
-            "Proposed actions",
-            "Execution",
-            "Learning",
-            "Strategy lab",
-            "Improvements",
-            "Supervisor & events",
-            "Positions & theses",
-            "Audit trail",
-            "Market data & SIP",
-            "Evaluation",
-            "Experiment",
-            "Paper book",
-            "Memory",
-            "History",
-        ]
-    )
-    with tabs[0]:
-        _overview(cycle)
-    with tabs[1]:
-        _opportunities(cycle)
-    with tabs[2]:
-        _agents(cycle, agents)
-    with tabs[3]:
-        _consensus(cycle)
-    with tabs[4]:
-        _decisions(cycle)
-    with tabs[5]:
-        _execution_tab()
-    with tabs[6]:
-        _learning()
-    with tabs[7]:
-        _lab()
-    with tabs[8]:
-        _improvements()
-    with tabs[9]:
-        _operations()
-    with tabs[10]:
-        _positions()
-    with tabs[11]:
-        _audit()
-    with tabs[12]:
-        _data_report()
-    with tabs[13]:
-        _evaluation()
-    with tabs[14]:
-        _experiment()
-    with tabs[15]:
-        _book()
-    with tabs[16]:
-        _memory()
-    with tabs[17]:
-        _history(cycles)
+    tabs = st.tabs(TABS, key="brain_tab", on_change="rerun")  # only the open tab is computed
+    if tabs[0].open:
+        with tabs[0]:
+            _overview(cycle)
+            ui.section("Proposed actions")
+            _decisions(cycle)
+            ui.section("Ideas it found")
+            _opportunities(cycle)
+            _focus(cycle)
+    if tabs[1].open:
+        with tabs[1]:
+            _agents(cycle, guarded(lambda: api().get(f"{BASE}/agents"), "agents") or [])
+            st.divider()
+            _consensus(cycle)
+    if tabs[2].open:
+        with tabs[2]:
+            _positions()
+            st.divider()
+            _cycle_book(cycle)
+            _book()
+    if tabs[3].open:
+        with tabs[3]:
+            _execution_tab()
+            ui.section("Market data")
+            _cycle_data(cycle)
+            _data_report()
+            ui.section("Audit trail")
+            _audit()
+    if tabs[4].open:
+        with tabs[4]:
+            _learning_tab()
+    if tabs[5].open:
+        with tabs[5]:
+            _operations()
+            ui.section("Cycle history")
+            _history(cycles)
+            _about(status)
+            _layers_banner(bool(status.get("owns_account")))
+            if status.get("limitations"):
+                with st.expander("Known limitations", icon=":material/info:"):
+                    for item in status["limitations"]:
+                        st.markdown(_md(f"- {item}"))

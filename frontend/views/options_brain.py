@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from frontend import ui
 from frontend.components import api, guarded, money, pct
 
 
@@ -23,39 +24,65 @@ def _table(
     st.dataframe(df, width="stretch", hide_index=True)
 
 
+CLEARED = ("PAPER_SHADOW", "PAPER_ACTIVE", "PROVEN")
+
+
 def _overview(st_: dict[str, Any]) -> None:
-    st.info(
-        "Options are traded on the **Alpaca paper account only**, through the same trading service, risk engine "
-        "and order manager as shares. Defined-risk structures only; never naked short options, never 0DTE, "
-        "never an exercise. Research evidence is **model-priced** (no historical option quotes) and labelled.",
-        icon=":material/science:",
-    )
-    c = st.columns(4)
-    c[0].metric("Options", "on" if st_.get("enabled") else "off")
-    c[1].metric("Paper execution", "on" if st_.get("execution") else "off")
-    c[2].metric(
-        "Priority weight", f"{st_.get('priority_weight', 0):.2f}", help="Favours options, never forces them"
-    )
-    op = st_.get("open_positions") or {}
-    c[3].metric("Open (paper / shadow)", f"{op.get('paper', 0)} / {op.get('shadow', 0)}")
     lab = st_.get("lab") or {}
-    st.markdown("**Strategy population by stage** — nothing reaches PAPER_ACTIVE without live shadow trades")
-    st.dataframe(pd.DataFrame([lab.get("by_stage") or {}]), hide_index=True, width="stretch")
-    st.caption(f"Feed: {st_.get('feed')} — {st_.get('feed_note')}")
+    stages = lab.get("by_stage") or {}
+    cleared = sum(int(stages.get(k) or 0) for k in CLEARED)
+    if not st_.get("enabled"):
+        ui.status("gray", "Options are off", "QP_OPTIONS_ENABLED=false")
+    elif cleared:
+        ui.status(
+            "green",
+            f"{cleared} option strateg{'y is' if cleared == 1 else 'ies are'} cleared to trade on paper",
+        )
+    else:
+        ui.status(
+            "yellow",
+            "No option trades yet: no strategy has passed validation",
+            "Research runs after the close. A strategy needs a full backtest, walk-forward, stress tests and live "
+            "shadow trades before it may place a paper order.",
+        )
+    op = st_.get("open_positions") or {}
+    ui.kpis(
+        [
+            ui.Kpi("Paper execution", "on" if st_.get("execution") else "off"),
+            ui.Kpi("Strategies cleared", cleared, f"of {sum(int(v or 0) for v in stages.values())} researched",
+                   delta_color="off", arrow="off"),
+            ui.Kpi("Open positions", op.get("paper", 0), f"{op.get('shadow', 0)} shadow", delta_color="off",
+                   arrow="off"),
+            ui.Kpi("Priority weight", f"{st_.get('priority_weight', 0):.2f}", help="Favours options, never forces them"),
+        ],
+        key="opt_status",
+    )  # fmt: skip
+    if stages:
+        st.markdown("**Strategies by stage** — nothing reaches PAPER_ACTIVE without live shadow trades")
+        st.dataframe(pd.DataFrame([stages]), hide_index=True, width="stretch")
     last = st_.get("last_pass") or {}
-    if last:
-        st.markdown("**Last options pass**")
-        if last.get("no_trade"):
-            st.write("No trade: " + "; ".join(last["no_trade"].get("reasons") or []))
-        for n in last.get("notes") or []:
-            st.caption(n)
+    if cleared:  # without a cleared strategy the status line above already says why
+        for n in (st_.get("last_cycle") or {}).get("notes") or []:
+            st.caption(ui.md(n))
+    if last.get("no_trade"):
+        st.caption(ui.md("Last pass, no trade: " + "; ".join(last["no_trade"].get("reasons") or [])))
+    if last.get("candidates"):
+        ui.section("Last options pass")
         _table(
             last.get("candidates"),
             ["underlying", "strategy", "family", "status", "gate", "score", "explanation"],
         )
-    with st.expander("Limits (protected: they can only be tightened)"):
-        st.json(st_.get("limits") or {})
-    with st.expander("The agents and their questions"):
+    with st.expander("Rules and limits", icon=":material/shield:"):
+        st.markdown(
+            "Options are traded on the **Alpaca paper account only**, through the same trading service, risk "
+            "engine and order manager as shares. Defined-risk structures only; never naked short options, never "
+            "0DTE, never an exercise. Research evidence is **model-priced** (no historical option quotes) and "
+            "labelled."
+        )
+        st.caption(ui.md(f"Feed: {st_.get('feed')} — {st_.get('feed_note')}"))
+        st.markdown("**Limits** (protected: they can only be tightened)")
+        st.json(st_.get("limits") or {}, expanded=False)
+    with st.expander("The agents and their questions", icon=":material/groups:"):
         _table(st_.get("agents"), ["agent", "question", "weight", "where"])
 
 
@@ -198,34 +225,44 @@ def _missed() -> None:
     )
 
 
+TABS = ["Overview", "Candidates", "Positions", "Strategies", "Learning", "Chains"]
+
+
 def render() -> None:
-    st.title("Options Intelligence")
+    ui.header(
+        "Options", "What the Options Brain sees, considers, holds and learns: paper and shadow kept apart."
+    )
     st_ = guarded(lambda: api().get("/options/status"), "options status")
     if st_ is None:
         return
-    tabs = st.tabs(["Overview", "Chains", "Candidates", "Positions", "Greeks", "Performance", "Strategies",
-                    "Research", "Experiments", "Learning", "Counterfactuals", "Missed"])  # fmt: skip
-    with tabs[0]:
-        _overview(st_)
-    with tabs[1]:
-        _chains(bool(st_.get("data_configured")))
-    with tabs[2]:
-        _candidates()
-    with tabs[3]:
-        _positions()
-    with tabs[4]:
-        _greeks()
-    with tabs[5]:
-        _performance()
-    with tabs[6]:
-        _strategies()
-    with tabs[7]:
-        _research()
-    with tabs[8]:
-        _experiments()
-    with tabs[9]:
-        _learning()
-    with tabs[10]:
-        _counterfactuals()
-    with tabs[11]:
-        _missed()
+    tabs = st.tabs(TABS, key="ob_tab", on_change="rerun")  # only the open tab is computed
+    if tabs[0].open:
+        with tabs[0]:
+            _overview(st_)
+    if tabs[1].open:
+        with tabs[1]:
+            _candidates()
+            ui.section("Missed opportunities")
+            _missed()
+    if tabs[2].open:
+        with tabs[2]:
+            _positions()
+            ui.section("Greeks")
+            _greeks()
+            ui.section("Performance")
+            _performance()
+    if tabs[3].open:
+        with tabs[3]:
+            _strategies()
+            ui.section("Research sources")
+            _research()
+            ui.section("Experiments")
+            _experiments()
+    if tabs[4].open:
+        with tabs[4]:
+            _learning()
+            ui.section("Counterfactuals")
+            _counterfactuals()
+    if tabs[5].open:
+        with tabs[5]:
+            _chains(bool(st_.get("data_configured")))

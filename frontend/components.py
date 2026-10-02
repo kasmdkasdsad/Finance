@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, TypeVar
@@ -123,9 +124,12 @@ def guarded(fn: Callable[[], T], what: str = "request") -> T | None:
         return None
     except ApiError as exc:
         if exc.status == 0:
-            st.error(
-                f"{exc.message}. Start it with `make api` (or `quantpulse-api`).", icon=":material/cloud_off:"
+            hint = (
+                "It may be restarting: refresh in a minute."
+                if os.environ.get("QP_DEPLOYMENT", "").strip().lower() == "cloud"
+                else "Start it with `make api` (or `quantpulse-api`)."
             )
+            st.error(f"{exc.message}. {hint}", icon=":material/cloud_off:")
         elif exc.status == 409:
             st.warning(exc.message, icon=":material/science:")
         else:

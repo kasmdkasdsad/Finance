@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, composite_badges, guarded, num
 
 FACTOR_LABELS = {
@@ -20,7 +20,7 @@ FACTOR_LABELS = {
 
 
 def render() -> None:
-    st.title("Daily Picks")
+    ui.header("Daily picks")
     c1, c2, c3 = st.columns([1, 2, 1], vertical_alignment="bottom")
     top_n = c1.slider("How many", 5, 30, 10)
     method = c2.segmented_control(

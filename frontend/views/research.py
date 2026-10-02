@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from frontend import ui
 from frontend.components import api, guarded
 
 STATUS_ICON = {"SUPPORTED": "🟢", "REFUTED": "🔴", "INCONCLUSIVE": "⚪", "UNPROVEN": "🟡"}
@@ -25,27 +26,34 @@ def _table(rows: list[dict[str, Any]] | None, cols: list[str], empty: str) -> No
 def _operating(status: dict[str, Any]) -> None:
     op = status.get("operating") or {}
     mode = op.get("mode", "?")
-    c = st.columns(4)
-    c[0].metric("Mode", mode)
-    c[1].metric("Research running", len(status.get("running") or []))
-    q = status.get("queue") or {}
-    c[2].metric("Queued", q.get("queued", 0))
-    c[3].metric("Done", q.get("done", 0))
-    st.caption("Loop: " + " → ".join(op.get("loop") or []))
     ready = op.get("readiness")
     if ready is None:
-        st.info(
-            "Execution readiness has not been checked today (it runs from 08:30 New York, and before the first order)."
+        ui.status(
+            "gray",
+            "Execution readiness has not been checked today",
+            "It runs from 08:30 New York, and before the first order.",
         )
     elif ready.get("passed"):
-        st.success(f"Execution readiness passed ({str(ready.get('at'))[:19]} UTC)")
+        ui.status("green", f"Execution readiness passed ({ui.when(str(ready.get('at')))})")
     else:
         st.error("Execution readiness HELD: " + ", ".join(ready.get("failed") or []))
+    q = status.get("queue") or {}
+    ui.kpis(
+        [
+            ui.Kpi("Mode", str(mode).replace("_", " ").capitalize()),
+            ui.Kpi("Research running", len(status.get("running") or [])),
+            ui.Kpi("Queued", q.get("queued", 0)),
+            ui.Kpi("Done", q.get("done", 0)),
+        ],
+        key="research_status",
+    )
+    st.caption("Loop: " + " → ".join(op.get("loop") or []))
     if ready:
-        _table(ready.get("steps"), ["step", "ok", "required", "detail"], "—")
+        with st.expander("Readiness checks", icon=":material/checklist:"):
+            _table(ready.get("steps"), ["step", "ok", "required", "detail"], "—")
     res = status.get("resources") or {}
     lim = res.get("limits") or {}
-    st.caption(
+    st.caption(  # the server's resources, small print
         f"Resources: memory {res.get('memory_pct')}% ({res.get('memory_source')}), load {res.get('load_per_cpu')}/core, "
         f"this process {res.get('rss_mb')} MB · new jobs start below {lim.get('start_below_memory_pct')}% memory, "
         f"running jobs stop above {lim.get('stop_above_memory_pct')}% · at most {lim.get('max_concurrent')} at once · "
@@ -137,16 +145,16 @@ def _queue() -> None:
 
 
 def render() -> None:
-    st.title("Research (24/7)")
+    ui.header(
+        "Research",
+        "While the market is closed the Brain grades, analyses and tests ideas. Research never sends an order or "
+        "changes a setting, a limit or a strategy in production.",
+    )
     status = guarded(lambda: api().get("/brain/research/status"), "research status")
     if status is None:
         return
-    st.caption(
-        "Market open: trade and learn from reality. Market closed: grade, analyse, research, test, learn and "
-        "prepare. Research never sends an order or changes a setting, a limit or a strategy in production."
-    )
     _operating(status)
-    tabs = st.tabs(["Learning ledger", "Improvement lifecycle", "Research queue"])
+    tabs = st.tabs(["What it learned", "Improvements", "Queue"])
     with tabs[0]:
         _learnings()
     with tabs[1]:

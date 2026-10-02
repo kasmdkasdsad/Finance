@@ -567,7 +567,7 @@ This part of the platform answers three questions for any stock: *what range of 
   starts each new close's run on its own (`QP_MODEL_WARMUP`).
 * **Signal research** (`GET /model/research`). Each feature's IC at 1, 5, 21 and 63 days (IC decay),
   its quintile spread, and the feature correlation matrix, on the same universe and inputs.
-* **Market regime** (`GET /market/regime`, shown on the Command Center). SPY is labelled Uptrend,
+* **Market regime** (`GET /market/regime`, shown on *More → Market overview*). SPY is labelled Uptrend,
   Volatile uptrend, Downtrend or Stress, from its 200-day average and the percentile of its current
   volatility. The panel adds breadth (share of the index members above their 200-day average), the
   10-year minus 3-month yield spread, and what followed historically in the same trend state.
@@ -1811,35 +1811,52 @@ a short summary of the findings with the points for and against, conflicts betwe
 to watch. Without a provider, a model and a budget it is skipped with the reason. The tests use a
 scripted fake provider and never reach a model.
 
+### The dashboard
+
+The dashboard is one calm layout on a desktop and on a phone (light or dark, following the device):
+
+* **Top bar.** **Home**, **Brain**, **Portfolio**, **Options** and **Research**; the analytics tools (system
+  status, market evolution, stock intelligence, picks, the model lab, the options lab, valuation, the risk
+  lab…) sit under **More**. On a phone the bar folds into the menu.
+* **Every page** opens with the same header: its title, the **Paper** pill (Alpaca paper only) and one
+  line saying what the page is for. A status line says what matters first, KPI cards hold the numbers (two
+  per line on a phone), and details are folded away in expanders. Tabs compute only the tab that is open.
+* **Home** is the page to open first: one status line (green: trading on its own; yellow: healthy but not
+  trading now, and why; red: stopped or broken), equity and P&L, the positions, the Brain's latest decision
+  and recent trades, and **STOP BRAIN TRADING**. Every part's health, the cloud, the switches and the alerts
+  are under *System details* and *Recent alerts*. It refreshes itself (every 30 s by default).
+* **Settings** (auto-refresh, Sign out; locally also the API address and token) are in the side panel.
+* **Sign-in.** In the cloud the dashboard server checks the password itself (`POST /auth/login`, served
+  by `frontend/app.py`) and keeps the sign-in in a signed cookie that page scripts cannot read (HttpOnly,
+  SameSite=Strict, Secure over HTTPS). Closing the tab or the browser does not sign you out: *Keep me signed
+  in* (the default) lasts 30 days; without it, until the browser closes. The cookie holds no password, only
+  an expiry and a random id signed with a key derived from the password hash, so `./qp password` signs every
+  browser out. *Sign out* deletes the cookie and revokes it (until the dashboard restarts). Five wrong passwords lock the sign-in for
+  everyone for a minute, doubling up to 15 minutes.
+
 ### The Brain page
 
-*Alpaca Paper Trading → Brain* shows the status, a *Run a cycle now* form, and for any recorded cycle:
+*Brain* opens with one line saying whether the Brain owns the paper account and whether its orders go out,
+*Run a cycle* and **STOP BRAIN ORDERS** (always one click away), and four cards. Then, for any recorded cycle,
+six tabs:
 
-* **Overview:** why the Brain traded or did not, regime, risk posture, market, data quality, the
-  portfolio, what was studied and why.
-* **Opportunities:** what the brain found by itself and how far each idea got, stage by stage.
-* **Agents:** who ran, who was skipped and why, their run history, and their track record ("unproven"
-  until predictions are graded). Agents can be switched on or off here.
-* **Consensus & debate:** each subject's combined view (supporting/neutral/opposing, disagreement, data
-  quality, vetoes), the bull case, the bear case and the devil's advocate's objections, every vote with
-  its weight, and each agent's own thesis, evidence and invalidation.
-* **Proposed actions:** each action, the risk engine's preview and the checks behind it, the trading
-  controls at the time, and the execution column (sent, filled, or why not).
-* **Execution:** the latest final execution audit (every check, the endpoint, "live trading possible: no",
-  what was about to go and what happened), execution quality, the execution ledger (every Brain order from
-  the decision to its final state), and the latest near-close review.
-* **Learning:** open and graded predictions, consensus calibration, track records ("unproven" until
-  enough calls are graded), decision-vs-outcome reflections by quadrant, and failure analyses.
-* **Strategy lab:** versions with their status, gates, walk-forward and paper results; propose,
-  validate, paper-track, promote and retire.
-* **Improvements:** proposals with their evidence and validation plan, and the decision buttons.
-* **Supervisor & events:** the supervisor's state, its queued wake-ups and recent work, a pause/resume
-  button, language-model status and usage, and the event stream.
-* **Experiment:** the 20/40/60-session checkpoints, the latest daily and weekly reviews with their
-  lessons and proposals, what the record says (agents, calibration, agents against the consensus, the
-  consensus by regime), the ideas considered and the rejection reasons' record, behaviour findings, and
-  when and why market data stopped trading.
-* **Memory** and **History.**
+* **Decision:** why the Brain traded or did not, regime, risk posture and the cycle's numbers; the proposed
+  actions with the risk engine's preview, the checks behind it and the execution column (sent, filled, or
+  why not); the ideas it found by itself and how far each got, stage by stage; what it studied.
+* **Agents:** who ran, who was skipped and why, their run history and track record ("unproven" until
+  predictions are graded; agents can be switched on or off here); then the consensus: each subject's
+  combined view (supporting/neutral/opposing, disagreement, data quality, vetoes), the bull case, the bear
+  case and the devil's advocate's objections, every vote with its weight, and each agent's own thesis,
+  evidence and invalidation.
+* **Positions:** the positions and their theses, and the Brain's hypothetical paper book.
+* **Execution:** the latest final execution audit (every check, the endpoint, "live trading possible: no"),
+  execution quality, the execution ledger (every Brain order from the decision to its final state), the
+  near-close review; market data quality and the SIP report; the audit trail.
+* **Learning:** the record (open and graded predictions, calibration, decision vs outcome, failure
+  analyses), the 20/40/60-session evaluation, the experiment (checkpoints, daily and weekly reviews, what
+  the record says, behaviour, when data stopped trading), the strategy lab, improvements, and memory.
+* **Activity:** the supervisor (state, wake-ups, recent work, pause/resume), sessions, language models,
+  the event stream, the cycle history, how the Brain decides, and the known limitations.
 
 The page keeps four layers visibly apart: ① agent analysis, ② consensus, ③ risk preview, and ④ broker
 execution — done by the trading service, never by the Brain itself.
@@ -2239,7 +2256,7 @@ QuantPulse runs in the cloud so the Brain keeps supervising the Alpaca **paper**
   retried every minute).
 * **Monitoring:** `GET /api/v1/system/health` (API, database, supervisor, scheduler, Alpaca, market data,
   reconciliation, last cycle, kill switches) and alerts on changes to ntfy, a webhook and a heartbeat
-  (`QP_ALERT_NTFY_URL`, `QP_ALERT_WEBHOOK_URL`, `QP_HEARTBEAT_URL`). The dashboard's **Remote** page shows it
+  (`QP_ALERT_NTFY_URL`, `QP_ALERT_WEBHOOK_URL`, `QP_HEARTBEAT_URL`). The dashboard's **Home** page shows it
   all on a phone, with one-tap STOP BRAIN TRADING.
 
 ## Vehicle module reference data
@@ -2351,7 +2368,7 @@ src/quantpulse/
   workers/poller.py      market-hours-aware refresh, scheduled email, sandbox scheduler, prediction ledger, model warm-up, paper-trading cycles and reconciliation
   api/                   app factory · middleware · error handlers · routers/*
   data/                  packaged vehicle profile · S&P 500 constituents and change-history snapshot
-frontend/                Streamlit app (app.py, auth.py (login), api_client.py, components.py, charts.py, views/* incl. remote (the phone page))
+frontend/                Streamlit app: app.py (the entry point: pages + sign-in routes), dashboard.py (navigation), auth.py (sign-in), ui.py + style.css (the look), static/ (Inter typeface), api_client.py, components.py, charts.py, views/* incl. remote (Home, the phone page)
 render.yaml · RENDER.md  the 24/7 cloud on Render: the blueprint (API + Brain, dashboard, PostgreSQL) and its guide
 deploy/                  self-hosting: compose.yaml · qp (helper) · qpops.py (CI-gated deploys, watchdog, backups, status) · systemd/ (timers) · bootstrap.sh · bootstrap-oracle.sh · cloud.env.example · ops.env.example · Caddyfile · README.md · ORACLE.md ($0 on Oracle Cloud Always Free)
 launcher/                Windows desktop launcher: quantpulse_launcher.py (start · stop · status) · *.bat · install-shortcuts.ps1 · make_icon.py
@@ -2379,7 +2396,8 @@ tests/                   unit · providers · integration · frontend · fixture
   in the image: `.env` files, `deploy/` and `data/` are excluded from the build context.
 * **Cloud mode** (`QP_DEPLOYMENT=cloud`, see [24/7 in the cloud](#247-in-the-cloud)): the preflight must pass
   before anything starts; every API request needs the token, with no exemption for this machine; the dashboard
-  requires a PBKDF2-hashed password with a lock-out, and cannot be pointed at another API; every log line masks
+  requires a PBKDF2-hashed password with a lock-out (checked by the dashboard server, which keeps the sign-in
+  in a signed HttpOnly cookie), and cannot be pointed at another API; every log line masks
   the configured secrets and anything credential-shaped (URL passwords, `api_key=`, Alpaca key headers).
 
 ---

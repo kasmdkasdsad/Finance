@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend import charts
+from frontend import charts, ui
 from frontend.components import api, guarded, job_progress, num, pct
 
 SOURCE_LABEL = {"forecast": "Price forecast", "model": "Stock model"}
@@ -129,7 +129,7 @@ def _backfill_panel() -> None:
 
 
 def render() -> None:
-    st.title("Track Record")
+    ui.header("Track record")
     st.caption(
         "After each close the platform logs its forecasts and stock-model calls from live prices only, then grades "
         "each one on its target date. This page is how you find out whether any of it works."

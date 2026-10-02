@@ -16,6 +16,7 @@ from quantpulse.services.container import Container
 from tests.fakes.alpaca_paper import FakeAlpacaPaper
 from tests.fakes.market import STOCKS, TrendFeed
 from tests.frontend.conftest import _free_port
+from tests.frontend.test_brain_page import _html
 from tests.frontend.test_pages import assert_clean, page
 from tests.integration.conftest import NOW
 
@@ -83,8 +84,8 @@ def test_unconfigured_page_explains_setup(api_server):
     at = page("trading", api_server)
     at.run()
     assert_clean(at)
-    assert any("SIMULATED MONEY ONLY" in w.value for w in at.warning)
-    assert any("NO ORDERS WILL BE SUBMITTED" in i.value for i in at.info)
+    html = _html(at)  # the status line: what happens to orders, and that the money is simulated
+    assert "SIMULATED MONEY ONLY" in html and "NO ORDERS WILL BE SUBMITTED" in html
     assert any("QP_ALPACA_API_KEY_ID" in i.value for i in at.info)
 
 
@@ -93,13 +94,21 @@ def test_every_view_renders_with_banners_and_account(trading_server):
     at = page("trading", url)
     at.run()
     assert_ok(at)
-    assert any(w.value == "**ALPACA PAPER TRADING — SIMULATED MONEY ONLY**" for w in at.warning)
-    assert any("PAPER EXECUTION ACTIVE" in e.value for e in at.error)
-    labels = {m.label for m in at.metric}
-    assert {"Equity", "Cash", "Buying power", "Today's P/L", "Total P/L", "Mode", "Kill switch"} <= labels
+    html = _html(at)
+    assert "ALPACA PAPER TRADING — SIMULATED MONEY ONLY" in html and "PAPER EXECUTION ACTIVE" in html
+    assert [m.label for m in at.metric] == ["Equity", "Today's P/L", "Total P/L", "Buying power"]
+    assert "cash" in str(at.metric[3].delta)
     assert at.dataframe and at.get("plotly_chart")  # positions and current-vs-target weights
-    labels = {m.label for m in at.metric}
-    assert {"Broker", "Dry run", "Scheduler", "Last cycle", "Next cycle"} <= labels
+    for fact in (
+        "Mode",
+        "Broker",
+        "Dry run",
+        "Kill switch",
+        "Strategy scheduler",
+        "Last cycle",
+        "Next cycle",
+    ):
+        assert f"<span>{fact}</span>" in html, fact  # under "Switches and schedule"
     for view in ("Strategy", "Orders", "Risk", "Activity", "Performance", "Controls", "Diagnostics"):
         at.segmented_control(key="trade_view").set_value(view).run()
         assert_ok(at)
