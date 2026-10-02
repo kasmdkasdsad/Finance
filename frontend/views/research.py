@@ -11,6 +11,7 @@ import streamlit as st
 
 from frontend import ui
 from frontend.components import api, guarded
+from frontend.views import evolution
 
 STATUS_ICON = {"SUPPORTED": "🟢", "REFUTED": "🔴", "INCONCLUSIVE": "⚪", "UNPROVEN": "🟡"}
 
@@ -47,18 +48,18 @@ def _operating(status: dict[str, Any]) -> None:
         ],
         key="research_status",
     )
-    st.caption("Loop: " + " → ".join(op.get("loop") or []))
-    if ready:
-        with st.expander("Readiness checks", icon=":material/checklist:"):
+    with st.expander("Details", icon=":material/tune:"):
+        st.caption("Loop: " + " → ".join(op.get("loop") or []))
+        if ready:
             _table(ready.get("steps"), ["step", "ok", "required", "detail"], "—")
-    res = status.get("resources") or {}
-    lim = res.get("limits") or {}
-    st.caption(  # the server's resources, small print
-        f"Resources: memory {res.get('memory_pct')}% ({res.get('memory_source')}), load {res.get('load_per_cpu')}/core, "
-        f"this process {res.get('rss_mb')} MB · new jobs start below {lim.get('start_below_memory_pct')}% memory, "
-        f"running jobs stop above {lim.get('stop_above_memory_pct')}% · at most {lim.get('max_concurrent')} at once · "
-        f"{res.get('detail')}"
-    )
+        res = status.get("resources") or {}
+        lim = res.get("limits") or {}
+        st.caption(
+            f"Server: memory {res.get('memory_pct')}% ({res.get('memory_source')}), load {res.get('load_per_cpu')}/core, "
+            f"this process {res.get('rss_mb')} MB · new jobs start below {lim.get('start_below_memory_pct')}% memory, "
+            f"running jobs stop above {lim.get('stop_above_memory_pct')}% · at most {lim.get('max_concurrent')} at once · "
+            f"{res.get('detail')}"
+        )
 
 
 def _learnings() -> None:
@@ -144,20 +145,29 @@ def _queue() -> None:
                 st.success(f"Queued as #{out['id']} (priority {out['priority']})")
 
 
+TABS = ["What it learned", "Improvements", "Market changes", "Queue"]
+
+
 def render() -> None:
     ui.header(
         "Research",
-        "While the market is closed the Brain grades, analyses and tests ideas. Research never sends an order or "
-        "changes a setting, a limit or a strategy in production.",
+        "While the market is closed the Brain grades its calls, analyses and tests ideas. Research never sends an "
+        "order or changes a setting, a limit or a strategy in production.",
     )
     status = guarded(lambda: api().get("/brain/research/status"), "research status")
     if status is None:
         return
     _operating(status)
-    tabs = st.tabs(["What it learned", "Improvements", "Queue"])
-    with tabs[0]:
-        _learnings()
-    with tabs[1]:
-        _hypotheses()
-    with tabs[2]:
-        _queue()
+    tabs = st.tabs(TABS, key="research_tab", on_change="rerun")  # only the open tab is computed
+    if tabs[0].open:
+        with tabs[0]:
+            _learnings()
+    if tabs[1].open:
+        with tabs[1]:
+            _hypotheses()
+    if tabs[2].open:
+        with tabs[2]:
+            evolution.body()
+    if tabs[3].open:
+        with tabs[3]:
+            _queue()

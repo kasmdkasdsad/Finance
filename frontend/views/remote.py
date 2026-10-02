@@ -34,7 +34,9 @@ def _status(cs: dict[str, Any] | None, ex: dict[str, Any] | None, report: dict[s
         why = (sm.get("problems") or [])[:2]
         if not why and sm.get("light") == "yellow":
             why = ((cs.get("autonomous_execution") or {}).get("reasons") or [])[1:3]
-        ui.status(sm.get("light", ""), sm.get("headline") or "—", "; ".join(why) or None)
+        ui.status(
+            sm.get("light", ""), ui.plain(sm.get("headline") or "—"), "; ".join(map(ui.plain, why)) or None
+        )
     for blocker in (report or {}).get("order_blockers") or []:
         st.warning(ui.md(f"New Brain orders held: {blocker}"), icon=":material/block:")
 
@@ -88,6 +90,7 @@ def _positions(positions: dict[str, Any] | None, orders: list[Any] | None) -> No
                 + ", ".join(f"{o['side']} {o['qty']:g} {o['symbol']}" for o in working[:10])
             )
         )
+    ui.link("trading", "Orders, performance and risk")
 
 
 def _brain(cs: dict[str, Any] | None, sup: dict[str, Any] | None) -> None:
@@ -140,6 +143,7 @@ def _brain(cs: dict[str, Any] | None, sup: dict[str, Any] | None) -> None:
             width="stretch",
             column_config={"Qty": st.column_config.NumberColumn(format="%g")},
         )  # fmt: skip
+    ui.link("brain", "Everything the Brain saw and decided")
 
 
 def _stop(ex: dict[str, Any] | None) -> None:

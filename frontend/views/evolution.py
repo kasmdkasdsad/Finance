@@ -22,6 +22,11 @@ def _table(rows: list[dict[str, Any]] | None, cols: list[str], empty: str) -> No
 
 def render() -> None:
     ui.header("Market evolution", "Structural changes in the market, each with its competing explanations.")
+    body()
+
+
+def body() -> None:
+    """Shown on its own page locally and as Research → Market changes."""
     status = guarded(lambda: api().get("/evolution/status"), "evolution status")
     if status is None:
         return

@@ -567,7 +567,7 @@ This part of the platform answers three questions for any stock: *what range of 
   starts each new close's run on its own (`QP_MODEL_WARMUP`).
 * **Signal research** (`GET /model/research`). Each feature's IC at 1, 5, 21 and 63 days (IC decay),
   its quintile spread, and the feature correlation matrix, on the same universe and inputs.
-* **Market regime** (`GET /market/regime`, shown on *More → Market overview*). SPY is labelled Uptrend,
+* **Market regime** (`GET /market/regime`, shown on *Tools → Market overview* when running locally). SPY is labelled Uptrend,
   Volatile uptrend, Downtrend or Stress, from its 200-day average and the percentile of its current
   volatility. The panel adds breadth (share of the index members above their 200-day average), the
   10-year minus 3-month yield spread, and what followed historically in the same trend state.
@@ -767,8 +767,8 @@ QuantPulse can run an automated, fairly aggressive strategy against your **Alpac
 (Alpaca's paper-trading API: simulated money, real market data, real order handling). This is separate
 from the [Trading sandbox](#trading-sandbox-paper-trading). The sandbox simulates its own fills inside
 QuantPulse. Here, **Alpaca is authoritative** for equity, cash, buying power, positions, orders and fills,
-and QuantPulse keeps a reconciled record of everything it did. In the UI it is under
-**Alpaca Paper Trading → Paper Trading (Alpaca)**.
+and QuantPulse keeps a reconciled record of everything it did. In the dashboard it is the **Portfolio**
+page.
 
 **Paper only, by construction.**
 
@@ -1656,7 +1656,7 @@ weight or a production strategy. Execution readiness checks each morning that no
 a person's promotion. The tests run every research job with the Brain owning the paper account and trading
 enabled, then check that no order was sent, no setting or switch changed, and nothing was promoted.
 
-The **Research (24/7)** page shows four things:
+The **Research** page shows four things:
 
 * the mode, today's readiness and the resources;
 * the learning ledger, with the full evidence for each conclusion;
@@ -1815,16 +1815,21 @@ scripted fake provider and never reach a model.
 
 The dashboard is one calm layout on a desktop and on a phone (light or dark, following the device):
 
-* **Top bar.** **Home**, **Brain**, **Portfolio**, **Options** and **Research**; the analytics tools (system
-  status, market evolution, stock intelligence, picks, the model lab, the options lab, valuation, the risk
-  lab…) sit under **More**. On a phone the bar folds into the menu.
+* **Navigation.** Six pages in the top bar: **Home**, **Portfolio**, **Brain**, **Options**, **Research** and
+  **System**. On a phone the first five are a tab bar at the bottom of the screen, one tap each. The older
+  analytics tools (market overview, stock intelligence, picks, the model lab, the options lab, valuation, the
+  risk lab…) are listed under *Tools* only when the dashboard runs locally; market evolution is under
+  *Research → Market changes*.
 * **Every page** opens with the same header: its title, the **Paper** pill (Alpaca paper only) and one
   line saying what the page is for. A status line says what matters first, KPI cards hold the numbers (two
   per line on a phone), and details are folded away in expanders. Tabs compute only the tab that is open.
 * **Home** is the page to open first: one status line (green: trading on its own; yellow: healthy but not
   trading now, and why; red: stopped or broken), equity and P&L, the positions, the Brain's latest decision
-  and recent trades, and **STOP BRAIN TRADING**. Every part's health, the cloud, the switches and the alerts
-  are under *System details* and *Recent alerts*. It refreshes itself (every 30 s by default).
+  and recent trades, links to the details, and **STOP BRAIN TRADING**. Every part's health, the cloud, the
+  switches and the alerts are under *System details* and *Recent alerts*. It refreshes itself every 30 s.
+* **Portfolio:** positions, orders, performance, risk, history and controls (kill switch, reconcile, cancel and
+  close all, the connection check and the guarded test order). The strategy's own view and its *Run strategy
+  now* button appear only while the strategy, not the Brain, owns the account.
 * **Settings** (auto-refresh, Sign out; locally also the API address and token) are in the side panel.
 * **Sign-in.** In the cloud the dashboard server checks the password itself (`POST /auth/login`, served
   by `frontend/app.py`) and keeps the sign-in in a signed cookie that page scripts cannot read (HttpOnly,
@@ -2215,8 +2220,8 @@ Monitor, the model registry, every setting).
 | `GET /evolution/status` · `/changes` · `/relationships` · `POST /evolution/run` | The monitor: measured days, changes with hypotheses, relationship history · run it now |
 | `GET /registry/models` · `POST /registry/models/{id}/advance` · `/approve` | Model versions and stages · advance on evidence · a person's approval |
 
-`GET /brain/status` carries an options summary. Dashboard pages: **Options Intelligence** and **Market
-Evolution**.
+`GET /brain/status` carries an options summary. Dashboard pages: **Options** and *Research → Market
+changes*.
 
 ## 24/7 in the cloud
 

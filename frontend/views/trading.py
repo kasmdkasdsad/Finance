@@ -12,7 +12,14 @@ from frontend import charts, ui
 from frontend.components import api, guarded, money, num, pct
 
 BASE = "/trading"
-VIEWS = ["Portfolio", "Strategy", "Orders", "Risk", "Activity", "Performance", "Controls", "Diagnostics"]
+VIEWS = [
+    "Positions",
+    "Orders",
+    "Performance",
+    "Risk",
+    "History",
+    "Controls",
+]  # + "Strategy" when it owns the account
 COMPONENT_LABELS = {
     "momentum": "Momentum",
     "trend": "Trend",
@@ -56,8 +63,17 @@ def _md(text: str) -> str:
 
 def _banners(status: dict[str, Any]) -> None:
     """One status line (who trades and whether orders go out), then only what needs attention."""
-    tone = "green" if status["mode"] == "paper" and status["broker_configured"] else "gray"
-    ui.status(tone, status["mode_banner"], status["banner"])
+    who = "The Brain" if status.get("owner") == "brain" else "The strategy"
+    if not status["broker_configured"]:
+        ui.status("gray", "Not connected to Alpaca", "Add the Alpaca paper keys to connect (below).")
+    elif status["mode"] == "paper":
+        ui.status(
+            "green",
+            f"{who} trades your Alpaca paper account",
+            "Simulated money only. Every order goes through the risk engine first.",
+        )
+    else:
+        ui.status("gray", "Dry run: no orders are sent", ui.plain(status["mode_banner"]))
     ks = status["kill_switch"]
     if ks["active"]:
         st.error(
@@ -158,22 +174,12 @@ def _portfolio() -> None:
         st.info("No open positions on the Alpaca paper account.", icon=":material/inventory_2:")
         return
     df = pd.DataFrame(positions)
+    shown = ["symbol", "qty", "avg_entry_price", "current_price", "market_value", "weight", "unrealized_pl",
+             "unrealized_plpc", "target_weight", "signal_score", "stop_loss_price"]  # fmt: skip
+    # the Brain sets no target weight or score: an empty column only adds noise
+    shown = [c for c in shown if c not in ("target_weight", "signal_score") or df[c].notna().any()]
     st.dataframe(
-        df[
-            [
-                "symbol",
-                "qty",
-                "avg_entry_price",
-                "current_price",
-                "market_value",
-                "weight",
-                "unrealized_pl",
-                "unrealized_plpc",
-                "target_weight",
-                "signal_score",
-                "stop_loss_price",
-            ]
-        ],
+        df[shown],
         hide_index=True,
         width="stretch",
         column_config={
@@ -190,6 +196,8 @@ def _portfolio() -> None:
             "stop_loss_price": st.column_config.NumberColumn("Stop-loss", format="dollar"),
         },
     )
+    if df["target_weight"].isna().all():  # the Brain sets no target weights: nothing to compare
+        return
     fig = go.Figure()
     fig.add_bar(x=df["symbol"], y=df["weight"], name="current", marker_color=charts.series(0))
     fig.add_bar(x=df["symbol"], y=df["target_weight"].fillna(0), name="target", marker_color=charts.series(1))
@@ -398,6 +406,16 @@ def _orders() -> None:
         ],
         hide_index=True,
         width="stretch",
+        column_order=[
+            "submitted_at",
+            "symbol",
+            "side",
+            "qty",
+            "filled_qty",
+            "filled_avg_price",
+            "status",
+            "reason",
+        ],
         column_config={
             "alpaca_order_id": st.column_config.TextColumn("Alpaca order id"),
             "source": st.column_config.TextColumn(
@@ -580,6 +598,16 @@ def _performance() -> None:
 
 
 def _controls(status: dict[str, Any]) -> None:
+    if (
+        status.get("owner") != "brain"
+    ):  # with the Brain in charge the strategy only runs dry: nothing to run here
+        _run_strategy(status)
+    _kill_and_reconcile(status)
+    with st.expander("Connection check and test order", icon=":material/stethoscope:"):
+        _diagnostics(status)
+
+
+def _run_strategy(status: dict[str, Any]) -> None:
     st.markdown("#### Run strategy now")
     force_dry = st.checkbox(
         "Dry run only (compute everything, send nothing)",
@@ -609,6 +637,8 @@ def _controls(status: dict[str, Any]) -> None:
                 icon=":material/check_circle:",
             )
 
+
+def _kill_and_reconcile(status: dict[str, Any]) -> None:
     st.markdown("#### Kill switch")
     ks = status["kill_switch"]
     if ks["active"]:
@@ -836,20 +866,16 @@ def render() -> None:
         if status.get("owner_note"):
             st.caption(_md(status["owner_note"]))
         _status_row(status)
-    view = st.segmented_control("View", VIEWS, default="Portfolio", key="trade_view") or "Portfolio"
-    if view == "Portfolio":
-        _portfolio()
-    elif view == "Strategy":
-        _strategy()
-    elif view == "Orders":
-        _orders()
-    elif view == "Risk":
-        _risk()
-    elif view == "Activity":
-        _activity()
-    elif view == "Performance":
-        _performance()
-    elif view == "Diagnostics":
-        _diagnostics(status)
-    else:
-        _controls(status)
+    views = VIEWS if status.get("owner") == "brain" else [VIEWS[0], "Strategy", *VIEWS[1:]]
+    view = st.segmented_control(
+        "View", views, default="Positions", key="trade_view", label_visibility="collapsed"
+    )
+    {
+        "Positions": _portfolio,
+        "Strategy": _strategy,
+        "Orders": _orders,
+        "Performance": _performance,
+        "Risk": _risk,
+        "History": _activity,
+        "Controls": lambda: _controls(status),
+    }.get(view or "Positions", _portfolio)()

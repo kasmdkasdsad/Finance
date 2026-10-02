@@ -16,7 +16,7 @@ from quantpulse.services.container import Container
 from tests.fakes.alpaca_paper import FakeAlpacaPaper
 from tests.fakes.market import STOCKS, TrendFeed
 from tests.frontend.conftest import _free_port
-from tests.frontend.test_brain_page import _html
+from tests.frontend.test_brain_page import _html, brain_server  # noqa: F401  (its fixture)
 from tests.frontend.test_pages import assert_clean, page
 from tests.integration.conftest import NOW
 
@@ -84,8 +84,7 @@ def test_unconfigured_page_explains_setup(api_server):
     at = page("trading", api_server)
     at.run()
     assert_clean(at)
-    html = _html(at)  # the status line: what happens to orders, and that the money is simulated
-    assert "SIMULATED MONEY ONLY" in html and "NO ORDERS WILL BE SUBMITTED" in html
+    assert "Not connected to Alpaca" in _html(at)  # the status line says so first
     assert any("QP_ALPACA_API_KEY_ID" in i.value for i in at.info)
 
 
@@ -95,7 +94,7 @@ def test_every_view_renders_with_banners_and_account(trading_server):
     at.run()
     assert_ok(at)
     html = _html(at)
-    assert "ALPACA PAPER TRADING — SIMULATED MONEY ONLY" in html and "PAPER EXECUTION ACTIVE" in html
+    assert "The strategy trades your Alpaca paper account" in html and "Simulated money only" in html
     assert [m.label for m in at.metric] == ["Equity", "Today's P/L", "Total P/L", "Buying power"]
     assert "cash" in str(at.metric[3].delta)
     assert at.dataframe and at.get("plotly_chart")  # positions and current-vs-target weights
@@ -109,7 +108,9 @@ def test_every_view_renders_with_banners_and_account(trading_server):
         "Next cycle",
     ):
         assert f"<span>{fact}</span>" in html, fact  # under "Switches and schedule"
-    for view in ("Strategy", "Orders", "Risk", "Activity", "Performance", "Controls", "Diagnostics"):
+    views = at.segmented_control(key="trade_view").options
+    assert views == ["Positions", "Strategy", "Orders", "Performance", "Risk", "History", "Controls"]
+    for view in views[1:]:
         at.segmented_control(key="trade_view").set_value(view).run()
         assert_ok(at)
     at.segmented_control(key="trade_view").set_value("Strategy").run()
@@ -165,13 +166,13 @@ def test_trades_show_their_stage_and_alpaca_order_id(trading_server):
 def test_diagnostics_view_checks_the_connection_and_guards_the_test_order(trading_server):
     url, fake, clock = trading_server
     clock.advance(120)
-    at = page("trading", url, {"trade_view": "Diagnostics"})
+    at = page("trading", url, {"trade_view": "Controls"})  # the connection check sits under Controls
     at.run()
     assert_ok(at)
     at.text_input(key="trade_diag_symbols").set_value("UPA,UPB")
     at.button(key="trade_diag_run").click().run()
     assert_ok(at)
-    checks = at.dataframe[0].value
+    checks = next(d.value for d in at.dataframe if "step" in d.value.columns)
     assert list(checks["step"])[:4] == ["settings", "credentials", "sdk_client", "account"]
     assert set(checks[""]) == {"✓"}
     assert any("verified paper" in c.value for c in at.caption)
@@ -185,3 +186,21 @@ def test_diagnostics_view_checks_the_connection_and_guards_the_test_order(tradin
     assert_ok(at)
     assert any("it was canceled" in s.value for s in at.success), [s.value for s in at.success]
     assert len(fake.orders) == before + 1
+
+
+def test_with_the_brain_in_charge_there_is_nothing_of_the_strategy_to_run(brain_server):  # noqa: F811
+    """The Brain owns the account: no Strategy view, no "Run strategy now", no empty target or score columns."""
+    url, fake = brain_server
+    at = page("trading", url).run()
+    assert_ok(at)
+    assert "Dry run: no orders are sent" in _html(at)  # this test server's trading switches are off
+    views = at.segmented_control(key="trade_view").options
+    assert views == ["Positions", "Orders", "Performance", "Risk", "History", "Controls"]
+    positions = next(d.value for d in at.dataframe if "symbol" in d.value.columns)
+    assert "target_weight" not in positions.columns and "signal_score" not in positions.columns
+    assert not at.get("plotly_chart")  # nothing to compare against
+    at.segmented_control(key="trade_view").set_value("Controls").run()
+    assert_ok(at)
+    keys = {b.key for b in at.button}
+    assert "trade_run" not in keys and "trade_diag_run" in keys and "trade_close_all" in keys
+    assert fake.orders == {}

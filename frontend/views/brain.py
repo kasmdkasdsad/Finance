@@ -103,7 +103,7 @@ def _execution_panel(ex: dict[str, Any]) -> None:
         ui.status(
             "yellow",
             "The Brain owns the Alpaca PAPER account; its orders are not sent right now",
-            "; ".join(ex["blockers_scheduled"]),
+            "; ".join(map(ui.plain, ex["blockers_scheduled"])),
         )
     else:
         ui.status("green", "The Brain owns the Alpaca PAPER account and trades on its own")
@@ -155,17 +155,18 @@ def _actions(ex: dict[str, Any] | None) -> None:
         )
 
 
-def _status(status: dict[str, Any], ex: dict[str, Any] | None) -> None:
-    last = status.get("last_cycle")
-    latest = (ex or {}).get("last_cycle") or {}
+def _status(status: dict[str, Any], ex: dict[str, Any] | None, cycles: list[dict[str, Any]]) -> None:
+    latest = cycles[0] if cycles else None
+    summary = (latest or {}).get("summary") or {}
     ui.kpis(
         [
-            ui.Kpi("Last cycle", f"#{last['id']}" if last else "none yet", last["status"] if last else None,
-                   delta_color="off", arrow="off"),
-            ui.Kpi("Orders sent by the Brain", latest.get("orders_sent", 0), help="in the latest cycle"),
-            ui.Kpi("Open predictions", status["open_predictions"]),
-            ui.Kpi("Agents", f"{status['agents']['enabled']} / {status['agents']['registered']}", "enabled",
-                   delta_color="off", arrow="off"),
+            ui.Kpi("Last cycle", ui.since(latest["started_at"]) if latest else "none yet",
+                   f"#{latest['id']} · {latest['status']}" if latest else None, delta_color="off", arrow="off"),
+            ui.Kpi("Trades proposed", summary.get("trades_proposed", 0),
+                   f"{summary.get('risk_approved', 0)} risk-approved", delta_color="off", arrow="off"),
+            ui.Kpi("Orders sent by the Brain", ((ex or {}).get("last_cycle") or {}).get("orders_sent", 0),
+                   help="in the latest cycle"),
+            ui.Kpi("Open predictions", status["open_predictions"], help="graded against real prices when due"),
         ],
         key="brain_status",
     )  # fmt: skip
@@ -1760,8 +1761,8 @@ def render() -> None:
     if ex is not None:
         _execution_panel(ex)
     _actions(ex)
-    _status(status, ex)
     cycles = guarded(lambda: api().get(f"{BASE}/cycles", limit=50), "cycle history") or []
+    _status(status, ex, cycles)
     if not cycles:
         st.info("The Brain has not run yet. Run a cycle above.", icon=":material/lightbulb:")
         _layers_banner(bool(status.get("owns_account")))

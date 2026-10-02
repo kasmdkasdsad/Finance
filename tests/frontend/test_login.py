@@ -90,6 +90,29 @@ def test_a_signed_cookie_opens_the_dashboard_and_survives_a_new_tab(monkeypatch)
         assert TOKEN not in rendered(at)
 
 
+def test_the_cloud_navigation_is_six_pages_with_a_tab_bar_for_phones(monkeypatch):
+    at = app(auth.issue(HASH, time.time(), 3600), monkeypatch)
+    assert not at.exception
+    assert list(at.session_state["qp_pages"]) == [
+        "",
+        "trading",
+        "brain",
+        "options-intelligence",
+        "research",
+        "system",
+    ]
+    tab_bar = [e.proto.label for e in at.get("page_link")][:5]
+    assert tab_bar == ["Home", "Portfolio", "Brain", "Options", "Research"]
+
+
+def test_locally_the_older_tools_are_still_listed(monkeypatch):
+    monkeypatch.setenv("QP_DEPLOYMENT", "local")
+    monkeypatch.delenv("QP_DASHBOARD_PASSWORD_HASH")
+    at = app(None, monkeypatch)
+    assert not at.exception
+    assert {"overview", "stock", "picks", "model-lab", "sports"} <= set(at.session_state["qp_pages"])
+
+
 @pytest.mark.parametrize(
     "case", ["forged", "expired", "other password", "revoked", "garbage", "empty", "not ascii", "odd digits"]
 )

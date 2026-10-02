@@ -179,8 +179,8 @@ an AI model (`POST /registry/models/{id}/approve`, typed confirmation). The repl
 experiments | learning | portfolio | positions | greeks | performance | counterfactuals |
 missed-opportunities`, `POST /options/research/run`, `POST /options/learn`;
 `/api/v1/evolution/status | changes | relationships`, `POST /evolution/run`; `/api/v1/registry/models`;
-`/api/v1/brain/status` carries an options summary. Dashboard pages: **Options Intelligence** and
-**Market Evolution**.
+`/api/v1/brain/status` carries an options summary. Dashboard pages: **Options** and
+*Research → Market changes*.
 
 ## 10. What is established — and what is not
 

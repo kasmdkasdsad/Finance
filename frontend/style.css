@@ -105,6 +105,9 @@ h1, h2, h3 { letter-spacing: -0.015em; }
 }
 .qp-signout button:hover { border-color: rgba(128, 128, 128, 0.7); }
 
+/* the phone tab bar: hidden on wide screens (the top bar is there) */
+.st-key-qp_tabbar { display: none !important; }
+
 /* ---------- phones ---------- */
 @media (max-width: 640px) {
   [data-testid="stMainBlockContainer"] { padding: 4.25rem 0.85rem 3rem; }
@@ -117,5 +120,22 @@ h1, h2, h3 { letter-spacing: -0.015em; }
   [class*="st-key-kpis"] [data-testid="stMetric"] { padding: 0.6rem 0.75rem; }
   [data-testid="stMetricValue"] { font-size: 1.25rem !important; }
   .qp-login { margin-top: 4vh; padding: 1.6rem 1.25rem; box-shadow: none; }
+  [data-testid="stHeaderLogo"], [data-testid="stLogo"] { height: 1.5rem !important; max-width: 9.5rem; object-fit: contain; }
   [data-testid="stTabs"] button[role="tab"] { padding-left: 0.6rem; padding-right: 0.6rem; }
+
+  /* the tab bar: the five main pages, one tap away, fixed to the bottom of the screen */
+  [data-testid="stMainBlockContainer"] { padding-bottom: 6.5rem; }
+  .st-key-qp_tabbar {
+    display: flex !important; position: fixed; left: 0; right: 0; bottom: 0; z-index: 999990;
+    justify-content: space-around; align-items: stretch; gap: 0 !important;
+    padding: 0.3rem 0.25rem calc(0.35rem + env(safe-area-inset-bottom));
+    background: var(--qp-bg, #fff); border-top: 1px solid var(--qp-line, #E3E7ED);
+  }
+  .st-key-qp_tabbar > div { flex: 1 1 0; min-width: 0; width: auto !important; }
+  .st-key-qp_tabbar a {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.1rem;
+    padding: 0.3rem 0.1rem; border-radius: 0.6rem; text-decoration: none;
+  }
+  .st-key-qp_tabbar a span { margin: 0 !important; font-size: 0.68rem; line-height: 1.1; }
+  .st-key-qp_tabbar a [data-testid="stIconMaterial"] { font-size: 1.35rem; }
 }

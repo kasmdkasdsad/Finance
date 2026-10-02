@@ -1,7 +1,9 @@
 """QuantPulse dashboard — the pages and the navigation (served by ``frontend/app.py``).
 
-Nothing renders before the sign-in. The trading pages come first in the top bar; the analytics tools sit
-under "More". Every page header carries the PAPER pill: QuantPulse only ever trades Alpaca's paper account.
+Nothing renders before the sign-in. Six pages in the top bar: Home, Portfolio, Brain, Options, Research and
+System; on a phone the first five are also a tab bar at the bottom of the screen. The older analytics tools
+are only listed when running locally. Every page header carries the Paper pill: QuantPulse only ever trades
+Alpaca's paper account.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from frontend import auth, ui  # noqa: E402
 from frontend.api_client import ApiClient, ApiError  # noqa: E402
 from frontend.views import (  # noqa: E402
     brain,
-    evolution,
     model_lab,
     options,
     options_brain,
@@ -38,10 +39,10 @@ from frontend.views import (  # noqa: E402
     vehicle,
 )
 
-ICON = ROOT / "assets" / "quantpulse.png"
+STATIC = Path(__file__).with_name("static")
 st.set_page_config(
     page_title="QuantPulse",
-    page_icon=str(ICON) if ICON.is_file() else ":material/monitoring:",
+    page_icon=str(STATIC / "icon.png"),
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -49,7 +50,7 @@ ui.inject_css()
 
 
 def sidebar() -> None:
-    """Settings, out of the way: the connection, auto-refresh and Sign out."""
+    """Settings, out of the way: auto-refresh and Sign out (locally also the API address and token)."""
     with st.sidebar:
         st.markdown("**Settings**")
         if auth.cloud():
@@ -68,56 +69,47 @@ def sidebar() -> None:
         st.session_state["api_url"], st.session_state["api_token"] = url.rstrip("/"), token
         try:
             health = ApiClient(url, token or None, timeout=5).health()
-            st.badge(f"API online · v{health['version']}", icon=":material/check_circle:", color="green")
+            st.badge(f"Connected · v{health['version']}", icon=":material/check_circle:", color="green")
         except ApiError:
             st.badge("API offline", icon=":material/cloud_off:", color="red")
-        live = st.toggle(
-            "Auto-refresh", value=True, help="Home and the live market panels update by themselves"
-        )
-        seconds = st.select_slider(
-            "Every", [15, 30, 60, 120], value=30, disabled=not live, format_func=lambda s: f"{s}s"
-        )
-        st.session_state["refresh_seconds"] = seconds if live else None
+        live = st.toggle("Refresh every 30 s", value=True, help="Home updates by itself")
+        st.session_state["refresh_seconds"] = 30 if live else None
         if auth.password_hash():
             st.html(auth.sign_out_form())
 
 
 auth.require_login()  # nothing below renders (no page, no data, no control) before the password is verified
 sidebar()
-if ICON.is_file():
-    st.logo(str(ICON), size="large")
+st.logo(str(STATIC / "logo.png"), size="large", icon_image=str(STATIC / "logo.png"))
 
 
 def page(view, title: str, icon: str, path: str, **kw) -> st.Page:  # type: ignore[no-untyped-def]
     return st.Page(view.render, title=title, icon=f":material/{icon}:", url_path=path, **kw)
 
 
-tools = [
-    page(system, "System status", "monitor_heart", "system"),
-    page(evolution, "Market evolution", "timeline", "evolution"),
-    page(overview, "Market overview", "dashboard", "overview"),
-    page(stock, "Stock intelligence", "query_stats", "stock"),
-    page(picks, "Daily picks", "star", "picks"),
-    page(track_record, "Track record", "fact_check", "track-record"),
-    page(model_lab, "Model lab", "model_training", "model-lab"),
-    page(options, "Options lab", "candlestick_chart", "options"),
-    page(sandbox, "Trading sandbox", "smart_toy", "sandbox"),
-    page(valuation, "Valuation", "account_balance", "valuation"),
-    page(portfolio, "Risk lab", "insights", "portfolio"),
+main = [
+    page(remote, "Home", "home", "remote", default=True),
+    page(trading, "Portfolio", "account_balance_wallet", "trading"),
+    page(brain, "Brain", "psychology", "brain"),
+    page(options_brain, "Options", "stacked_line_chart", "options-intelligence"),
+    page(research, "Research", "biotech", "research"),
 ]
-if not auth.cloud():  # local extras, unrelated to trading
-    tools += [
+pages: dict[str, list[st.Page]] = {"": [*main, page(system, "System", "monitor_heart", "system")]}
+if not auth.cloud():  # the older analytics tools, unrelated to the paper-trading Brain: local only
+    pages["Tools"] = [
+        page(overview, "Market overview", "dashboard", "overview"),
+        page(stock, "Stock intelligence", "query_stats", "stock"),
+        page(picks, "Daily picks", "star", "picks"),
+        page(track_record, "Track record", "fact_check", "track-record"),
+        page(model_lab, "Model lab", "model_training", "model-lab"),
+        page(options, "Options lab", "candlestick_chart", "options"),
+        page(sandbox, "Trading sandbox", "smart_toy", "sandbox"),
+        page(valuation, "Valuation", "account_balance", "valuation"),
+        page(portfolio, "Risk lab", "insights", "portfolio"),
         page(vehicle, "Asset lifecycle", "directions_car", "vehicle"),
         page(sports, "Sports hub", "sports_football", "sports"),
     ]
-pages = {
-    "": [
-        page(remote, "Home", "home", "remote", default=True),
-        page(brain, "Brain", "psychology", "brain"),
-        page(trading, "Portfolio", "account_balance_wallet", "trading"),
-        page(options_brain, "Options", "stacked_line_chart", "options-intelligence"),
-        page(research, "Research", "biotech", "research"),
-    ],
-    "More": tools,
-}
-st.navigation(pages, position="top").run()
+st.session_state["qp_pages"] = {p.url_path: p for group in pages.values() for p in group}  # for ui.link
+current = st.navigation(pages, position="top")
+ui.tab_bar(main)  # on a phone: one tap to any of the five main pages
+current.run()

@@ -4,8 +4,9 @@ page looks and reads the same on a desktop and on a phone. Text from the API is 
 from __future__ import annotations
 
 import html
+import re
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -15,8 +16,34 @@ STYLE = Path(__file__).with_name("style.css")
 
 
 def inject_css() -> None:
-    """The stylesheet: sent once per run to the page's event container (it takes no space)."""
+    """The stylesheet: sent once per run to the page's event container (it takes no space), plus the current
+    theme's background for the phone tab bar (Streamlit exposes no CSS variable for it)."""
     st.html(STYLE)
+    theme = getattr(st.context, "theme", None)
+    dark = getattr(theme, "type", None) == "dark"
+    bg, line = ("#0B0F17", "#262E3B") if dark else ("#FFFFFF", "#E3E7ED")
+    st.html(f"<style>:root {{ --qp-bg: {bg}; --qp-line: {line}; }}</style>")
+
+
+def link(path: str, label: str) -> None:
+    """A link to another page; nothing when that page is not in this session's navigation (frontend/dashboard.py
+    registers its pages by URL path in ``st.session_state["qp_pages"]``)."""
+    target = (st.session_state.get("qp_pages") or {}).get(path)
+    if target is not None:
+        st.page_link(target, label=label, icon=":material/arrow_forward:")
+
+
+def tab_bar(pages: Sequence[Any]) -> None:
+    """The main pages as a tab bar fixed to the bottom of a phone's screen (hidden on wider screens)."""
+    with st.container(key="qp_tabbar", horizontal=True):
+        for p in pages:
+            st.page_link(p)
+
+
+def plain(text: Any) -> str:
+    """Drop the setting names in brackets, e.g. "(QP_TRADING_SCHEDULER_REQUIRES_ARMING)": they mean nothing to
+    a reader; the documentation and System have them."""
+    return re.sub(r"\s*\((?:set )?QP_[^)]*\)", "", str(text)).strip()
 
 
 def md(text: Any) -> str:
@@ -96,6 +123,19 @@ def when(ts: str | None) -> str:
     except ValueError:
         return ts[:16].replace("T", " ")
     return f"{moment:%b} {moment.day}, {moment:%H:%M} UTC"
+
+
+def since(ts: str | None) -> str:
+    """``2026-10-01T14:05:09Z`` → ``12 min ago``."""
+    if not ts:
+        return "never"
+    try:
+        moment = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ts
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return ago(max(0.0, (datetime.now(UTC) - moment).total_seconds()))
 
 
 def ago(seconds: float | None) -> str:
