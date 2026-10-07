@@ -69,6 +69,21 @@ def test_the_option_limits_read_as_words_not_json(monkeypatch):
         assert text in body, text
 
 
+def test_the_options_page_says_which_underlyings_it_reads():
+    st_ = {"universe": ["SPY", "QQQ"], "scan": {"size": 300, "per_cycle": 16,
+                                                "last": {"read": [f"S{i}" for i in range(10)]}}}  # fmt: skip
+    line = options_brain._scan_line(st_)
+    assert line is not None
+    assert line.startswith(
+        "Reads 2 core underlyings every cycle, plus 16 a cycle from a rotating scan of the 300"
+    )
+    assert "(last: S0, S1, S2, S3, S4, S5, S6, S7…)" in line
+    assert options_brain._scan_line({"universe": ["SPY"], "scan": {"size": 0, "per_cycle": 16}}) == (
+        "Reads 1 core underlying every cycle."
+    )
+    assert options_brain._scan_line({}) is None
+
+
 def test_dollar_amounts_never_turn_into_a_formula():
     """Streamlit Markdown reads text between two dollar signs as LaTeX: every line with two amounts is escaped."""
     from frontend.components import today_split

@@ -41,6 +41,9 @@ class UnderlyingView:
     atm_iv_30d: float | None = None
     closes: dict[date, float] = field(default_factory=dict)
     problems: list[str] = field(default_factory=list)
+    # a single stock (an S&P 500 company) whose next earnings date could not be found: unlike an index fund it
+    # reports, so a position that avoids or sells volatility cannot tell whether an announcement is inside it
+    earnings_unknown: bool = False
 
     @property
     def usable(self) -> bool:

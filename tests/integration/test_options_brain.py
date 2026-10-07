@@ -4,7 +4,10 @@ at PAPER_ACTIVE — sent as a paper order through the trading service; later exi
 closed position feeds learning. Strategies still in research never trade."""
 
 from dataclasses import replace
+from datetime import timedelta
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from sqlalchemy import select
 
@@ -37,8 +40,10 @@ def _no_network(mock_net):
 
 
 async def client(tmp_path, clock, **overrides):
+    # one underlying unless a test turns the scan on (the scenarios below are written around MIDA alone)
     settings = {**OWNS, **ENABLED, "options_universe": "MIDA", "options_max_loss_per_trade": 1000.0,
-                "options_max_loss_pct_per_trade": 0.02, "options_max_underlying_risk_pct": 0.05, **overrides}  # fmt: skip
+                "options_max_loss_pct_per_trade": 0.02, "options_max_underlying_risk_pct": 0.05,
+                "options_scan_size": 0, **overrides}  # fmt: skip
     async for api in brain_client(tmp_path, clock, **settings):
         market = FakeOptionsMarket(clock, api.feed.live_price, broker=api.fake)
         market.vol_by["MIDA"] = 0.09  # fairly priced: about the stock's own realized volatility
@@ -264,6 +269,94 @@ async def test_each_strategy_builds_its_own_shadow_record(tmp_path):
         gates = {c.gate for c in await rows(api, OptionsTradeCandidateRow) if c.gate}
         assert gates <= {"this strategy already holds this underlying", "OptionsPortfolioAgent"}, gates
         assert not [b for b in api.fake.bodies if b.get("position_intent")]  # shadow is never an order
+
+
+async def test_the_scan_comes_round_to_hundreds_of_names(tmp_path):
+    """Options are looked for across the stock universe, not just the core list: each cycle reads a batch of the
+    most liquid names besides the core — up to half on the stock Brain's strongest views, the rest the longest
+    unread — so all 300 names on the list are read within a day's cycles, within Alpaca's free data rate."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock, options_scan_size=300, options_scan_per_cycle=16):
+        brain = api.container.options_brain
+        names = [f"S{i:03d}" for i in range(500)]  # most liquid first
+        ctx = SimpleNamespace(liquid=names, focus=["S400"], universe=names[:120])
+        consensus = {"S010": {"stance": "bullish", "score": 0.4, "confidence": 0.5},
+                     "S250": {"stance": "bearish", "score": -0.9, "confidence": 0.9},
+                     "S450": {"stance": "bullish", "score": 0.9, "confidence": 0.9}}  # fmt: skip
+        assert brain.scan_list(ctx) == names[:300]  # S400 and S450 are beyond the list
+        batch, info = await brain._scan_batch(ctx, consensus, {"MIDA", "S001"})
+        assert len(batch) == 16 and info["list"] == 300 and info["never_read"] == 299
+        assert info["signals"] == ["S250", "S010"]  # the strongest stock views first
+        # then the most liquid, none read yet
+        assert info["rotation"] == [n for n in names[:16] if n not in ("S001", "S010")]
+        seen: set[str] = set()
+        cycles = 0
+        while len(seen) < 299 and cycles < 40:  # S001 is held: read every cycle anyway
+            batch, info = await brain._scan_batch(ctx, consensus, {"MIDA", "S001"})
+            assert "S001" not in batch and len(batch) == 16
+            for u in batch:
+                brain._read_at[u] = clock.now()
+            seen |= set(batch)
+            clock.advance(5 * 60)
+            cycles += 1
+        # a session has 78 five-minute cycles: every name is read about four times a day
+        assert len(seen) == 299 and cycles <= 22, cycles
+        assert info["signals"] == ["S250", "S010"]  # strong views are read every cycle
+        assert brain.scan_list(None) == [] and (await brain._scan_batch(None, {}, set()))[0] == []
+
+
+async def test_a_scanned_name_is_read_and_traded_like_the_core(tmp_path):
+    """A name from the scan is perceived (chain, features, IV record), deliberated and traded in shadow exactly as
+    a core underlying is, through the same checks; its daily prices come from the price warehouse."""
+    from quantpulse.db.options_models import OptionsChainSnapshotRow
+
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock, options_scan_size=40, options_scan_per_cycle=6,
+                            options_exploration=False):  # fmt: skip
+        api.market.vol = 0.09  # every name fairly priced, as MIDA is
+        await promote(api, LONG_CALL, Stage.PAPER_SHADOW)
+        await run_cycle(api)
+        last = api.container.options_brain.last
+        read = last["scan"]["read"]
+        assert len(read) == 6 and "MIDA" not in read, last["scan"]
+        assert set(last["underlyings"]) == {"MIDA", *read}
+        snapped = {r.underlying for r in await rows(api, OptionsChainSnapshotRow)}
+        assert {"MIDA", *read} <= snapped
+        cands = await rows(api, OptionsTradeCandidateRow)
+        assert {c.underlying for c in cands} & set(read), [(c.underlying, c.gate) for c in cands]
+        shadow = await rows(api, OptionsPositionRow, mode="shadow")
+        assert {p.underlying for p in shadow} & set(read)
+        # the next cycle reads the next names (the strongest stock views aside)
+        clock.advance(35 * 60)
+        await run_cycle(api)
+        assert set(api.container.options_brain.last["scan"]["rotation"]).isdisjoint(last["scan"]["rotation"])
+        closes = await api.container.options_brain._closes(["MIDA", "NOPE"])
+        assert len(closes["MIDA"]) > 60 and "NOPE" not in closes
+
+
+async def test_a_scanned_company_gets_its_earnings_date_looked_up_once_a_day(tmp_path):
+    """Earnings dates are looked up for scanned companies (a fund has none); one that cannot be found is marked
+    unknown on the view, never guessed (the earnings agent then vetoes strategies that avoid events)."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock, brain_catalyst_analysis=True):
+        brain = api.container.options_brain
+        asked: list[str] = []
+        found = {"MIDA": None, "UPF": NOW.date() + timedelta(days=20)}
+
+        async def next_earnings(sym, asked=asked, found=found):
+            asked.append(sym)
+            return found.get(sym), "estimated"
+
+        brain._reference = SimpleNamespace(next_earnings=next_earnings)
+        ctx = SimpleNamespace(close=pd.DataFrame(), earnings={}, sectors={"MIDA": "Industrials", "UPF": "Energy",
+                                                                           "SPY": "ETF"})  # fmt: skip
+        views = await brain._perceive(["MIDA", "UPF", "SPY"], clock.now(), ctx)
+        assert views["MIDA"].earnings_unknown and not views["UPF"].earnings_unknown
+        # a fund has no earnings: it is not looked up, and not flagged
+        assert not views["SPY"].earnings_unknown and sorted(asked) == ["MIDA", "UPF"]
+        assert views["UPF"].features is not None and views["UPF"].features.event_days is not None
+        await brain._perceive(["MIDA", "UPF"], clock.now(), ctx)
+        assert sorted(asked) == ["MIDA", "UPF"]  # once a day
 
 
 async def test_nothing_is_sent_when_the_brain_does_not_own_the_account(tmp_path):

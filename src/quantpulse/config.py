@@ -742,6 +742,22 @@ class Settings(BaseSettings):
         default_factory=lambda: list(DEFAULT_OPTIONS_UNIVERSE),
         description="Underlyings whose chains are read each cycle (liquid names keep spreads tight).",
     )
+    options_scan_size: int = Field(
+        default=300,
+        ge=0,
+        le=600,
+        description="Besides QP_OPTIONS_UNIVERSE, this many of the stock universe's most liquid names (the S&P "
+        "500 and QP_TRADING_ETFS, by 20-day dollar volume) are scanned for option trades, a rotating batch each "
+        "cycle. 0: the core list only.",
+    )
+    options_scan_per_cycle: int = Field(
+        default=16,
+        ge=0,
+        le=60,
+        description="Scanned names whose chains are read each cycle, beyond the core list and the names with open "
+        "positions: the stock Brain's strongest views first (up to half), then the longest unread. Alpaca's "
+        "free data plan allows about 200 requests a minute.",
+    )
     options_allowed_structures: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_OPTIONS_STRUCTURES),
         description="Structure families that may be sent to the paper account. Only defined-risk families can "

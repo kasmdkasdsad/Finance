@@ -82,6 +82,22 @@ def _limits(limits: dict[str, Any]) -> None:
     )  # fmt: skip
 
 
+def _scan_line(st_: dict[str, Any]) -> str | None:
+    """Which underlyings the Options Brain reads: the core list every cycle, plus the rotating scan."""
+    core = st_.get("universe") or []
+    scan = st_.get("scan") or {}
+    size, per = int(scan.get("size") or 0), int(scan.get("per_cycle") or 0)
+    if not core and not (size and per):
+        return None
+    line = f"Reads {len(core)} core underlying{'s' if len(core) != 1 else ''} every cycle"
+    if size and per:
+        line += f", plus {per} a cycle from a rotating scan of the {size} most liquid stocks and ETFs"
+        read = ((scan.get("last") or {}).get("read")) or []
+        if read:
+            line += f" (last: {', '.join(read[:8])}{'…' if len(read) > 8 else ''})"
+    return line + "."
+
+
 def _overview(st_: dict[str, Any]) -> None:
     lab = st_.get("lab") or {}
     stages = lab.get("by_stage") or {}
@@ -121,6 +137,9 @@ def _overview(st_: dict[str, Any]) -> None:
     )  # fmt: skip
     if stages:
         _ladder(stages, exploring)
+    scan = _scan_line(st_)
+    if scan:
+        st.caption(ui.md(scan))
     last = st_.get("last_pass") or {}
     if cleared:  # without a cleared strategy the status line above already says why
         for n in (st_.get("last_cycle") or {}).get("notes") or []:

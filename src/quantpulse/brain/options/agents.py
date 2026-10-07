@@ -120,10 +120,17 @@ def earnings_event(c: CandidateContext) -> Opinion:
     f = c.view.features
     days = f.event_days if f else None
     life = c.cand.dte
+    fam = FAMILIES[c.genome.family]
+    if (
+        days is None
+        and c.view.earnings_unknown
+        and (c.genome.event_filter == "avoid" or fam.vol == "short_vol")
+    ):
+        return _op("EarningsEventAgent", 0, ["a company whose next earnings date could not be found: an announcement "
+                                             "inside the option's life cannot be ruled out"], veto=True)  # fmt: skip
     if days is None:
         return _op("EarningsEventAgent", 0, ["no known earnings date (index ETFs have none)"], abstain=True)
     inside = days <= life
-    fam = FAMILIES[c.genome.family]
     if inside and c.genome.event_filter == "avoid":
         return _op("EarningsEventAgent", 0, [f"earnings in {days} days, inside the option's {life}-day life; the "
                                              "strategy avoids events"], veto=True)  # fmt: skip

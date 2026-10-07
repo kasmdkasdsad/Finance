@@ -305,6 +305,8 @@ class TradingInputs:
     earnings: dict[str, tuple[date, str]] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     skipped: dict[str, str] = field(default_factory=dict)
+    # every candidate with enough daily bars, most liquid (20-day dollar volume) first: wider than the universe
+    liquid: list[str] = field(default_factory=list)
 
     @property
     def model_z(self) -> dict[str, float]:
@@ -435,6 +437,7 @@ class TradingDataLoader:
             missing_quotes=missing_quotes,
             quality={sym: assess_quote(q, s.trading_max_quote_age_seconds) for sym, q in quotes.items()},
             skipped=skipped,
+            liquid=[sym for sym in adv.index if sym in frames and pd.notna(adv[sym])],
         )
         consolidated = sum(1 for q in quotes.values() if q.nbbo_feed)
         if quotes and any(q.feed == "iex" for q in quotes.values()):

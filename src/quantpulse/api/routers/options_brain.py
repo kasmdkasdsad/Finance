@@ -57,6 +57,8 @@ async def status(c: Container = ContainerDep) -> dict[str, Any]:
         "model-priced chains (no historical option quotes), always labelled",
         "data_configured": bool(data is not None and data.configured()),
         "universe": s.options_universe,
+        "scan": {"size": s.options_scan_size, "per_cycle": s.options_scan_per_cycle,
+                 "last": (c.options_brain.last or {}).get("scan")},
         "allowed_structures": s.options_allowed_structures,
         "limits": {
             "max_loss_per_trade": s.options_max_loss_per_trade,

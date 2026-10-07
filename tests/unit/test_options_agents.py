@@ -111,3 +111,23 @@ def test_every_agent_abstains_rather_than_guesses(ctx):
                A.volatility_strategy, A.earnings_event):  # fmt: skip
         assert fn(ctx).verdict == "abstain", fn.__name__
     assert timedelta(0) == timedelta(0)
+
+
+def test_a_company_whose_earnings_date_is_unknown_is_never_traded_blind(ctx):
+    """The scan reaches hundreds of companies. One whose next earnings date could not be found may report inside
+    the option's life: a strategy that avoids events, or one that sells volatility, is vetoed there. A fund (no
+    earnings) is not flagged, and a strategy that buys volatility and ignores events only abstains."""
+    from dataclasses import replace
+
+    unknown = replace(ctx, view=replace(ctx.view, earnings_unknown=True))
+    assert A.earnings_event(unknown).verdict == "veto"  # G avoids events
+    assert "EarningsEventAgent" in {x["agent"] for x in A.deliberate(unknown)["vetoes"]}
+    selling = replace(unknown, genome=Genome("bull_put_spread", "bullish", entry_signal="trend_up", dte_min=20,
+                                             dte_max=45, width_pct=0.05, event_filter="ignore"))  # fmt: skip
+    assert A.earnings_event(selling).verdict == "veto"
+    buying = replace(unknown, genome=Genome("long_call", "bullish", entry_signal="trend_up", dte_min=20, dte_max=45,
+                                            event_filter="ignore"))  # fmt: skip
+    assert A.earnings_event(buying).verdict == "abstain"
+    assert A.earnings_event(ctx).verdict == "abstain"  # a fund, or a date nobody needed: as before
+    known = replace(unknown, view=replace(unknown.view, features=replace(ctx.view.features, event_days=60)))
+    assert A.earnings_event(known).verdict != "veto"  # found: after the option's life

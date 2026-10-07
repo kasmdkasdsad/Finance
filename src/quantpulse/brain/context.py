@@ -194,6 +194,8 @@ class BrainContext:
     track_record: dict[str, Any] = field(
         default_factory=dict
     )  # the scorecard, as the learning agent reads it
+    # every stock candidate (the S&P 500 and the trading ETFs) with prices, most liquid first: the option scan's list
+    liquid: list[str] = field(default_factory=list)
 
     @property
     def held(self) -> list[str]:

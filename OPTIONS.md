@@ -48,6 +48,21 @@ execute      shadow always; paper at PAPER_ACTIVE (one-contract exploration from
 learn        attribution, critique, counterfactual, learning events; weights, lessons, graded misses (daily)
 ```
 
+**Which underlyings.** The core list (`QP_OPTIONS_UNIVERSE`) and every underlying with an open position are
+read every cycle. Besides them, the Options Brain scans the stock universe's 300 most liquid names (the S&P 500
+and the trading ETFs, by 20-day dollar volume; `QP_OPTIONS_SCAN_SIZE`), 16 a cycle (`QP_OPTIONS_SCAN_PER_CYCLE`):
+up to half are the names the stock Brain holds its strongest views on that cycle, where an option expression is
+likeliest; the rest are the longest unread, so every name comes round — a session's 78 cycles read each about
+four times a day, and each builds its own implied-volatility history from its first read (IV rank needs 60
+days of it; until then strategies that filter on it do not enter there). Reading every name every cycle is not
+possible on Alpaca's free data plan (about 200 requests a minute; a chain is one to several requests) and would
+outrun a five-minute cycle. A scanned name passes exactly the checks a core one does: quote age, spread and open
+interest per leg, the agents, the risk engine. Its daily prices come from the price warehouse the trading
+loader keeps; its next earnings date is looked up once a day. A company whose date cannot be found is marked
+unknown, never guessed: the earnings agent vetoes strategies there that avoid events or sell volatility. At most
+60 candidates a cycle (the best by verdict) are deliberated and recorded; the research lab still backtests the
+core list.
+
 **Options versus shares.** For each candidate the option's verdict plus `QP_OPTIONS_PRIORITY_WEIGHT` is set
 against the stock agents' consensus on the same underlying. The weight can tip a close call toward the option
 (and then the stock entry on that name is marked "expressed through options"); it can never make a failing
@@ -200,7 +215,8 @@ exits and the quote checks are unchanged.
 | `QP_OPTIONS_ENABLED` | `true` | research, shadow trading and the Options Brain |
 | `QP_OPTIONS_EXECUTION` | `true` | paper option orders (false: shadow only) |
 | `QP_OPTIONS_PRIORITY_WEIGHT` | `0.5` | favour options over shares in close calls; never forces |
-| `QP_OPTIONS_UNIVERSE` | SPY,QQQ,IWM,AAPL,MSFT,NVDA,AMZN,META,TSLA,AMD,GOOGL,NFLX | chains read each cycle |
+| `QP_OPTIONS_UNIVERSE` | SPY,QQQ,IWM,AAPL,MSFT,NVDA,AMZN,META,TSLA,AMD,GOOGL,NFLX | the core: chains read every cycle |
+| `QP_OPTIONS_SCAN_SIZE` / `_SCAN_PER_CYCLE` | 300 / 16 | the scan: the most liquid names of the stock universe, a rotating batch a cycle (0: the core only) |
 | `QP_OPTIONS_ALLOWED_STRUCTURES` | the seven defined-risk defaults | may drop families; adding needs a person |
 | `QP_OPTIONS_MAX_LOSS_PER_TRADE` / `_PCT_PER_TRADE` | $2,000 / 2% | per new position |
 | `QP_OPTIONS_MAX_TOTAL_RISK_PCT` / `_UNDERLYING_RISK_PCT` | 25% / 5% | book limits |

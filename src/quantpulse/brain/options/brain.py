@@ -24,10 +24,10 @@ import random
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from quantpulse.config import Settings
 from quantpulse.core.clock import Clock
@@ -35,6 +35,7 @@ from quantpulse.core.market_calendar import NEW_YORK, is_market_open, regular_cl
 from quantpulse.db.models import BrokerOrderRow
 from quantpulse.db.options_models import (
     OptionsAssignmentEventRow,
+    OptionsChainSnapshotRow,
     OptionsCounterfactualRow,
     OptionsExecutionLedgerRow,
     OptionsExerciseEventRow,
@@ -63,6 +64,7 @@ from quantpulse.options.pricing import implied_vol
 from quantpulse.options.quotes import OptionQuote
 from quantpulse.options.selection import Candidate, Spec, build, empirical_distribution, evaluate, score
 from quantpulse.options.structures import FAMILIES, Leg, Structure
+from quantpulse.schemas.common import DataStatus
 from quantpulse.services.options_lab import OptionsLabService, jsonable
 from quantpulse.services.trading_options import option_key
 from quantpulse.services.trading_risk import (
@@ -74,7 +76,7 @@ from quantpulse.services.trading_risk import (
 )
 
 from . import agents as A
-from .perception import UnderlyingView, perceive, record
+from .perception import HISTORY_DAYS, UnderlyingView, perceive, record
 
 logger = logging.getLogger(__name__)
 SHADOW_PER_CYCLE = 5
@@ -82,6 +84,11 @@ SHADOW_PER_CYCLE = 5
 EXPLORING = frozenset(s.value for s in promotion.EXPLORATION_STAGES)
 # open shadow positions at most (each is marked every cycle); a strategy holds at most one per underlying
 SHADOW_MAX_OPEN = 60
+# candidates recorded (deliberated, graded later) per cycle at most: the best by verdict; the scan widens the field
+RECORDED_PER_CYCLE = 60
+# option chains read at once (Alpaca's own limiter paces the requests: about 3 a second, 4 in flight)
+CHAINS_AT_ONCE = 4
+EARNINGS_TIMEOUT = 5.0  # seconds for one company's next earnings date
 # "assigned": a leg went (assigned early, or closed outside QuantPulse) while others remain — frozen for a person
 LIVE = ("pending", "open", "closing", "assigned")
 # an order that will not fill any further (whatever part of it did fill stays filled)
@@ -104,10 +111,11 @@ class OptionsCycle:
     no_trade: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
     skipped: Counter[str] = field(default_factory=Counter)
+    scan: dict[str, Any] = field(default_factory=dict)  # the rotating scan's batch this cycle
 
     def summary(self) -> dict[str, Any]:
         return jsonable({
-            "at": self.at.isoformat(), "underlyings": self.views, "orders": [
+            "at": self.at.isoformat(), "underlyings": self.views, "scan": self.scan, "orders": [
                 {"key": option_key(o), "family": o.family, "underlying": o.underlying, "qty": o.qty,
                  "limit": o.limit_price, "kind": o.kind, "opening": o.opening, "exploration": o.exploration}
                 for o in self.orders],
@@ -193,6 +201,10 @@ class OptionsBrain:
         self._lab = lab
         self._reference = reference
         self.last: dict[str, Any] | None = None
+        # when each underlying's chain was last read (the scan's rotation; seeded from the chain record)
+        self._read_at: dict[str, datetime] = {}
+        self._read_seeded = False
+        self._earnings: dict[str, tuple[date, date | None]] = {}  # underlying -> (looked up on, next date)
 
     # ------------------------------------------------------------------ the cycle
     async def run(
@@ -219,7 +231,10 @@ class OptionsBrain:
         paper_allowed = paper_allowed and s.options_execution and market_open
         versions = await self._lab.eligible_versions()
         open_rows = await self._open_positions()
-        unders = list(dict.fromkeys([*s.options_universe, *(r.underlying for r in open_rows)]))
+        # every cycle: the core list and every underlying with an open position; then a rotating batch of the scan
+        held = [r.underlying for r in open_rows]
+        scan, cyc.scan = await self._scan_batch(ctx, consensus or {}, {*s.options_universe, *held})
+        unders = list(dict.fromkeys([*s.options_universe, *held, *scan]))
         views = await self._perceive(unders, now, ctx)
         for u, v in views.items():
             cyc.views[u] = v.summary()
@@ -247,21 +262,128 @@ class OptionsBrain:
         self.last = cyc.summary()
         return cyc
 
+    # ------------------------------------------------------------------ the scan
+    def scan_list(self, ctx: Any) -> list[str]:
+        """The names scanned in rotation besides the core list: the stock universe's most liquid
+        (QP_OPTIONS_SCAN_SIZE of the S&P 500 and the trading ETFs, by 20-day dollar volume)."""
+        n = self._s.options_scan_size
+        if n <= 0 or ctx is None:
+            return []
+        ranked = list(getattr(ctx, "liquid", None) or getattr(ctx, "universe", None) or [])
+        return list(dict.fromkeys(ranked))[:n]
+
+    async def _scan_batch(
+        self, ctx: Any, consensus: Mapping[str, Any], skip: set[str]
+    ) -> tuple[list[str], dict[str, Any]]:
+        """This cycle's batch of the scan: up to half are the names the stock Brain holds the strongest views on
+        (or studies closely) this cycle, where an option expression is likeliest; the rest are the longest
+        unread (never read first, the most liquid first), so every name on the list keeps coming round."""
+        names = self.scan_list(ctx)
+        pool = [u for u in names if u not in skip]
+        n = self._s.options_scan_per_cycle
+        if not pool or n <= 0:
+            return [], {"list": len(names), "read": []}
+        rank = {u: i for i, u in enumerate(pool)}
+        focus = set(getattr(ctx, "focus", None) or [])
+        strength: dict[str, float] = {}
+        for u in pool:
+            sv = _stock_view(consensus.get(u))
+            if sv is not None and abs(sv["score_signed"]) > 0:
+                strength[u] = abs(sv["score_signed"])
+        signals = sorted((u for u in pool if u in strength or u in focus),
+                         key=lambda u: (-strength.get(u, 0.0), rank[u]))[: n // 2]  # fmt: skip
+        last = await self._last_read()
+        oldest = sorted((u for u in pool if u not in signals),
+                        key=lambda u: (last[u].timestamp() if u in last else 0.0, rank[u]))  # fmt: skip
+        rotation = oldest[: n - len(signals)]
+        never = sum(1 for u in pool if u not in last)
+        return [*signals, *rotation], {
+            "list": len(names), "read": [*signals, *rotation], "signals": signals, "rotation": rotation,
+            "never_read": never,
+        }  # fmt: skip
+
+    async def _last_read(self) -> dict[str, datetime]:
+        """When each underlying's chain was last read: kept in memory, seeded once from the chain record (the
+        last week) so a restart carries on the rotation instead of starting it over."""
+        if not self._read_seeded:
+            self._read_seeded = True
+            since = self._clock.now() - timedelta(days=7)
+            try:
+                async with self._db.session() as s:
+                    found = (await s.execute(
+                        select(OptionsChainSnapshotRow.underlying, func.max(OptionsChainSnapshotRow.fetched_at))
+                        .where(OptionsChainSnapshotRow.fetched_at >= since)
+                        .group_by(OptionsChainSnapshotRow.underlying))).all()  # fmt: skip
+            except Exception:
+                logger.exception("reading when option chains were last read failed")
+                found = []
+            for u, at in found:
+                if at is not None and u not in self._read_at:
+                    self._read_at[u] = at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+        return self._read_at
+
+    async def _closes(self, symbols: Sequence[str]) -> dict[str, dict[date, float]]:
+        """Daily closes for underlyings outside the stock Brain's universe, read from the price warehouse in one go
+        (the trading loader keeps every candidate's prices there); real prices only. What is not found falls back
+        to one history request per underlying."""
+        panel_of = getattr(self._market, "daily_panel", None)
+        if not symbols or panel_of is None:
+            return {}
+        try:
+            panel = await asyncio.wait_for(
+                panel_of(list(symbols), HISTORY_DAYS), timeout=self._s.brain_research_timeout_seconds * 2
+            )
+        except Exception as exc:
+            logger.warning("daily prices for %d scanned underlyings unavailable: %s", len(symbols), exc)
+            return {}
+        out: dict[str, dict[date, float]] = {}
+        for sym, frame in panel.frames.items():
+            if panel.status(sym) is DataStatus.SYNTHETIC or "close" not in frame:
+                continue
+            col = frame["close"].dropna()
+            if len(col):
+                out[sym] = {ts.date() if hasattr(ts, "date") else ts: float(v) for ts, v in col.items()}
+        return out
+
+    async def _next_earnings(self, u: str, today: date) -> date | None:
+        """A company's next earnings date, looked up once a day (the calendar's quota is small)."""
+        if self._reference is None:
+            return None
+        if u in self._earnings and self._earnings[u][0] == today:
+            return self._earnings[u][1]
+        try:
+            nxt, _ = await asyncio.wait_for(self._reference.next_earnings(u), timeout=EARNINGS_TIMEOUT)
+        except Exception:  # unknown: recorded on the view, never guessed
+            nxt = None
+        found = nxt if nxt is not None and nxt >= today else None
+        self._earnings[u] = (today, found)
+        return found
+
     async def _perceive(self, unders: Sequence[str], now: datetime, ctx: Any) -> dict[str, UnderlyingView]:
         assert self.data is not None
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(CHAINS_AT_ONCE)
         out: dict[str, UnderlyingView] = {}
+        today = now.astimezone(NEW_YORK).date()
+        known = getattr(ctx, "close", None) if ctx is not None else None
+        in_ctx = set(known.columns) if known is not None else set()
+        warehouse = await self._closes([u for u in unders if u not in in_ctx]) if ctx is not None else {}
+        sectors = dict(getattr(ctx, "sectors", None) or {}) if ctx is not None else {}
+        look_up = self._s.brain_catalyst_analysis
 
         async def one(u: str) -> None:
             async with sem:
-                earnings = None
                 ev = getattr(ctx, "earnings", {}) if ctx is not None else {}
-                if u in ev:
-                    earnings = ev[u][0]
+                earnings = ev[u][0] if u in ev else None
+                # a company (an S&P 500 member, by its sector) reports earnings; an index or sector fund does not
+                company = sectors.get(u) not in (None, "ETF")
+                if earnings is None and company and look_up:
+                    earnings = await self._next_earnings(u, today)
                 closes = None
-                if ctx is not None and u in getattr(ctx, "close", {}):
+                if u in in_ctx:
                     col = ctx.close[u].dropna()
                     closes = {ts.date() if hasattr(ts, "date") else ts: float(v) for ts, v in col.items()}
+                elif u in warehouse:
+                    closes = warehouse[u]
                 try:
                     view = await asyncio.wait_for(
                         perceive(u, data=self.data, market=self._market, db=self._db, now=now,  # type: ignore[arg-type]
@@ -271,6 +393,8 @@ class OptionsBrain:
                     )  # fmt: skip
                 except TimeoutError:
                     view = UnderlyingView(u, now, problems=["option data timed out"])
+                view.earnings_unknown = company and earnings is None
+                self._read_at[u] = now
                 out[u] = view
                 try:
                     await record(self._db, view, now)
@@ -746,6 +870,11 @@ class OptionsBrain:
                 s.options_priority_weight if item["intent"] is not None else 0.0
             )
         scored.sort(key=lambda x: x["rank"], reverse=True)
+        if len(scored) > RECORDED_PER_CYCLE:  # the best are deliberated and recorded; the rest are counted
+            cyc.skipped[f"ranked below this cycle's best {RECORDED_PER_CYCLE}"] += (
+                len(scored) - RECORDED_PER_CYCLE
+            )
+            scored = scored[:RECORDED_PER_CYCLE]
         # this cycle's new positions: paper by underlying, shadow by (strategy, underlying)
         chosen_paper: set[str] = set()
         chosen_shadow: set[tuple[int | None, str]] = set()
