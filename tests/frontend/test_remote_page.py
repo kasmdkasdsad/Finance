@@ -21,7 +21,7 @@ def test_home_shows_the_status_the_account_and_the_brain(brain_server):  # noqa:
     labels = [m.label for m in at.metric]
     assert labels == ["Equity", "Today's P&L", "Total P&L", "Buying power"]  # four cards, nothing more
     positions = next(d.value for d in at.dataframe if "Symbol" in d.value.columns)
-    assert list(positions.columns) == ["Symbol", "Shares", "Value", "Today", "Total", "Return"]
+    assert list(positions.columns) == ["Symbol", "Shares", "Value", "Today", "Total", "Return", "Stop"]
     assert "UPA" in set(positions["Symbol"])
     # the table is Alpaca's positions read live with the account, and today's P&L is split between them
     acct = httpx.get(f"{url}/api/v1/trading/account").json()

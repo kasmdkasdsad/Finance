@@ -200,3 +200,25 @@ def test_the_brain_kill_switch_is_one_click_away(brain_server):
     next(b for b in at.button if b.label == "Allow Brain orders again").click().run()
     assert not httpx.get(f"{url}/api/v1/brain/kill-switch").json()["active"]
     assert all(m == "GET" for m, _ in fake.log) and fake.orders == {}
+
+
+def test_each_position_says_when_it_is_sold():
+    trailing = {
+        "stop_price": 112.8,
+        "avg_price": 100.0,
+        "peak_price": 120.0,
+        "trailing": True,
+        "trails_from": 110.0,
+    }
+    assert brain_view._stop_line(trailing) == (
+        "sells below $112.80, trailing the high of $120.00 (6.0% under it); it keeps +12.8% on the $100.00 paid"
+    )
+    fixed = {
+        "stop_price": 92.0,
+        "avg_price": 100.0,
+        "peak_price": 104.0,
+        "trailing": False,
+        "trails_from": 110.0,
+    }
+    assert brain_view._stop_line(fixed) == "sells below $92.00; it starts trailing the high at $110.00"
+    assert brain_view._stop_line({"stop_price": None}) == "none recorded"

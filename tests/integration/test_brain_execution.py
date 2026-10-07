@@ -365,6 +365,44 @@ async def test_every_position_gets_a_thesis_reconciled_with_alpaca(tmp_path, mon
         assert closed[gone]["exit_reason"].startswith("closed outside the Brain")
 
 
+async def test_a_winners_stop_trails_its_high_and_selling_through_it_locks_in_the_gain(tmp_path, monkeypatch):
+    """A position up 25% when the Brain takes over: its stop trails the high from the first cycle, rises with
+    the price, never falls on a pull-back, and a drop through it is sold as a protective exit."""
+    with_stock_model(monkeypatch)
+    clock = FakeClock(NOW)
+    async for api in brain_client(tmp_path, clock, **OWNS, **ENABLED):
+        price = api.feed.live_price("UPC")
+        api.fake.hold("UPC", 25, round(price / 1.25, 4), price)  # bought 25% lower
+
+        async def cycle_at(p: float, api=api) -> dict:
+            api.fake.prices["UPC"] = round(p, 4)
+            clock.advance(api.container.settings.brain_cycle_minutes * 60)
+            return await run_cycle(api)
+
+        async def thesis(api=api) -> dict:
+            pos = (await api.get(f"{API}/positions", params={"live": "false"})).json()
+            return next(t for t in pos["open"] if t["symbol"] == "UPC")
+
+        await run_cycle(api)
+        first = await thesis()
+        assert first["trailing"] and first["peak_price"] == pytest.approx(price)
+        assert price * 0.92 - 0.01 <= first["stop_price"] <= price * 0.95 + 0.01  # 5-8% under the high
+        await cycle_at(price * 1.06)
+        higher = await thesis()
+        assert higher["peak_price"] == pytest.approx(price * 1.06, rel=1e-4)
+        assert higher["stop_price"] > first["stop_price"]
+        await cycle_at(price * 1.03)  # a pull-back above the stop: nothing moves down, nothing is sold
+        after = await thesis()
+        assert after["stop_price"] == higher["stop_price"] and after["peak_price"] == higher["peak_price"]
+        assert "UPC" in api.fake.positions
+        cycle = await cycle_at(higher["stop_price"] * 0.99)  # through the stop
+        exits = [d for d in sent(cycle) if d["subject"] == "UPC"]
+        assert exits and exits[0]["action"] == "close" and exits[0]["rationale"]["protective"]
+        why = " ".join(exits[0]["rationale"]["reasons"])
+        assert "thesis broken: below its trailing stop" in why and "it keeps +" in why
+        assert not any(o["side"] == "buy" for o in api.fake.orders.values() if o["symbol"] == "UPC")
+
+
 async def test_positions_are_shown_at_alpacas_prices_now_not_the_last_cycles(tmp_path, monkeypatch):
     """After the close (no more cycles) prices keep moving at Alpaca: the positions read live, so they
     agree with the account, and today's P&L splits exactly into the positions' moves and the rest."""

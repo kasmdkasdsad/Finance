@@ -714,6 +714,18 @@ def _execution_tab() -> None:
                         f"session: {', '.join(near.get('earnings_overnight') or []) or 'none'}."))  # fmt: skip
 
 
+def _stop_line(r: dict[str, Any]) -> str:
+    """When the Brain sells: below the stop, which trails the high once the position is up 10%."""
+    stop, paid, peak = r.get("stop_price"), r.get("avg_price"), r.get("peak_price")
+    if not stop:
+        return "none recorded"
+    if r.get("trailing") and paid and peak:
+        return (f"sells below {money(stop)}, trailing the high of {money(peak)} "
+                f"({1 - stop / peak:.1%} under it); it keeps {stop / paid - 1:+.1%} on the {money(paid)} paid")  # fmt: skip
+    start = f"; it starts trailing the high at {money(r['trails_from'])}" if r.get("trails_from") else ""
+    return f"sells below {money(stop)}{start}"
+
+
 def _positions() -> None:
     st.markdown(
         "**Positions and their theses** — every position on the Alpaca paper account the Brain owns: why it is "
@@ -754,7 +766,7 @@ def _positions() -> None:
                 "P&L": money(r.get("unrealized_pnl")),
                 "return": pct(r.get("return_pct"), 1),
                 "vs benchmark": pct(r.get("relative_return"), 1),
-                "stop": money(r.get("stop_price")),
+                "stop": money(r.get("stop_price")) + (" (trailing)" if r.get("trailing") else ""),
                 "target": money(r.get("target_price")) if r.get("target_price") else "uncalibrated",
                 "horizon": r.get("horizon_days"),
                 "confidence": num(r.get("confidence")),
@@ -780,6 +792,7 @@ def _positions() -> None:
             ):
                 st.markdown(_md(f"**Thesis:** {r['thesis']}"))
                 st.markdown(_md(f"**Invalidation:** {r.get('invalidation') or 'below the stop'}"))
+                st.markdown(_md(f"**Stop:** {_stop_line(r)}"))
                 if check.get("reasons"):
                     st.markdown(_md("**Check:** " + "; ".join(check["reasons"])))
                 st.caption(

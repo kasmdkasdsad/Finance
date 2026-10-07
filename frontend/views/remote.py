@@ -64,15 +64,18 @@ def _positions(
     orders: list[Any] | None,
 ) -> None:
     """Alpaca's positions, read live alongside the account above, so the two always agree. "Today" is each
-    position's change today; "Total" its gain since it was bought."""
+    position's change today; "Total" its gain since it was bought; "Stop" the price at which the Brain sells
+    it (its thesis's stop, which trails the high once the position is up 10%)."""
     rows = live or []
+    theses_by = {t["symbol"]: t for t in (theses or {}).get("open") or []}
     ui.section(f"Positions ({len(rows)})" if rows else "Positions")
     if rows:
         st.dataframe(
             pd.DataFrame(
                 [{"Symbol": p["symbol"], "Shares": p.get("qty"), "Value": p.get("market_value"),
                   "Today": p.get("intraday_pl"), "Total": p.get("unrealized_pl"),
-                  "Return": p.get("unrealized_plpc")} for p in rows]
+                  "Return": p.get("unrealized_plpc"),
+                  "Stop": (theses_by.get(p["symbol"]) or {}).get("stop_price")} for p in rows]
             ),
             hide_index=True,
             width="stretch",
@@ -82,8 +85,22 @@ def _positions(
                 "Today": st.column_config.NumberColumn(format="dollar", help="Change today"),
                 "Total": st.column_config.NumberColumn(format="dollar", help="Gain since bought"),
                 "Return": st.column_config.NumberColumn(format="percent", help="Since bought"),
+                "Stop": st.column_config.NumberColumn(
+                    format="dollar", help="The Brain sells if the price falls to this. Once a position is up "
+                    "10%, the stop follows its highest price and never moves down."),
             },
         )  # fmt: skip
+        trails = [
+            t
+            for s, t in theses_by.items()
+            if t.get("trailing") and t.get("stop_price") and t.get("avg_price")
+        ]
+        if trails:
+            st.caption(
+                ui.md("Trailing stops, locking in gains: " + ", ".join(
+                    f"{t['symbol']} sells below {money(t['stop_price'])} "
+                    f"(keeps {t['stop_price'] / t['avg_price'] - 1:+.1%})" for t in trails))
+            )  # fmt: skip
     elif live is not None:
         st.caption("No open positions.")
     split = today_split((acct or {}).get("day_pl"), live)

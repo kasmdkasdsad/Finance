@@ -16,8 +16,11 @@ with them at the start of every decision:
 * a thesis whose position is gone is closed, with the Brain's exit (price, reason, decision) or "closed
   outside the Brain".
 
-Every open thesis is marked (price, value, weight, P&L, return against the benchmark since entry) and
-checked (:func:`check`): **broken** below its stop, when most of the agents that supported it now oppose
+Every open thesis is marked (price, value, weight, P&L, return against the benchmark since entry) and its stop
+**trails** a winner (:func:`trail`): once the position is up ``TRAIL_FROM`` (10%) on what was paid, the stop
+follows the highest price since it opened, about three typical daily moves below it (between 5% and the
+initial stop's distance), and never moves down, so a 10% gain can no longer turn into a loss. Every thesis is
+then checked (:func:`check`): **broken** below its stop, when most of the agents that supported it now oppose
 it, when the consensus has turned confidently bearish, or when it has not worked in twice its horizon —
 a broken thesis is exited without waiting for a new signal (a protective exit); **weakening** when the
 evidence has faded (no clear consensus, past its horizon, behind the benchmark) — first in line to be
@@ -27,6 +30,7 @@ replaced by a stronger idea; otherwise **intact**.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -50,6 +54,11 @@ logger = logging.getLogger(__name__)
 STATE_KEY = "theses"  # brain_state: when the Brain first took the account over
 INHERITED_HORIZON = 21  # sessions: a position with no recorded idea is reviewed within a month
 EXPIRY_MULTIPLE = 2.0  # a thesis that has not worked in twice its horizon is broken
+# The trailing stop. It locks in part of a winner without capping it (a fixed take-profit would sell the
+# winners momentum says to keep). UNPROVEN: its exits are recorded and graded like every other.
+TRAIL_FROM = 0.10  # once up this much on what was paid, the stop follows the highest price since entry
+TRAIL_SIGMAS = 3.0  # this many typical daily moves below that high ...
+TRAIL_MIN = 0.05  # ... at least 5%, so ordinary noise does not sell it, and never wider than the initial stop
 
 
 def entry_plan(ctx: BrainContext, p: Proposal, expected: float | None) -> dict[str, Any]:
@@ -78,6 +87,38 @@ def entry_plan(ctx: BrainContext, p: Proposal, expected: float | None) -> dict[s
     }
 
 
+def trail_distance(ctx: BrainContext, symbol: str) -> float:
+    """How far below its high a winner's stop trails: three typical daily moves (from the stock's annualised
+    volatility), at least ``TRAIL_MIN``, never wider than the initial stop (``max_position_loss_pct``)."""
+    cap = ctx.limits.max_position_loss_pct
+    annual = ctx.ind(symbol, "risk_vol") or ctx.ind(symbol, "rv63")
+    if not annual or annual <= 0:
+        return cap
+    return round(min(max(TRAIL_SIGMAS * annual / math.sqrt(252), TRAIL_MIN), cap), 4)
+
+
+def trailing(row: BrainThesisRow) -> bool:
+    """The position has been up ``TRAIL_FROM`` on what was paid: its stop now trails the high."""
+    return bool(row.peak_price and row.avg_price and row.peak_price >= row.avg_price * (1 + TRAIL_FROM))
+
+
+def trail(row: BrainThesisRow, distance: float, now: datetime) -> None:
+    """After a mark: keep the highest price seen, and once the position is a 10% winner raise the stop to
+    ``distance`` below that high. The stop only ever rises."""
+    price = row.last_price
+    if price is None or price <= 0:
+        return
+    row.peak_price = max(row.peak_price or price, price)
+    if not trailing(row):
+        return
+    stop = round(row.peak_price * (1 - distance), 4)
+    if row.stop_price is not None and stop <= row.stop_price:
+        return
+    if not any(e.get("event") == "trailing" for e in row.history or []):
+        row.history = [*(row.history or []), {"at": now.isoformat(), "event": "trailing", "peak": row.peak_price, "stop": stop, "distance": distance}]  # fmt: skip
+    row.stop_price = stop
+
+
 def attach_entries(
     ctx: BrainContext, proposals: Sequence[Proposal], expected: dict[str, float | None]
 ) -> None:
@@ -94,7 +135,14 @@ def check(
     weak: list[str] = []
     price = row.last_price
     if price is not None and row.stop_price is not None and price <= row.stop_price:
-        broken.append(f"below its stop (${price:,.2f} ≤ ${row.stop_price:,.2f})")
+        if trailing(row) and row.peak_price:
+            broken.append(
+                f"below its trailing stop (${price:,.2f} ≤ ${row.stop_price:,.2f}, "
+                f"{1 - row.stop_price / row.peak_price:.1%} under its high of ${row.peak_price:,.2f}): "
+                f"it keeps {row.stop_price / row.avg_price - 1:+.1%} on the ${row.avg_price:,.2f} paid"
+            )
+        else:
+            broken.append(f"below its stop (${price:,.2f} ≤ ${row.stop_price:,.2f})")
     views = {o.agent_id: o for o in ctx.working.opinions.get(row.symbol, []) if o.directional}
     backers = [a for a in row.supporting or [] if a in views]
     turned = [a for a in backers if views[a].stance is Stance.BEARISH]
@@ -159,6 +207,9 @@ def view(row: BrainThesisRow) -> dict[str, Any]:
         "benchmark_return": row.benchmark_return,
         "relative_return": rel,
         "stop_price": row.stop_price,
+        "peak_price": row.peak_price,
+        "trailing": trailing(row),
+        "trails_from": round(row.avg_price * (1 + TRAIL_FROM), 4) if row.avg_price else None,
         "target_price": row.target_price,
         "expected_return": row.expected_return,
         "horizon_days": row.horizon_days,
@@ -408,6 +459,7 @@ class ThesisBook:
                 elif abs(row.qty - pos.qty) > 1e-9:
                     row.history = [*(row.history or []), {"at": now.isoformat(), "event": "size", "from": row.qty, "to": pos.qty}]  # fmt: skip
                 self._mark(row, pos, equity, bench, now)
+                trail(row, trail_distance(ctx, sym), now)
             for sym, stale in open_rows.items():
                 if sym in positions:
                     continue

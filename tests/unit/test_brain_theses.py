@@ -7,7 +7,7 @@ import pytest
 
 from quantpulse.brain.consensus import build_consensus
 from quantpulse.brain.decisions import plan, portfolio_fit, portfolio_risk
-from quantpulse.brain.theses import check, sessions_between
+from quantpulse.brain.theses import check, sessions_between, trail, trail_distance, trailing, view
 from quantpulse.brain.types import Action
 from quantpulse.db.models import BrainThesisRow
 from tests.unit.test_brain_agents import make_ctx, path
@@ -78,6 +78,51 @@ def test_a_faded_consensus_weakens_a_thesis():
     neutral = build_consensus("HOLD", [op("technical", "HOLD", 0.05), op("factor", "HOLD", -0.05)])
     got = check(thesis(), planning_ctx(), neutral, 0.3, NOW)
     assert got["status"] == "weakening"
+
+
+def test_a_winners_stop_trails_three_daily_moves_between_five_percent_and_the_initial_stop():
+    ctx = planning_ctx()
+    cap = ctx.limits.max_position_loss_pct
+    for annual, expected in ((0.30, 3 * 0.30 / 252**0.5), (0.10, 0.05), (0.90, cap)):
+        ctx.indicators.loc["HOLD", "risk_vol"] = annual
+        assert trail_distance(ctx, "HOLD") == pytest.approx(expected, abs=1e-4)
+    assert trail_distance(ctx, "NOPE") == cap  # no volatility known: the initial stop's distance
+
+
+def test_the_stop_starts_trailing_at_a_ten_percent_gain_and_never_moves_down():
+    row = thesis(last_price=105.0, history=[])
+    trail(row, 0.06, NOW)
+    assert row.peak_price == 105.0 and row.stop_price == 92.0 and not trailing(row)  # up 5%: the initial stop
+    row.last_price = 112.0
+    trail(row, 0.06, NOW)
+    assert trailing(row) and row.stop_price == pytest.approx(112 * 0.94)  # up 12%: it can no longer lose
+    assert [e["event"] for e in row.history] == ["trailing"]
+    row.last_price = 120.0
+    trail(row, 0.06, NOW)
+    assert row.peak_price == 120.0 and row.stop_price == pytest.approx(112.8)
+    for price in (116.0, 113.0):  # a pull-back: the high and the stop stay where they were
+        row.last_price = price
+        trail(row, 0.06, NOW)
+        assert row.peak_price == 120.0 and row.stop_price == pytest.approx(112.8)
+    trail(row, 0.02, NOW)  # nor does a narrower or wider distance ever lower it
+    assert row.stop_price == pytest.approx(120 * 0.98)
+    trail(row, 0.08, NOW)
+    assert row.stop_price == pytest.approx(117.6) and [e["event"] for e in row.history] == ["trailing"]
+    v = view(row)
+    assert v["trailing"] and v["peak_price"] == 120.0 and v["trails_from"] == pytest.approx(110.0)
+
+
+def test_falling_through_a_trailing_stop_breaks_the_thesis_and_says_what_it_keeps():
+    row = thesis(last_price=120.0, history=[])
+    trail(row, 0.06, NOW)
+    row.last_price = 112.0
+    trail(row, 0.06, NOW)
+    got = check(row, planning_ctx(), bullish("HOLD"), 0.3, NOW)
+    assert got["status"] == "broken"
+    assert got["reasons"][0] == (
+        "below its trailing stop ($112.00 ≤ $112.80, 6.0% under its high of $120.00): it keeps +12.8% on the "
+        "$100.00 paid"
+    )  # even with a bullish consensus: the stop is a protective exit
 
 
 HELD = {"HOLD": (100, float(path(0.0005, 0.01, 13)[-1]))}

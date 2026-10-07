@@ -1077,7 +1077,10 @@ class BrainThesisRow(Base):
     entry_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     thesis: Mapped[str] = mapped_column(Text)
     invalidation: Mapped[str | None] = mapped_column(Text, nullable=True)
-    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_price: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # rises with a trailing stop, never falls
+    peak_price: Mapped[float | None] = mapped_column(Float, nullable=True)  # the highest mark since it opened
     target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
     horizon_days: Mapped[int | None] = mapped_column(Integer, nullable=True)

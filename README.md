@@ -1951,6 +1951,18 @@ horizon (behind the benchmark) — a broken thesis is closed as a protective exi
 signal (it goes even while entries are halted); **weakening** when the evidence has faded (no bullish
 consensus, past its horizon, behind the benchmark) — first in line to be replaced; otherwise **intact**.
 
+**Trailing stop.** A winner's stop follows it up:
+* Once a position is up 10% on what was paid, its stop follows the highest price since it opened. The stop
+  sits three typical daily moves below that high (from the stock's volatility), at least 5% and never wider
+  than the initial 8% stop.
+* The stop only rises, so a position that has been up 10% can no longer turn into a loss.
+* Falling through it breaks the thesis, and the position is sold as a protective exit, whatever the
+  consensus says. The exit reason records how much of the gain it kept.
+* It locks in part of a winner without capping it. A fixed take-profit would sell the winners that momentum
+  says to keep.
+* It is UNPROVEN: its exits are recorded and graded like every other decision.
+* Home shows each position's stop, and which ones are trailing.
+
 **Audit trail.** Every decision can be followed end to end (`GET /brain/decisions/{id}/audit`, the page's
 *Audit trail* tab; `GET /brain/trades` lists recent trade decisions): OPPORTUNITY → DATA (the symbol's quote
 diagnosis) → AGENTS → OPINIONS → CONSENSUS → DEBATE → PORTFOLIO DECISION (reasons, fit, the entry thesis)
@@ -2338,6 +2350,7 @@ are rejected.
 | `0023_options_layer` | the options layer: `options_contracts`, `options_quotes`, `options_greeks`, `options_chain_snapshots`, `options_iv_history`, the strategy research tables (`options_strategy_*`, `options_hypotheses`, `options_experiments`, …), candidates, theses, trades, positions, the execution ledger, assignment and exercise events, counterfactuals and missed opportunities (see `OPTIONS.md`) |
 | `0024_market_evolution_and_model_registry` | `evolution_metrics`, `evolution_changes`, `evolution_hypotheses`, `evolution_relationships`, `model_registry`; option legs on `broker_orders` |
 | `0025_research_subsystem` | the 24/7 research subsystem: `brain_research_jobs` (the research queue and experiment history), `brain_learnings` (the learning ledger), `brain_hypotheses` (the improvement lifecycle) |
+| `0026_thesis_trailing_stop` | `brain_theses.peak_price`: the highest price since a position opened, which its trailing stop follows |
 
 ```bash
 quantpulse-migrate                 # upgrade to head (the API also does this on start-up)
