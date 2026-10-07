@@ -34,7 +34,20 @@ TradingOrderType = Literal["marketable_limit", "limit", "market"]
 # Liquid ETFs the paper-trading strategy ranks next to the stock universe (index, size and sector exposure).
 DEFAULT_TRADING_ETFS = ("SPY", "QQQ", "IWM", "DIA", "XLF", "XLK", "XLE", "SMH")
 # Underlyings whose option chains the Brain reads (deep, liquid chains; a short list keeps data calls few).
-DEFAULT_OPTIONS_UNIVERSE = ("SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "META")
+DEFAULT_OPTIONS_UNIVERSE = (
+    "SPY",
+    "QQQ",
+    "IWM",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "TSLA",
+    "AMD",
+    "GOOGL",
+    "NFLX",
+)
 # Option structures that may reach the paper account without a person enabling them: defined risk only.
 DEFAULT_OPTIONS_STRUCTURES = (
     "long_call",
@@ -718,7 +731,7 @@ class Settings(BaseSettings):
         "and shadow-traded only (every decision is still recorded and graded).",
     )
     options_priority_weight: float = Field(
-        default=0.15,
+        default=0.5,
         ge=0,
         le=1,
         description="How much an option expression is favoured over the equivalent stock trade when both clear "
@@ -735,13 +748,13 @@ class Settings(BaseSettings):
         "be listed; naked short options are never executable. Adding a family needs a person (protected).",
     )
     options_max_loss_per_trade: float = Field(
-        default=1500.0, gt=0, description="Largest possible loss of one new option position, in dollars."
+        default=2000.0, gt=0, description="Largest possible loss of one new option position, in dollars."
     )
     options_max_loss_pct_per_trade: float = Field(
         default=0.02, gt=0, le=0.1, description="…and as a share of equity (the smaller limit applies)."
     )
     options_max_total_risk_pct: float = Field(
-        default=0.15, gt=0, le=0.5, description="The sum of the maximum losses of every option position."
+        default=0.25, gt=0, le=0.5, description="The sum of the maximum losses of every option position."
     )
     options_max_underlying_risk_pct: float = Field(
         default=0.05, gt=0, le=0.2, description="The maximum loss of all option positions on one underlying."
@@ -785,10 +798,12 @@ class Settings(BaseSettings):
         description="Close a position once it has made this share of its maximum profit.",
     )
     options_stop_loss_pct: float = Field(
-        default=0.5,
+        default=1.0,
         gt=0,
         le=1,
-        description="Close a position once it has lost this share of its maximum loss.",
+        description="Protective stop: close a position once it has lost this share of its maximum loss (1: only "
+        "the whole maximum loss, so a position has time to work; the strategy's own exits and closing before "
+        "expiration still apply).",
     )
     options_fee_per_contract: float = Field(
         default=0.05,
@@ -806,12 +821,12 @@ class Settings(BaseSettings):
         default=True,
         description="From VALIDATION on (backtests positive after realistic and pessimistic costs), a strategy is "
         "shadow-traded and may trade one contract on the paper account (maximum loss capped below) while the "
-        "evidence for its later gates builds, to learn from real paper fills (at most 12 strategies below "
+        "evidence for its later gates builds, to learn from real paper fills (at most 20 strategies below "
         "PAPER_SHADOW at once, the strongest evidence first). Labelled as exploration everywhere; full size still "
         "needs PAPER_ACTIVE. False: nothing trades before PAPER_SHADOW, and then in shadow only until PAPER_ACTIVE.",
     )
     options_exploration_max_loss: float = Field(
-        default=1000.0, gt=0, description="Largest possible loss of one exploration trade, in dollars."
+        default=2000.0, gt=0, description="Largest possible loss of one exploration trade, in dollars."
     )
     options_research_budget_seconds: float = Field(
         default=180.0, ge=10, le=3600, description="Time the research lab may spend per run (background)."

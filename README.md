@@ -1594,7 +1594,7 @@ a supervisor tick. It has 24 kinds of job (`GET /brain/research/catalog`):
   * the strategy lab: new strategies generated and validated (backtests, walk-forward, random portfolios,
     stress), every 3 hours;
   * the options lab: option strategies evaluated, promoted one gate at a time and bred (or explored while
-    nothing has passed), 25 minutes every 2 hours;
+    nothing has passed), 25 minutes every hour;
   * the improvement engine's proposals.
 * **Learn:** long-term memory.
 * **Prepare:**

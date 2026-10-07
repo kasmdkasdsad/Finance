@@ -207,7 +207,7 @@ async def test_options_research_runs_in_the_closed_market_research_queue(api):
 
     spec = CATALOG["options_research"]
     assert (
-        spec.cost == "heavy" and spec.refresh == timedelta(hours=2) and spec.timeout == timedelta(minutes=40)
+        spec.cost == "heavy" and spec.refresh == timedelta(hours=1) and spec.timeout == timedelta(minutes=40)
     )
     brain = api.container.brain
     assert brain.options_lab is api.container.options_lab

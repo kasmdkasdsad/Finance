@@ -211,13 +211,18 @@ async def test_with_exploration_a_validated_strategy_trades_one_capped_contract(
         assert cand.audit["version"]["edge_basis"] == "backtest at pessimistic fills"
 
 
-async def test_at_most_twelve_strategies_explore_at_once_the_strongest_evidence_first(tmp_path):
+async def test_up_to_twenty_strategies_explore_and_the_untried_get_their_turn(tmp_path):
+    """At most twenty strategies below PAPER_SHADOW are handed over: the furthest along first, then by an upper
+    confidence bound (the expected edge plus a bonus that shrinks as a strategy is tried), so the same few never
+    take every slot. Strategies at PAPER_SHADOW and beyond are always handed over."""
+    from datetime import timedelta
+
     clock = FakeClock(NOW)
-    async for api in client(tmp_path, clock, options_exploration=True):
+    async for api in client(tmp_path, clock):
         lab = api.container.options_lab
         ids = {}
-        for i in range(14):  # fourteen validated strategies, edges 1%..14%
-            ids[i] = await promote(api, replace(LONG_CALL, delta_target=0.30 + i / 100), Stage.VALIDATION,
+        for i in range(22):  # twenty-two validated strategies, edges 1%..22%
+            ids[i] = await promote(api, replace(LONG_CALL, delta_target=0.20 + i / 100), Stage.VALIDATION,
                                    key=f"v{i}", latest={"validation_ror": 0.01 * (i + 1)})  # fmt: skip
         walked = await promote(api, replace(LONG_CALL, delta_target=0.6), Stage.WALK_FORWARD, key="walked",
                                latest={"validation_ror": 0.005})  # fmt: skip
@@ -225,8 +230,20 @@ async def test_at_most_twelve_strategies_explore_at_once_the_strongest_evidence_
         handed = [v["version_id"] for v in await lab.eligible_versions()]
         assert handed[0] == settled  # strategies at PAPER_SHADOW and beyond always
         assert handed[1] == walked  # then the furthest along ...
-        assert handed[2:] == [ids[i] for i in range(13, 2, -1)]  # ... then the largest edges, twelve in all
-        assert len(handed) == 1 + 12
+        assert handed[2:] == [ids[i] for i in range(21, 2, -1)]  # ... then, untried alike, the largest edges
+        assert len(handed) == 1 + 20
+        # the strongest one has been tried thirty times: untried strategies with smaller edges now come first
+        now = clock.now()
+        async with api.container.db.session() as s:
+            for k in range(30):
+                s.add(OptionsPositionRow(version_id=ids[21], underlying="MIDA", family="long_call", direction="bullish",
+                                         mode="shadow", structure={}, quantity=1, status="closed",
+                                         opened_at=now - timedelta(days=40 - k), entry_value=300.0,
+                                         entry_underlying=100.0, max_loss=300.0, closed_at=now - timedelta(days=39 - k),
+                                         realized_pnl=30.0))  # fmt: skip
+        again = [v["version_id"] for v in await lab.eligible_versions()]
+        assert again.index(ids[21]) > again.index(ids[14])  # rotated down ...
+        assert ids[21] in again  # ... but its edge still keeps it in
 
 
 async def test_each_strategy_builds_its_own_shadow_record(tmp_path):

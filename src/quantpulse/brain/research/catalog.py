@@ -73,7 +73,7 @@ CATALOG: dict[str, JobSpec] = {
                 h.strategy_research, topic="strategy:", timeout=timedelta(minutes=60)),
         JobSpec("options_research", "Which option strategies survive model-priced backtests, walk-forward, Monte "
                 "Carlo, stress and the false-discovery control — and what should the next generation try?", "TEST",
-                "heavy", 8, 2 * H, h.options_research, topic="options:", timeout=timedelta(minutes=40)),
+                "heavy", 8, H, h.options_research, topic="options:", timeout=timedelta(minutes=40)),
         JobSpec("improvement_review", "What weaknesses does the record show, and what evidence-based changes follow?",
                 "LEARN", "medium", 5, D, h.improvement_review),
         JobSpec("memory_maintenance", "Is long-term memory current?", "LEARN", "light", 3, D, h.memory_maintenance),

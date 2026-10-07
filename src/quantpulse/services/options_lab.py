@@ -64,7 +64,9 @@ S = promotion.Stage
 RESEARCH_STAGES = (S.RESEARCH, S.EXTRACTED, S.BACKTESTING, S.VALIDATION, S.WALK_FORWARD)
 REEVALUATE_AFTER = timedelta(days=7)
 GENERATION_BUDGET = 12  # new candidates per generation (2 of them random immigrants)
-EXPLORE_MAX_VERSIONS = 12  # strategies below PAPER_SHADOW handed to the Options Brain to explore, at most
+EXPLORE_MAX_VERSIONS = 20  # strategies below PAPER_SHADOW handed to the Options Brain to explore, at most
+# the exploration bonus of an untried strategy over a much-tried one with the same edge (per dollar at risk)
+EXPLORE_BONUS = 0.05
 HISTORY_DAYS = 1300  # about three and a half years of daily prices
 RULE_TYPES = {"entry_signal": "entry", "iv_rank_min": "filter", "iv_rank_max": "filter", "iv_rv_min": "filter",
               "iv_rv_max": "filter", "event_filter": "filter", "regime_filter": "filter", "dte_min": "expiration",
@@ -844,13 +846,17 @@ class OptionsLabService:
     async def eligible_versions(self) -> list[dict[str, Any]]:
         """Versions the Options Brain may use: with exploration on, from VALIDATION (shadow, and one exploration
         contract on paper until PAPER_ACTIVE); without it, from PAPER_SHADOW (shadow only until PAPER_ACTIVE).
-        Full-size paper trades only at PAPER_ACTIVE/PROVEN. Of the strategies still below PAPER_SHADOW, the
-        ``EXPLORE_MAX_VERSIONS`` with the strongest evidence are handed over (furthest stage, then expected
-        edge), so a large population cannot flood a cycle."""
+        Full-size paper trades only at PAPER_ACTIVE/PROVEN. Of the strategies still below PAPER_SHADOW,
+        ``EXPLORE_MAX_VERSIONS`` are handed over: the furthest stage first, then by an upper confidence bound —
+        the expected edge plus a bonus that shrinks as a strategy is tried — so the untried get their turn
+        instead of the same few taking every slot, and a large population cannot flood a cycle."""
         stages = promotion.TRADED_STAGES if self._s.options_exploration else promotion.SHADOW_STAGES
         async with self._db.session() as s:
             rows = (await s.scalars(select(OptionsStrategyVersionRow).where(
                 OptionsStrategyVersionRow.stage.in_([x.value for x in stages])))).all()  # fmt: skip
+            counts = (await s.execute(select(OptionsPositionRow.version_id, func.count())
+                                      .group_by(OptionsPositionRow.version_id))).all()  # fmt: skip
+            tries = {int(vid): int(n) for vid, n in counts if vid is not None}
             out: list[dict[str, Any]] = []
             for v in rows:
                 g = await s.get(OptionsStrategyGenomeRow, v.genome_id)
@@ -862,8 +868,16 @@ class OptionsLabService:
                             "expected_ror": edge, "edge_basis": basis})  # fmt: skip
         settled = [x for x in out if S(x["stage"]) in promotion.SHADOW_STAGES]
         order = {stage.value: i for i, stage in enumerate(promotion.ORDER)}
+        total = sum(tries.values())
+
+        def bound(x: dict[str, Any]) -> float:
+            n = tries.get(x["version_id"], 0)
+            return (x["expected_ror"] or 0.0) + EXPLORE_BONUS * math.sqrt(math.log(total + 2) / (n + 1))
+
         exploring = sorted((x for x in out if S(x["stage"]) not in promotion.SHADOW_STAGES),
-                           key=lambda x: (-order[x["stage"]], -(x["expected_ror"] or 0.0), x["version_id"]))  # fmt: skip
+                           key=lambda x: (-order[x["stage"]], -bound(x), x["version_id"]))  # fmt: skip
+        for x in out:
+            x["live_tries"] = tries.get(x["version_id"], 0)
         return settled + exploring[:EXPLORE_MAX_VERSIONS]
 
 

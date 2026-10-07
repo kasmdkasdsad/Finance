@@ -130,8 +130,8 @@ def test_a_covered_call_needs_the_shares_and_they_cover_only_once():
 
 
 def test_loss_limits_per_trade_underlying_and_book():
-    assert "max_loss" not in failed(book().evaluate_option(spread(qty=4)))  # $1,440 ≤ $1,500
-    assert "max_loss" in failed(book().evaluate_option(spread(qty=5)))  # $1,800 > $1,500
+    assert "max_loss" not in failed(book().evaluate_option(spread(qty=5)))  # $1,800 ≤ $2,000
+    assert "max_loss" in failed(book().evaluate_option(spread(qty=6)))  # $2,160 > $2,000
     tight = RiskLimits(options=OptionLimits(max_underlying_risk_pct=0.003))
     assert "underlying_risk" in failed(book(limits=tight).evaluate_option(spread()))
     held = [opt_position(f"SPY2610{d}C00600000", 1, 20.0) for d in (16, 23)]  # $4,000 at risk already
@@ -139,10 +139,10 @@ def test_loss_limits_per_trade_underlying_and_book():
     d = book(positions=held, limits=small_book).evaluate_option(spread())
     assert "total_risk" in failed(d)
     explore = spread(exploration=True)
-    assert "max_loss" not in failed(book().evaluate_option(explore))  # $360 ≤ the $1,000 exploration cap
+    assert "max_loss" not in failed(book().evaluate_option(explore))  # $360 ≤ the $2,000 exploration cap
     capped = RiskLimits(options=OptionLimits(exploration_max_loss=250.0))
     assert "max_loss" in failed(book(limits=capped).evaluate_option(explore))  # $360 > a $250 exploration cap
-    assert "max_loss" in failed(book().evaluate_option(spread(qty=3, exploration=True)))  # never above $1,000
+    assert "max_loss" in failed(book().evaluate_option(spread(qty=6, exploration=True)))  # never above $2,000
     assert book().evaluate_option(replace(explore, limit_price=2.4, legs=(leg(C210, "buy", "buy_to_open"),
                                   leg(C220, "sell", "sell_to_open")))).approved is False  # fmt: skip
 
