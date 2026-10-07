@@ -804,9 +804,11 @@ class Settings(BaseSettings):
     )
     options_exploration: bool = Field(
         default=True,
-        description="A strategy that passed walk-forward and stress validation may trade one contract on the "
-        "paper account (maximum loss capped below) while its shadow record builds, to measure real paper fills. "
-        "Labelled as exploration everywhere; false: only fully validated strategies trade.",
+        description="From VALIDATION on (backtests positive after realistic and pessimistic costs), a strategy is "
+        "shadow-traded and may trade one contract on the paper account (maximum loss capped below) while the "
+        "evidence for its later gates builds, to learn from real paper fills (at most 12 strategies below "
+        "PAPER_SHADOW at once, the strongest evidence first). Labelled as exploration everywhere; full size still "
+        "needs PAPER_ACTIVE. False: nothing trades before PAPER_SHADOW, and then in shadow only until PAPER_ACTIVE.",
     )
     options_exploration_max_loss: float = Field(
         default=1000.0, gt=0, description="Largest possible loss of one exploration trade, in dollars."

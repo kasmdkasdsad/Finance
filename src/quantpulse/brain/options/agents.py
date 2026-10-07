@@ -306,8 +306,16 @@ def risk(c: CandidateContext) -> Opinion:
 def strategy_critic(c: CandidateContext) -> Opinion:
     stage = c.version.get("stage")
     exp = c.version.get("expected_ror")
+    basis = c.version.get("edge_basis") or "held-out period"
     reasons = [f"{c.version.get('key')} at {stage}"
-               + (f", validated {exp:+.1%} per $ at risk out of sample (model-priced)" if exp is not None else "")]  # fmt: skip
+               + (f", expected {exp:+.1%} per $ at risk ({basis}, model-priced)" if exp is not None else "")]  # fmt: skip
+    # VALIDATION and WALK_FORWARD are handed over only while exploration is on: one capped contract, labelled
+    if stage == "WALK_FORWARD":
+        return _op("StrategyCriticAgent", 0.05, [*reasons, "exploring: walk-forward passed; Monte Carlo, tail "
+                                                 "stress, baselines and the critic still ahead"])  # fmt: skip
+    if stage == "VALIDATION":
+        return _op("StrategyCriticAgent", 0.0, [*reasons, "exploring on backtest evidence: positive after realistic "
+                                                "and pessimistic costs; the held-out test not passed yet"])  # fmt: skip
     if stage not in ("PAPER_SHADOW", "PAPER_ACTIVE", "PROVEN"):
         return _op("StrategyCriticAgent", 0, [*reasons, "not validated for live use"], veto=True)
     return _op("StrategyCriticAgent", 0.3 if stage != "PAPER_SHADOW" else 0.1, reasons)

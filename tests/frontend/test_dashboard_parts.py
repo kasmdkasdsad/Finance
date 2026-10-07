@@ -14,7 +14,15 @@ def _capture(monkeypatch) -> list[str]:
 def test_the_ladder_counts_each_rung_and_marks_the_ones_that_trade(monkeypatch):
     html = _capture(monkeypatch)
     monkeypatch.setattr(ui, "section", lambda *a, **k: None)
-    options_brain._ladder({"RESEARCH": 2, "EXTRACTED": 3, "VALIDATION": 4, "PAPER_SHADOW": 1, "RETIRED": 7})
+    stages = {
+        "RESEARCH": 2,
+        "EXTRACTED": 3,
+        "VALIDATION": 4,
+        "WALK_FORWARD": 2,
+        "PAPER_SHADOW": 1,
+        "RETIRED": 7,
+    }
+    options_brain._ladder(stages, exploring=False)
     [body] = html
     steps = body.split('<div class="qp-step')[1:]
     assert len(steps) == len(options_brain.LADDER) == 7
@@ -23,6 +31,13 @@ def test_the_ladder_counts_each_rung_and_marks_the_ones_that_trade(monkeypatch):
     assert "qp-step-on" not in steps[1]  # nothing backtested right now
     assert "qp-step-live qp-step-on" in steps[4] and "<b>1</b><span>Shadow</span>" in steps[4]
     assert all("qp-step-live" in s for s in steps[4:]) and not any("qp-step-live" in s for s in steps[:4])
+    # with exploration on, validated and walk-forward strategies trade too (one exploration contract)
+    html.clear()
+    options_brain._ladder(stages, exploring=True)
+    steps = html[0].split('<div class="qp-step')[1:]
+    for rung in steps[2:4]:
+        assert "qp-step-live qp-step-on" in rung and "+1 contract" in rung
+    assert not any("qp-step-live" in s for s in steps[:2])  # ideas and backtests never trade
 
 
 def test_the_ladder_escapes_its_labels(monkeypatch):

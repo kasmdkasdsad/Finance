@@ -143,6 +143,42 @@ async def test_live_evidence_carries_a_strategy_to_paper_active_and_proven(api):
     assert [h["stage"] for h in detail["stage_history"]][-2:] == ["PAPER_ACTIVE", "PROVEN"]
 
 
+async def test_an_exploring_strategy_that_breaks_live_is_retired(api):
+    """Exploration trades are watched like any live trades: a walk-forward strategy whose exploration contracts
+    keep losing far beyond what it was validated to earn is retired. One without live trades is left alone."""
+    from quantpulse.db.options_models import OptionsPositionRow, OptionsStrategyDecayRow
+    from quantpulse.options.lab.promotion import stage_record
+
+    lab = api.container.options_lab
+    await lab.seed()
+    now = api.container.clock.now()
+    evaluated = {"latest": {"validation_ror": 0.06}, "fdr": {"discovery": True}}
+    async with api.container.db.session() as s:
+        versions = (
+            await s.scalars(select(OptionsStrategyVersionRow).order_by(OptionsStrategyVersionRow.id))
+        ).all()
+        losing, quiet = versions[0], versions[1]
+        for v in (losing, quiet):
+            v.stage = Stage.WALK_FORWARD.value
+            v.stage_history = [
+                *v.stage_history,
+                stage_record(Stage.WALK_FORWARD, now.isoformat(), "test", evaluated),
+            ]
+        for i in range(16):  # sixteen exploration contracts, nearly all lost
+            at = now - timedelta(days=30 - i)
+            s.add(OptionsPositionRow(version_id=losing.id, underlying="SPY", family="long_call", direction="bullish",
+                                     mode="paper", structure={"exploration": True}, quantity=1, status="closed",
+                                     opened_at=at - timedelta(days=3), entry_value=400.0, entry_underlying=500.0,
+                                     max_loss=400.0, closed_at=at, realized_pnl=-350.0 if i % 3 else -250.0))  # fmt: skip
+        ids = losing.id, quiet.id
+    _promoted, demoted = await lab._promote_all(now)
+    assert [(d["version_id"], d["to"]) for d in demoted] == [(ids[0], "RETIRED")]
+    async with api.container.db.session() as s:
+        assert (await s.get(OptionsStrategyVersionRow, ids[1])).stage == "WALK_FORWARD"
+        watched = {r.version_id for r in (await s.scalars(select(OptionsStrategyDecayRow))).all()}
+    assert ids[0] in watched and ids[1] not in watched  # no live trades: nothing to judge, no row written
+
+
 async def test_with_nothing_passed_yet_a_run_still_breeds_new_ideas_and_runs_alone(api):
     """The search never stalls waiting for a first success: a run with time left explores (wider variations of
     the best-scoring candidates and brand-new random strategies). One run at a time."""

@@ -64,6 +64,7 @@ S = promotion.Stage
 RESEARCH_STAGES = (S.RESEARCH, S.EXTRACTED, S.BACKTESTING, S.VALIDATION, S.WALK_FORWARD)
 REEVALUATE_AFTER = timedelta(days=7)
 GENERATION_BUDGET = 12  # new candidates per generation (2 of them random immigrants)
+EXPLORE_MAX_VERSIONS = 12  # strategies below PAPER_SHADOW handed to the Options Brain to explore, at most
 HISTORY_DAYS = 1300  # about three and a half years of daily prices
 RULE_TYPES = {"entry_signal": "entry", "iv_rank_min": "filter", "iv_rank_max": "filter", "iv_rv_min": "filter",
               "iv_rv_max": "filter", "event_filter": "filter", "regime_filter": "filter", "dte_min": "expiration",
@@ -521,13 +522,15 @@ class OptionsLabService:
                 # earn is what the Options Brain checks before it trades it
                 carry = promotion.latest_evaluation(v.stage_history)
                 stage = S(v.stage)
-                if stage in promotion.SHADOW_STAGES:
-                    returns = (
-                        (live.get("paper") or {}).get("returns")
-                        or (live.get("shadow") or {}).get("returns")
-                        or []
-                    )
-                    val = ev.validation_ror or 0.0
+                returns = (
+                    (live.get("paper") or {}).get("returns")
+                    or (live.get("shadow") or {}).get("returns")
+                    or []
+                )
+                # live decay is watched wherever a strategy trades, against the edge it is traded on: an exploring
+                # strategy whose live results break with that is retired too
+                if stage in promotion.SHADOW_STAGES or (stage in promotion.EXPLORATION_STAGES and returns):
+                    val = promotion.expected_edge(carry, stage)[0] or 0.0
                     status = decay.assess(returns, decay.Expectation(mean=val, sd=max(abs(val) * 3, 0.2)))
                     s.add(OptionsStrategyDecayRow(version_id=v.id, at=now, status=status["status"],
                                                   metrics=jsonable({k: x for k, x in status.items() if k != "reasons"}),
@@ -839,20 +842,29 @@ class OptionsLabService:
                 "last_run": self.last_run}  # fmt: skip
 
     async def eligible_versions(self) -> list[dict[str, Any]]:
-        """Versions the Options Brain may use: shadow at PAPER_SHADOW (and exploration), paper at
-        PAPER_ACTIVE/PROVEN."""
+        """Versions the Options Brain may use: with exploration on, from VALIDATION (shadow, and one exploration
+        contract on paper until PAPER_ACTIVE); without it, from PAPER_SHADOW (shadow only until PAPER_ACTIVE).
+        Full-size paper trades only at PAPER_ACTIVE/PROVEN. Of the strategies still below PAPER_SHADOW, the
+        ``EXPLORE_MAX_VERSIONS`` with the strongest evidence are handed over (furthest stage, then expected
+        edge), so a large population cannot flood a cycle."""
+        stages = promotion.TRADED_STAGES if self._s.options_exploration else promotion.SHADOW_STAGES
         async with self._db.session() as s:
             rows = (await s.scalars(select(OptionsStrategyVersionRow).where(
-                OptionsStrategyVersionRow.stage.in_([x.value for x in promotion.SHADOW_STAGES])))).all()  # fmt: skip
-            out = []
+                OptionsStrategyVersionRow.stage.in_([x.value for x in stages])))).all()  # fmt: skip
+            out: list[dict[str, Any]] = []
             for v in rows:
                 g = await s.get(OptionsStrategyGenomeRow, v.genome_id)
                 if g is None:
                     continue
+                edge, basis = promotion.expected_edge(promotion.latest_evaluation(v.stage_history), v.stage)
                 out.append({"version_id": v.id, "key": f"{v.strategy_key}@v{v.version}", "stage": v.stage,
                             "genome": g.params, "family": g.family, "direction": g.direction,
-                            "expected_ror": (promotion.latest_evaluation(v.stage_history).get("latest") or {}).get("validation_ror")})  # fmt: skip
-            return out
+                            "expected_ror": edge, "edge_basis": basis})  # fmt: skip
+        settled = [x for x in out if S(x["stage"]) in promotion.SHADOW_STAGES]
+        order = {stage.value: i for i, stage in enumerate(promotion.ORDER)}
+        exploring = sorted((x for x in out if S(x["stage"]) not in promotion.SHADOW_STAGES),
+                           key=lambda x: (-order[x["stage"]], -(x["expected_ror"] or 0.0), x["version_id"]))  # fmt: skip
+        return settled + exploring[:EXPLORE_MAX_VERSIONS]
 
 
 def _uses(g: Genome, feature: str) -> bool:

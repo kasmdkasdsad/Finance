@@ -18,6 +18,13 @@ PAPER_ACTIVE          enough shadow trades on live quotes over enough sessions, 
 PROVEN                enough real paper trades, positive with a t-statistic of 2, not decaying
 ====================  ================================================================================
 
+Exploration (``QP_OPTIONS_EXPLORATION``, on by default): from VALIDATION on, a strategy is traded in shadow on
+live quotes and may trade *one contract* on the paper account (its maximum loss capped by the exploration
+limit), so the lab learns from real paper fills — the research evidence is model-priced, live quotes are the
+real test — while the evidence for the later gates builds. Its expected edge is the held-out result when that
+is positive, else its PESSIMISTIC backtest (:func:`expected_edge`). Full-size paper trades still need
+PAPER_ACTIVE: every gate above, then the shadow record.
+
 Human approval is required (and cannot be given by the system) for families outside the default
 executable list and for anything undefined-risk — which is never executable at all.
 """
@@ -46,8 +53,12 @@ class Stage(StrEnum):
 
 ORDER = [Stage.RESEARCH, Stage.EXTRACTED, Stage.BACKTESTING, Stage.VALIDATION, Stage.WALK_FORWARD,
          Stage.PAPER_SHADOW, Stage.PAPER_ACTIVE, Stage.PROVEN]  # fmt: skip
-EXECUTABLE_STAGES = frozenset({Stage.PAPER_ACTIVE, Stage.PROVEN})
+EXECUTABLE_STAGES = frozenset({Stage.PAPER_ACTIVE, Stage.PROVEN})  # full-size paper trades
 SHADOW_STAGES = frozenset({Stage.PAPER_SHADOW, Stage.PAPER_ACTIVE, Stage.PROVEN})
+# one exploration contract on paper (labelled, capped by the exploration limit), when exploration is on
+EXPLORATION_STAGES = frozenset({Stage.VALIDATION, Stage.WALK_FORWARD, Stage.PAPER_SHADOW})
+# what the Options Brain trades (in shadow, and on paper at exploration or full size) when exploration is on
+TRADED_STAGES = EXPLORATION_STAGES | SHADOW_STAGES
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +192,23 @@ def latest_evaluation(history: Sequence[Mapping[str, Any]] | None) -> dict[str, 
         if ev.get("latest"):
             return {k: ev[k] for k in EVALUATION_KEYS if k in ev}
     return {}
+
+
+def expected_edge(evaluation: Mapping[str, Any], stage: Stage | str) -> tuple[float | None, str]:
+    """What a strategy is expected to earn per dollar at risk, and the evidence it rests on. From WALK_FORWARD
+    on: the held-out (walk-forward) result, the test it passed. At VALIDATION (exploring): the held-out result
+    when it is positive, otherwise the backtest under PESSIMISTIC fills when that is. Not positive: the strategy
+    is not traded."""
+    latest = evaluation.get("latest") or {}
+    held = latest.get("validation_ror")
+    if held is not None and held > 0:
+        return float(held), "held-out period"
+    pessimistic = (latest.get("ror_by_model") or {}).get("PESSIMISTIC")
+    if Stage(stage) == Stage.VALIDATION and pessimistic is not None and pessimistic > 0:
+        return float(pessimistic), "backtest at pessimistic fills"
+    if held is None:
+        return None, "no evidence"
+    return float(held), "held-out period"
 
 
 def stage_record(

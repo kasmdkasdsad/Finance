@@ -55,7 +55,7 @@ from quantpulse.options.attribution import Mark, attribute_path, verdicts
 from quantpulse.options.contracts import ContractError, OptionContract, parse_occ
 from quantpulse.options.data import OptionsMarketDataProvider
 from quantpulse.options.fills import ExecutionModel, leg_fill
-from quantpulse.options.lab import learning, lessons
+from quantpulse.options.lab import learning, lessons, promotion
 from quantpulse.options.lab.backtest import _chain_filters, _exit_reason, _passes, _pick
 from quantpulse.options.lab.genome import Genome, from_dict
 from quantpulse.options.pricing import greeks as bsm_greeks
@@ -78,6 +78,8 @@ from .perception import UnderlyingView, perceive, record
 
 logger = logging.getLogger(__name__)
 SHADOW_PER_CYCLE = 5
+# stages whose paper trades are one exploration contract (full size only at PAPER_ACTIVE and PROVEN)
+EXPLORING = frozenset(s.value for s in promotion.EXPLORATION_STAGES)
 # open shadow positions at most (each is marked every cycle); a strategy holds at most one per underlying
 SHADOW_MAX_OPEN = 60
 # "assigned": a leg went (assigned early, or closed outside QuantPulse) while others remain — frozen for a person
@@ -222,8 +224,10 @@ class OptionsBrain:
         for u, v in views.items():
             cyc.views[u] = v.summary()
         if not versions:
-            cyc.notes.append("no strategy has passed validation (walk-forward, stress, baselines, the critic) yet: "
-                             "options are researched, not traded")  # fmt: skip
+            cyc.notes.append(("no strategy has passed its backtests (positive after realistic and pessimistic costs) yet"
+                              if s.options_exploration
+                              else "no strategy has passed validation (walk-forward, stress, baselines, the critic) yet")
+                             + ": options are researched, not traded")  # fmt: skip
 
         # 1. what is already open: paper orders synced with Alpaca, marks, exits, expiration
         await self._manage(cyc, open_rows, views, ctx, now, market_open, paper_allowed)
@@ -723,7 +727,7 @@ class OptionsBrain:
                     v["stage"] in ("PAPER_ACTIVE", "PROVEN") or s.options_exploration
                 )
                 intent = (
-                    self._intent(pick, g, v, view, ctx, now, exploration=v["stage"] == "PAPER_SHADOW")
+                    self._intent(pick, g, v, view, ctx, now, exploration=v["stage"] in EXPLORING)
                     if paper_mode
                     else None
                 )
@@ -902,7 +906,7 @@ class OptionsBrain:
                 reject_reason="; ".join(r for x in verdict["vetoes"] for r in x["reasons"])[:2000] if gate else None,
                 data_quality=jsonable(view.quality),
                 audit=jsonable({"metrics": cand.metrics, "verdict": verdict, "risk": item["risk"],
-                                "comparison": comparison, "version": {k: v[k] for k in ("key", "stage", "expected_ror")},
+                                "comparison": comparison, "version": {k: v.get(k) for k in ("key", "stage", "expected_ror", "edge_basis")},
                                 "quotes": [{"symbol": q.symbol, "bid": q.bid, "ask": q.ask, "age": q.age(now),
                                             "feed": q.feed} for q in cand.quotes]}),
             )  # fmt: skip

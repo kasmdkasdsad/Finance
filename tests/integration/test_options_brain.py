@@ -49,7 +49,9 @@ async def client(tmp_path, clock, **overrides):
         yield api
 
 
-async def promote(api, genome: Genome, stage: Stage, key: str = "test-long-call") -> int:
+async def promote(
+    api, genome: Genome, stage: Stage, key: str = "test-long-call", latest: dict | None = None
+) -> int:
     """A strategy version as if the lab had validated it (test data through the lab's own writer)."""
     lab = api.container.options_lab
     now = api.container.clock.now()
@@ -57,7 +59,7 @@ async def promote(api, genome: Genome, stage: Stage, key: str = "test-long-call"
         v = await lab._add_version(s, genome, key=key, origin="seed", reason="test", generation=0, now=now)
         v.stage = stage.value
         v.stage_history = [*v.stage_history, stage_record(stage, now.isoformat(), "test",
-                                                          {"latest": {"validation_ror": 0.08}})]  # fmt: skip
+                                                          {"latest": latest or {"validation_ror": 0.08}})]  # fmt: skip
         return v.id
 
 
@@ -181,6 +183,50 @@ async def test_a_promoted_strategy_with_no_positive_edge_still_never_trades(tmp_
         assert await rows(api, OptionsPositionRow) == []
         assert {c.gate for c in await rows(api, OptionsTradeCandidateRow)} == {"no validated edge"}
         assert not [b for b in api.fake.bodies if b.get("position_intent")]
+
+
+async def test_with_exploration_a_validated_strategy_trades_one_capped_contract(tmp_path):
+    """Exploration starts at VALIDATION: shadow on live quotes, and one contract on paper within the exploration
+    limit, labelled exploration, on the evidence it has (here its backtest at pessimistic fills: the held-out
+    test came out negative on model prices). A strategy with no positive backtest yet never trades."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        await promote(api, replace(LONG_CALL, delta_target=0.4), Stage.BACKTESTING, key="still-research")
+        backtest_only = {"validation_ror": -0.02, "ror_by_model": {"REALISTIC": 0.05, "PESSIMISTIC": 0.03}}
+        vid = await promote(api, LONG_CALL, Stage.VALIDATION, latest=backtest_only)
+        [eligible] = await api.container.options_lab.eligible_versions()
+        assert eligible["version_id"] == vid and eligible["expected_ror"] == 0.03
+        assert eligible["edge_basis"] == "backtest at pessimistic fills"
+        await run_cycle(api)
+        positions = await rows(api, OptionsPositionRow)
+        assert {p.version_id for p in positions} == {vid}  # nothing from the strategy still in research
+        shadow = [p for p in positions if p.mode == "shadow"]
+        paper = [p for p in positions if p.mode == "paper"]
+        assert len(shadow) == 1 and len(paper) == 1
+        assert paper[0].structure["exploration"] and paper[0].quantity == 1
+        assert paper[0].max_loss <= api.container.settings.options_exploration_max_loss
+        orders = [b for b in api.fake.bodies if b.get("position_intent")]
+        assert len(orders) == 1 and orders[0]["position_intent"] == "buy_to_open"
+        [cand] = [c for c in await rows(api, OptionsTradeCandidateRow) if c.gate is None]
+        assert cand.audit["version"]["edge_basis"] == "backtest at pessimistic fills"
+
+
+async def test_at_most_twelve_strategies_explore_at_once_the_strongest_evidence_first(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock, options_exploration=True):
+        lab = api.container.options_lab
+        ids = {}
+        for i in range(14):  # fourteen validated strategies, edges 1%..14%
+            ids[i] = await promote(api, replace(LONG_CALL, delta_target=0.30 + i / 100), Stage.VALIDATION,
+                                   key=f"v{i}", latest={"validation_ror": 0.01 * (i + 1)})  # fmt: skip
+        walked = await promote(api, replace(LONG_CALL, delta_target=0.6), Stage.WALK_FORWARD, key="walked",
+                               latest={"validation_ror": 0.005})  # fmt: skip
+        settled = await promote(api, replace(LONG_CALL, delta_target=0.65), Stage.PAPER_SHADOW, key="settled")
+        handed = [v["version_id"] for v in await lab.eligible_versions()]
+        assert handed[0] == settled  # strategies at PAPER_SHADOW and beyond always
+        assert handed[1] == walked  # then the furthest along ...
+        assert handed[2:] == [ids[i] for i in range(13, 2, -1)]  # ... then the largest edges, twelve in all
+        assert len(handed) == 1 + 12
 
 
 async def test_each_strategy_builds_its_own_shadow_record(tmp_path):

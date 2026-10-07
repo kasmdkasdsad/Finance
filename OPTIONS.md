@@ -44,7 +44,7 @@ candidates   only strategies that passed validation (PAPER_SHADOW and above); th
              contract selection
 deliberate   eighteen agents: support, oppose, abstain (and say what is missing) or veto
 decide       thesis, bull/bear/devil's advocate, a plain-words explanation; options versus shares
-execute      shadow always; paper only at PAPER_ACTIVE (or one-contract exploration) through the trading service
+execute      shadow always; paper at PAPER_ACTIVE (one-contract exploration from VALIDATION) through the trading service
 learn        attribution, critique, counterfactual, learning events; weights, lessons, graded misses (daily)
 ```
 
@@ -82,9 +82,23 @@ One gate at a time, each recorded in the version's stage history with the eviden
 Decay is watched on live results (CUSUM and tests against what validation promised): DEGRADING drops a
 strategy back to shadow, BROKEN retires it. Nothing is deleted; a change is always a new version.
 
-**Exploration.** With `QP_OPTIONS_EXPLORATION=true`, a strategy at PAPER_SHADOW may trade *one* contract on
-paper (maximum loss ≤ `QP_OPTIONS_EXPLORATION_MAX_LOSS`) while its shadow record builds — to measure real
-paper fills. It is labelled as exploration everywhere.
+**Exploration.** A system that never trades never learns, and the research evidence is model-priced (no
+historical option quotes): live quotes are the real test. So with `QP_OPTIONS_EXPLORATION=true` (the default),
+trading starts once a strategy passes **VALIDATION** (at least 30 backtest trades, positive per dollar at risk
+after REALISTIC *and* PESSIMISTIC fills):
+* it is shadow-traded on live quotes, and may trade *one* contract on paper (maximum loss ≤
+  `QP_OPTIONS_EXPLORATION_MAX_LOSS`), so the lab learns from real paper fills while the evidence for the later
+  gates (walk-forward, Monte Carlo, tail stress, baselines, false-discovery control, the critic) builds;
+* its expected edge is the held-out (walk-forward) result when that is positive, else its backtest at
+  PESSIMISTIC fills; each candidate records which;
+* at most 12 strategies below PAPER_SHADOW explore at once: the furthest along first, then the largest
+  expected edge;
+* the strategy critic counts them as less proven than a strategy at PAPER_SHADOW, and every other agent, the
+  expected edge and the risk engine still decide each trade;
+* decay is watched on their live trades: one that breaks with the edge it is traded on is retired;
+* full-size paper trades still need PAPER_ACTIVE. Exploration trades are labelled as exploration everywhere.
+
+With exploration off, nothing trades before PAPER_SHADOW, and then only in shadow until PAPER_ACTIVE.
 
 **Research time.** Besides the daily run after the close (`QP_OPTIONS_RESEARCH_BUDGET_SECONDS`, 3 minutes), the
 closed-market research queue runs the lab for **25 minutes every 2 hours** (`options_research`), under the same
@@ -193,7 +207,7 @@ before expiration and the quote checks are unchanged.
 | `QP_OPTIONS_MAX_DELTA_PCT` / `_MAX_VEGA_PCT` | 50% / 1% | the book's net Greeks |
 | `QP_OPTIONS_TAKE_PROFIT_PCT` / `_STOP_LOSS_PCT` | 50% / 50% | protective overlay on live positions |
 | `QP_OPTIONS_MIN_SHADOW_TRADES` | 10 | before PAPER_ACTIVE |
-| `QP_OPTIONS_EXPLORATION` / `_EXPLORATION_MAX_LOSS` | true / $1,000 | one-contract exploration |
+| `QP_OPTIONS_EXPLORATION` / `_EXPLORATION_MAX_LOSS` | true / $1,000 | one-contract exploration from VALIDATION |
 | `QP_OPTIONS_RESEARCH_TIME` / `_RESEARCH_BUDGET_SECONDS` | 16:40 / 180 | the daily research run (the research queue adds 25 min every 2 h while the market is closed) |
 | `QP_EVOLUTION_ENABLED` / `_TIME` / `_REFERENCE_DAYS` / `_RECENT_DAYS` | true / 16:50 / 120 / 20 | the monitor |
 

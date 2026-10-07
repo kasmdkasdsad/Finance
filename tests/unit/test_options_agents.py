@@ -64,8 +64,23 @@ def test_vetoes_stop_a_candidate(ctx):
     assert "OptionsRiskAgent" in {x["agent"] for x in A.deliberate(risky)["vetoes"]}
     decaying = replace(ctx, decay="DEGRADING")
     assert "StrategyDecayAgent" in {x["agent"] for x in A.deliberate(decaying)["vetoes"]}
-    research = replace(ctx, version={**VERSION, "stage": "WALK_FORWARD"})
-    assert "StrategyCriticAgent" in {x["agent"] for x in A.deliberate(research)["vetoes"]}
+    for stage in ("RESEARCH", "EXTRACTED", "BACKTESTING"):  # no positive backtest yet: never traded
+        research = replace(ctx, version={**VERSION, "stage": stage})
+        assert "StrategyCriticAgent" in {x["agent"] for x in A.deliberate(research)["vetoes"]}
+    # from VALIDATION a strategy may explore (one capped contract), trusted less the earlier its stage
+    validated = A.strategy_critic(
+        replace(
+            ctx, version={**VERSION, "stage": "VALIDATION", "edge_basis": "backtest at pessimistic fills"}
+        )
+    )
+    walked = A.strategy_critic(replace(ctx, version={**VERSION, "stage": "WALK_FORWARD"}))
+    shadow = A.strategy_critic(replace(ctx, version={**VERSION, "stage": "PAPER_SHADOW"}))
+    assert "veto" not in (validated.verdict, walked.verdict)
+    assert validated.score < walked.score < shadow.score
+    assert any("exploring on backtest evidence" in r for r in validated.reasons)
+    assert any(
+        "backtest at pessimistic fills" in r for r in validated.reasons
+    )  # the edge says what it rests on
     ctx.view.features.event_days = 5  # earnings inside the option's life, and the strategy avoids events
     assert "EarningsEventAgent" in {x["agent"] for x in A.deliberate(ctx)["vetoes"]}
     ctx.view.features.event_days = None

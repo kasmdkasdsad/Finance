@@ -25,6 +25,8 @@ def _table(
 
 
 CLEARED = ("PAPER_SHADOW", "PAPER_ACTIVE", "PROVEN")
+# trade one exploration contract (and in shadow) while exploration is on
+EXPLORING = ("VALIDATION", "WALK_FORWARD")
 # the lab's stages, as the ladder shows them: (label, stages, what it means, does it trade)
 LADDER = (
     ("Ideas", ("RESEARCH", "EXTRACTED"), "written down", False),
@@ -37,15 +39,23 @@ LADDER = (
 )
 
 
-def _ladder(stages: dict[str, Any]) -> None:
-    ui.section(
-        "The strategy ladder",
-        "Every option strategy climbs one gate at a time; only the last three trade (shadow on live quotes, "
-        "then paper). " + (f"{int(stages.get('RETIRED') or 0)} retired." if stages.get("RETIRED") else ""),
+def _ladder(stages: dict[str, Any], exploring: bool) -> None:
+    trades = (
+        "from validated on a strategy trades: one exploration contract on paper beside its shadow trades, then "
+        "full size once every gate and its shadow record earn it"
+        if exploring
+        else "only the last three trade (shadow on live quotes, then paper)"
     )
+    retired = f" {int(stages.get('RETIRED') or 0)} retired." if stages.get("RETIRED") else ""
+    ui.section("The strategy ladder", f"Every option strategy climbs one gate at a time; {trades}.{retired}")
     ui.ladder(
         [
-            ui.Step(label, sum(int(stages.get(k) or 0) for k in keys), note, live)
+            ui.Step(
+                label,
+                sum(int(stages.get(k) or 0) for k in keys),
+                f"{note}, +1 contract" if exploring and set(keys) <= set(EXPLORING) else note,
+                live or (exploring and set(keys) <= set(EXPLORING)),
+            )
             for label, keys, note, live in LADDER
         ]
     )
@@ -75,7 +85,8 @@ def _limits(limits: dict[str, Any]) -> None:
 def _overview(st_: dict[str, Any]) -> None:
     lab = st_.get("lab") or {}
     stages = lab.get("by_stage") or {}
-    cleared = sum(int(stages.get(k) or 0) for k in CLEARED)
+    exploring = bool((st_.get("limits") or {}).get("exploration"))
+    cleared = sum(int(stages.get(k) or 0) for k in (*CLEARED, *(EXPLORING if exploring else ())))
     if not st_.get("enabled"):
         ui.status("gray", "Options are off", "QP_OPTIONS_ENABLED=false")
     elif cleared:
@@ -87,8 +98,14 @@ def _overview(st_: dict[str, Any]) -> None:
         ui.status(
             "yellow",
             "No option trades yet: no strategy has passed validation",
-            "Research runs after the close. A strategy needs a full backtest, walk-forward, stress tests and live "
-            "shadow trades before it may place a paper order.",
+            "Research runs while the market is closed. "
+            + (
+                "A strategy may place its first (one-contract, exploration) paper order once its backtests are "
+                "positive after realistic and pessimistic costs."
+                if exploring
+                else "A strategy needs a full backtest, walk-forward, stress tests and live shadow trades before it "
+                "may place a paper order."
+            ),
         )
     op = st_.get("open_positions") or {}
     ui.kpis(
@@ -103,7 +120,7 @@ def _overview(st_: dict[str, Any]) -> None:
         key="opt_status",
     )  # fmt: skip
     if stages:
-        _ladder(stages)
+        _ladder(stages, exploring)
     last = st_.get("last_pass") or {}
     if cleared:  # without a cleared strategy the status line above already says why
         for n in (st_.get("last_cycle") or {}).get("notes") or []:

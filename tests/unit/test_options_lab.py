@@ -292,6 +292,13 @@ def test_no_stage_can_be_skipped_and_proven_needs_paper_evidence():
         == newer
     )
     assert promotion.latest_evaluation([]) == {} == promotion.latest_evaluation(history[1:])
+    # the edge a strategy is traded on: the held-out result; the pessimistic backtest only while exploring at
+    # VALIDATION; nothing positive, nothing to trade on
+    backtest_only = {"latest": {"validation_ror": -0.02, "ror_by_model": {"PESSIMISTIC": 0.03}}}
+    assert promotion.expected_edge(evaluated, S.PAPER_SHADOW) == (0.04, "held-out period")
+    assert promotion.expected_edge(backtest_only, S.VALIDATION) == (0.03, "backtest at pessimistic fills")
+    assert promotion.expected_edge(backtest_only, S.PAPER_SHADOW) == (-0.02, "held-out period")
+    assert promotion.expected_edge({}, "VALIDATION") == (None, "no evidence")
     sc = scoring.score(metrics={"expectancy_on_risk": 0.06, "sharpe": 1.2, "max_drawdown": -0.05, "trades": 150},
                        walkforward={"oos": {"expectancy_on_risk": 0.04}},
                        montecarlo={"worst_risk_of_ruin": 0.0, "scenarios": {"bootstrap": {"final_pnl": {"p5": 100}}}},
