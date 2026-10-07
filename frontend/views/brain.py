@@ -255,9 +255,11 @@ def _cycle_book(cycle: dict[str, Any]) -> None:
         "them. Never sent to a broker."
     )
     st.markdown(
-        f"Equity **{money(pf.get('equity'))}** · cash {money(pf.get('cash'))} · "
-        f"{len(pf.get('positions') or {})} positions · {len((pf.get('book') or {}).get('fills') or [])} "
-        "simulated fills this cycle"
+        _md(
+            f"Equity **{money(pf.get('equity'))}** · cash {money(pf.get('cash'))} · "
+            f"{len(pf.get('positions') or {})} positions · {len((pf.get('book') or {}).get('fills') or [])} "
+            "simulated fills this cycle"
+        )
     )
     rows = [{"symbol": s, **p} for s, p in (pf.get("positions") or {}).items()]
     if rows:
@@ -265,8 +267,10 @@ def _cycle_book(cycle: dict[str, Any]) -> None:
     cons = pf.get("constraints") or {}
     if cons:
         st.caption(
-            f"Exposure {pct(cons.get('exposure'), 1)} · spendable cash {money(cons.get('spendable_cash'))} · "
-            f"free slots {cons.get('free_slots')} · beta {num(cons.get('beta'))}"
+            _md(
+                f"Exposure {pct(cons.get('exposure'), 1)} · spendable cash {money(cons.get('spendable_cash'))} · "
+                f"free slots {cons.get('free_slots')} · beta {num(cons.get('beta'))}"
+            )
         )
     alpaca = pf.get("alpaca_account") or {}
     owner = alpaca.get("owner") or "the trading strategy (the Brain only reads it)"
@@ -275,12 +279,14 @@ def _cycle_book(cycle: dict[str, Any]) -> None:
             st.warning(_md(f"Unavailable: {alpaca.get('error')}"), icon=":material/cloud_off:")
         else:
             st.markdown(
-                f"Equity {money(alpaca.get('equity'))} · cash {money(alpaca.get('cash'))} · "
-                f"{len(alpaca.get('positions') or {})} positions · {alpaca.get('open_orders', 0)} open orders. "
-                + (
-                    "The Brain manages this account; its orders go through the trading service."
-                    if "Brain" in owner
-                    else "The Brain makes no decisions for this account."
+                _md(
+                    f"Equity {money(alpaca.get('equity'))} · cash {money(alpaca.get('cash'))} · "
+                    f"{len(alpaca.get('positions') or {})} positions · {alpaca.get('open_orders', 0)} open orders. "
+                    + (
+                        "The Brain manages this account; its orders go through the trading service."
+                        if "Brain" in owner
+                        else "The Brain makes no decisions for this account."
+                    )
                 )
             )
 
@@ -1146,10 +1152,12 @@ def _book() -> None:
             icon=":material/hourglass_empty:",
         )
     st.caption(
-        f"Turnover {num(perf.get('turnover'))}× · slippage {money(perf.get('slippage'))} "
-        f"({num(perf.get('slippage_bps'))}bp) · fees {money(perf.get('costs'))} · closed trades "
-        f"{perf.get('closed_trades', 0)} (hit rate {pct(perf.get('closed_hit_rate'), 0)}) · realised "
-        f"{money(perf.get('realized_pnl'))}"
+        _md(
+            f"Turnover {num(perf.get('turnover'))}× · slippage {money(perf.get('slippage'))} "
+            f"({num(perf.get('slippage_bps'))}bp) · fees {money(perf.get('costs'))} · closed trades "
+            f"{perf.get('closed_trades', 0)} (hit rate {pct(perf.get('closed_hit_rate'), 0)}) · realised "
+            f"{money(perf.get('realized_pnl'))}"
+        )
     )
     curve = book.get("equity_curve") or []
     if len(curve) >= 2:

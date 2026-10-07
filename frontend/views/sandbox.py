@@ -127,8 +127,10 @@ def _create_form() -> None:
 def _step_result(step: dict[str, Any]) -> None:
     if step["executed"]:
         st.success(
-            f"Agent ran for {step['trading_day']}: {len(step['trades'])} trade(s), "
-            f"equity {money(step['equity'])} · data {step['data_status'].upper()}",
+            ui.md(
+                f"Agent ran for {step['trading_day']}: {len(step['trades'])} trade(s), "
+                f"equity {money(step['equity'])} · data {step['data_status'].upper()}"
+            ),
             icon=":material/smart_toy:",
         )
     else:
@@ -338,9 +340,11 @@ def _train_report(res: dict[str, Any]) -> None:
         "sandbox_train_weights",
     )
     st.caption(
-        f"{r['decisions']} decisions every {r['rebalance_every']} trading day(s) over {r['trading_days']} days; "
-        f"{r['trades']} simulated trades, turnover {r['turnover']:.1f}×, fees {money(r['fees_paid'])}. "
-        "Signals use closes up to day t and fill at day t+1's close (no look-ahead)."
+        ui.md(
+            f"{r['decisions']} decisions every {r['rebalance_every']} trading day(s) over {r['trading_days']} days; "
+            f"{r['trades']} simulated trades, turnover {r['turnover']:.1f}×, fees {money(r['fees_paid'])}. "
+            "Signals use closes up to day t and fill at day t+1's close (no look-ahead)."
+        )
     )
     if r["skipped"]:
         st.caption("Not replayed: " + "; ".join(f"{k} ({v})" for k, v in r["skipped"].items()))
@@ -427,8 +431,10 @@ def _order_form(account_id: int, mode: str) -> None:
             fill = guarded(lambda: api().post(f"{BASE}/{account_id}/orders", payload), "order")
             if fill:
                 st.success(
-                    f"Filled: {fill['side']} {fill['quantity']:g} {fill['symbol']} at ${fill['price']:,.2f} "
-                    f"(quote ${fill['reference_price']:,.2f} ± slippage)",
+                    ui.md(
+                        f"Filled: {fill['side']} {fill['quantity']:g} {fill['symbol']} at ${fill['price']:,.2f} "
+                        f"(quote ${fill['reference_price']:,.2f} ± slippage)"
+                    ),
                     icon=":material/check_circle:",
                 )
 
@@ -550,9 +556,11 @@ def render() -> None:
     m[4].metric("Max drawdown", pct(perf["max_drawdown"]))
     last = account["last_decision_on"] or "never"
     st.caption(
-        f"{account['mode'].capitalize()} account · auto-trade {'on' if account['auto_trade'] else 'off'} · "
-        f"last agent decision: {last} · learned from {account['periods_learned']} period(s) · "
-        f"{perf['trades']} trades · fees {money(perf['fees_paid'])}"
+        ui.md(
+            f"{account['mode'].capitalize()} account · auto-trade {'on' if account['auto_trade'] else 'off'} · "
+            f"last agent decision: {last} · learned from {account['periods_learned']} period(s) · "
+            f"{perf['trades']} trades · fees {money(perf['fees_paid'])}"
+        )
     )
     if account["mode"] == "agent":
         _actions(account)

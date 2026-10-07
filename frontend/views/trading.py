@@ -196,7 +196,7 @@ def _portfolio() -> None:
     acct = guarded(lambda: api().get(f"{BASE}/account"), "account")
     split = today_split((acct or {}).get("day_pl"), positions)
     if split:
-        st.caption(split)
+        st.caption(ui.md(split))
     if df["target_weight"].isna().all():  # the Brain sets no target weights: nothing to compare
         return
     fig = go.Figure()

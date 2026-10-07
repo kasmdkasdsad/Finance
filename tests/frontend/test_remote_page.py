@@ -29,7 +29,8 @@ def test_home_shows_the_status_the_account_and_the_brain(brain_server):  # noqa:
     row = positions[positions["Symbol"] == "UPA"].iloc[0]
     assert row["Value"] == live["UPA"]["market_value"] and row["Today"] == live["UPA"]["intraday_pl"]
     assert positions["Value"].sum() == pytest.approx(acct["long_market_value"])
-    assert any(c.value.startswith("Today's P&L") for c in at.caption)
+    split = next(c.value for c in at.caption if c.value.startswith("Today's P&L"))
+    assert "$" not in split.replace("\\$", "")  # every amount escaped: never rendered as a formula
     assert "Supervisor" in html and "Next cycle" in html and "Learning" in html  # the Brain at a glance
     assert any("**Latest decision**" in m.value for m in at.markdown)
     assert any(b.label == "STOP BRAIN TRADING" for b in at.button)

@@ -70,6 +70,84 @@ h1, h2, h3 { letter-spacing: -0.015em; }
 .qp-facts div { font-size: 0.86rem; line-height: 1.35; }
 .qp-facts span { display: block; font-size: 0.74rem; opacity: 0.62; text-transform: uppercase; letter-spacing: 0.04em; }
 
+/* ---------- depth and accent (translucent tones: light and dark alike) ---------- */
+/* a soft blue glow behind the page head */
+[data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(1100px 420px at 50% -180px, rgba(37, 99, 235, 0.11), transparent 70%),
+    radial-gradient(700px 300px at 92% -120px, rgba(16, 185, 129, 0.07), transparent 70%),
+    var(--qp-bg, transparent);
+}
+/* the top bar: frosted, with a hairline under it */
+[data-testid="stHeader"] {
+  background: color-mix(in srgb, var(--qp-bg, #fff) 78%, transparent);
+  backdrop-filter: saturate(160%) blur(10px);
+  -webkit-backdrop-filter: saturate(160%) blur(10px);
+  border-bottom: 1px solid color-mix(in srgb, var(--qp-line, #E3E7ED) 70%, transparent);
+}
+/* KPI cards: a thin accent line on top, a soft shadow, a small lift on hover */
+[class*="st-key-kpis"] [data-testid="stMetric"] {
+  position: relative; overflow: hidden;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 18px rgba(15, 23, 42, 0.05);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+[class*="st-key-kpis"] [data-testid="stMetric"]::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+  background: linear-gradient(90deg, #2563EB, #0EA5E9 55%, #10B981);
+}
+[class*="st-key-kpis"] [data-testid="stMetric"]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.05), 0 10px 26px rgba(15, 23, 42, 0.08);
+}
+/* section titles: a short accent bar before them */
+[data-testid="stMain"] h3::before {
+  content: ""; display: inline-block; width: 4px; height: 0.95em; border-radius: 2px; margin-right: 0.55rem;
+  vertical-align: -0.1em; background: linear-gradient(180deg, #2563EB, #0EA5E9);
+}
+/* tabs: the selected one sits on a tinted pill */
+[data-testid="stTabs"] [role="tablist"] { gap: 0.25rem; }
+[data-testid="stTabs"] [data-testid="stTab"] { border-radius: 0.55rem 0.55rem 0 0; padding: 0.45rem 0.85rem; }
+[data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] { background: rgba(37, 99, 235, 0.08); }
+/* tables, bordered containers and folded sections: rounded, with a whisper of shadow */
+[data-testid="stDataFrame"] { border-radius: 0.65rem; overflow: hidden; }
+[data-testid="stExpander"] details,
+[class*="st-key-home_equity"] {
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+/* the status line: a stronger edge on the left */
+.qp-status { border-left-width: 4px; }
+
+/* a chart's own head: label, value and change */
+.qp-chart-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.35rem 0.65rem; padding: 0.15rem 0.25rem 0; }
+.qp-chart-head span { font-size: 0.8rem; font-weight: 500; opacity: 0.72; }
+.qp-chart-head b { font-size: 1.3rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.qp-chart-head em {
+  font-style: normal; font-size: 0.78rem; font-weight: 600; padding: 0.12rem 0.5rem; border-radius: 999px;
+}
+.qp-up   { color: #16A34A; background: rgba(34, 197, 94, 0.13); }
+.qp-down { color: #DC2626; background: rgba(239, 68, 68, 0.13); }
+
+/* the strategy ladder: stages left to right; filled ones stand out, trading ones in green */
+.qp-ladder { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0.55rem; margin: 0.2rem 0 0.9rem; }
+.qp-step {
+  position: relative; padding: 0.8rem 0.6rem 0.7rem; text-align: center; border-radius: 0.75rem;
+  border: 1px solid rgba(128, 128, 128, 0.22); background: rgba(128, 128, 128, 0.04);
+}
+.qp-step b { display: block; font-size: 1.6rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; opacity: 0.35; }
+.qp-step span { display: block; margin-top: 0.25rem; font-size: 0.82rem; font-weight: 600; }
+.qp-step small { display: block; margin-top: 0.1rem; font-size: 0.7rem; line-height: 1.25; opacity: 0.6; }
+.qp-step-on b { opacity: 1; }
+.qp-step-on { border-color: rgba(37, 99, 235, 0.45); background: rgba(37, 99, 235, 0.07); }
+.qp-step-live { border-style: dashed; }
+.qp-step-live.qp-step-on {
+  border-style: solid; border-color: rgba(16, 185, 129, 0.6); background: rgba(16, 185, 129, 0.1);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.08);
+}
+.qp-step:not(:last-child)::after {
+  content: "›"; position: absolute; right: -0.48rem; top: 50%; transform: translateY(-55%);
+  font-size: 1.15rem; line-height: 1; opacity: 0.35; z-index: 1;
+}
+
 /* ---------- sign in / sign out ---------- */
 .qp-login {
   max-width: 380px; margin: 9vh auto 0; padding: 2.1rem 2rem 1.8rem;
@@ -121,7 +199,13 @@ h1, h2, h3 { letter-spacing: -0.015em; }
   [data-testid="stMetricValue"] { font-size: 1.25rem !important; }
   .qp-login { margin-top: 4vh; padding: 1.6rem 1.25rem; box-shadow: none; }
   [data-testid="stHeaderLogo"], [data-testid="stLogo"] { height: 1.5rem !important; max-width: 9.5rem; object-fit: contain; }
-  [data-testid="stTabs"] button[role="tab"] { padding-left: 0.6rem; padding-right: 0.6rem; }
+  [data-testid="stTabs"] [data-testid="stTab"] { padding-left: 0.6rem; padding-right: 0.6rem; }
+  /* the ladder: four stages a line */
+  .qp-ladder { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.45rem; }
+  .qp-step { padding: 0.6rem 0.35rem 0.55rem; }
+  .qp-step b { font-size: 1.3rem; }
+  .qp-step small { display: none; }
+  .qp-step:nth-child(4n)::after { display: none; }
 
   /* the tab bar: the five main pages, one tap away, fixed to the bottom of the screen */
   [data-testid="stMainBlockContainer"] { padding-bottom: 6.5rem; }

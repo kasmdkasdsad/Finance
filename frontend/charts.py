@@ -107,8 +107,13 @@ def base_layout(fig: go.Figure, title: str | None = None, height: int = 360, **k
     return fig
 
 
-def show(fig: go.Figure, key: str | None = None) -> None:
-    st.plotly_chart(fig, width="stretch", key=key, config={"displaylogo": False, "responsive": True})
+def show(fig: go.Figure, key: str | None = None, toolbar: bool = True) -> None:
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        key=key,
+        config={"displaylogo": False, "responsive": True, "displayModeBar": "hover" if toolbar else False},
+    )
 
 
 def rgba(hex_color: str, alpha: float) -> str:
@@ -116,6 +121,41 @@ def rgba(hex_color: str, alpha: float) -> str:
     h = hex_color.lstrip("#")
     r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
     return f"rgba({r},{g},{b},{alpha})"
+
+
+def equity(points: list[tuple[Any, float]], title: str | None = None, height: int = 240) -> go.Figure:
+    """An account's equity over time: one line over a soft gradient (green when it ended above where it
+    started, red below), the y-axis fitted to the data rather than to zero."""
+    xs = [p[0] for p in points]
+    ys = [float(p[1]) for p in points]
+    up = ys[-1] >= ys[0]
+    color = STATUS["good"] if up else STATUS["critical"]
+    lo, hi = min(ys), max(ys)
+    pad = max((hi - lo) * 0.15, abs(hi) * 0.002, 1.0)
+    floor = lo - pad
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=xs, y=[floor] * len(xs), mode="lines", line={"width": 0}, hoverinfo="skip",
+                             showlegend=False))  # fmt: skip
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=ys,
+            mode="lines",
+            name="Equity",
+            line={"color": color, "width": 2.5, "shape": "spline", "smoothing": 0.6},
+            fill="tonexty",
+            fillgradient={
+                "type": "vertical",
+                "colorscale": [[0, rgba(color, 0.0)], [1, rgba(color, 0.22)]],
+            },
+            hovertemplate="%{x}<br>$%{y:,.0f}<extra></extra>",
+            showlegend=False,
+        )
+    )
+    base_layout(fig, title, height=height, margin={"l": 8, "r": 8, "t": 40 if title else 8, "b": 8})
+    fig.update_yaxes(range=[floor, hi + pad], tickprefix="$", tickformat=",.0f")
+    fig.update_layout(hovermode="x unified", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+    return fig
 
 
 def reference_line(fig: go.Figure, y: float, label: str | None = None) -> None:

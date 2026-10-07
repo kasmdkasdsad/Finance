@@ -118,6 +118,26 @@ def section(title: str, caption: str | None = None) -> None:
         st.caption(md(caption))
 
 
+class Step(NamedTuple):
+    label: str
+    n: int
+    note: str = ""
+    live: bool = False  # a stage that trades (shadow or paper): drawn in the accent colour
+
+
+def ladder(steps: Sequence[Step]) -> None:
+    """Stages left to right, each with how many items stand there; filled stages stand out, and the stages
+    that trade are drawn in the accent colour. Wraps onto several lines on a phone."""
+    cells = "".join(
+        f'<div class="qp-step{" qp-step-live" if s.live else ""}{" qp-step-on" if s.n else ""}">'
+        f"<b>{int(s.n)}</b><span>{html.escape(s.label)}</span>"
+        + (f"<small>{html.escape(s.note)}</small>" if s.note else "")
+        + "</div>"
+        for s in steps
+    )
+    st.html(f'<div class="qp-ladder" role="list">{cells}</div>')
+
+
 def eastern(ts: str | datetime | None) -> datetime | None:
     """An API time (ISO 8601, UTC unless it says otherwise) in New York time; ``None`` if there is none."""
     if not ts:

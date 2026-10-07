@@ -25,6 +25,51 @@ def _table(
 
 
 CLEARED = ("PAPER_SHADOW", "PAPER_ACTIVE", "PROVEN")
+# the lab's stages, as the ladder shows them: (label, stages, what it means, does it trade)
+LADDER = (
+    ("Ideas", ("RESEARCH", "EXTRACTED"), "written down", False),
+    ("Backtested", ("BACKTESTING",), "five fill models", False),
+    ("Validated", ("VALIDATION",), "positive after costs", False),
+    ("Walk-forward", ("WALK_FORWARD",), "held-out period", False),
+    ("Shadow", ("PAPER_SHADOW",), "live quotes, +1 contract", True),
+    ("Paper", ("PAPER_ACTIVE",), "full size", True),
+    ("Proven", ("PROVEN",), "50+ paper trades", True),
+)
+
+
+def _ladder(stages: dict[str, Any]) -> None:
+    ui.section(
+        "The strategy ladder",
+        "Every option strategy climbs one gate at a time; only the last three trade (shadow on live quotes, "
+        "then paper). " + (f"{int(stages.get('RETIRED') or 0)} retired." if stages.get("RETIRED") else ""),
+    )
+    ui.ladder(
+        [
+            ui.Step(label, sum(int(stages.get(k) or 0) for k in keys), note, live)
+            for label, keys, note, live in LADDER
+        ]
+    )
+
+
+def _limits(limits: dict[str, Any]) -> None:
+    def usd(x: Any) -> str:
+        return money(x, 0) if x is not None else "—"
+
+    dte = limits.get("dte") or [None, None]
+    ui.facts(
+        [
+            ("Per position", f"{usd(limits.get('max_loss_per_trade'))} · {pct(limits.get('max_loss_pct_per_trade'), 0)}"),
+            ("All options", pct(limits.get("max_total_risk_pct"), 0)),
+            ("One underlying", pct(limits.get("max_underlying_risk_pct"), 0)),
+            ("Open positions", limits.get("max_positions")),
+            ("Contracts per leg", limits.get("max_contracts")),
+            ("Days to expiry", f"{dte[0]}–{dte[1]} (closed at {limits.get('close_dte')})"),
+            ("Net delta / vega", f"{pct(limits.get('max_delta_pct'), 0)} / {pct(limits.get('max_vega_pct'), 1)}"),
+            ("Widest spread", pct(limits.get("max_spread_pct"), 0)),
+            ("Quote age", f"{limits.get('max_quote_age_seconds', 0):.0f} s"),
+            ("Exploration", f"{'on' if limits.get('exploration') else 'off'} · {usd(limits.get('exploration_max_loss'))}"),
+        ]
+    )  # fmt: skip
 
 
 def _overview(st_: dict[str, Any]) -> None:
@@ -58,8 +103,7 @@ def _overview(st_: dict[str, Any]) -> None:
         key="opt_status",
     )  # fmt: skip
     if stages:
-        st.markdown("**Strategies by stage** — nothing reaches PAPER_ACTIVE without live shadow trades")
-        st.dataframe(pd.DataFrame([stages]), hide_index=True, width="stretch")
+        _ladder(stages)
     last = st_.get("last_pass") or {}
     if cleared:  # without a cleared strategy the status line above already says why
         for n in (st_.get("last_cycle") or {}).get("notes") or []:
@@ -81,7 +125,7 @@ def _overview(st_: dict[str, Any]) -> None:
         )
         st.caption(ui.md(f"Feed: {st_.get('feed')} — {st_.get('feed_note')}"))
         st.markdown("**Limits** (protected: they can only be tightened)")
-        st.json(st_.get("limits") or {}, expanded=False)
+        _limits(st_.get("limits") or {})
     with st.expander("The agents and their questions", icon=":material/groups:"):
         _table(st_.get("agents"), ["agent", "question", "weight", "where"])
 

@@ -10,12 +10,13 @@ switches, alerts) are folded away. Nothing here shows a key, a token or a passwo
 
 from __future__ import annotations
 
+import html
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from frontend import ui
+from frontend import charts, ui
 from frontend.components import api, guarded, money, pct, today_split
 
 BASE = "/brain"
@@ -55,6 +56,25 @@ def _account(acct: dict[str, Any] | None) -> None:
         ],
         key="home_account",
     )
+
+
+def _equity(perf: dict[str, Any] | None) -> None:
+    """The account's equity by trading day (recorded at each close), once there are two days to draw."""
+    daily = [d for d in (perf or {}).get("daily") or [] if d.get("equity") is not None]
+    if len(daily) < 2:
+        return
+    first, last = float(daily[0]["equity"]), float(daily[-1]["equity"])
+    change = f"{(last / first - 1):+.2%}" if first else ""
+    start = ui.eastern(f"{daily[0]['date']}T12:00:00")
+    since = f"{start:%b} {start.day}" if start else str(daily[0]["date"])
+    with st.container(key="home_equity", border=True):
+        st.html(
+            f'<div class="qp-chart-head"><span>Equity at each session</span>'
+            f'<em class="{"qp-up" if last >= first else "qp-down"}">{change} since {html.escape(since)}</em></div>'
+        )
+        charts.show(
+            charts.equity([(d["date"], d["equity"]) for d in daily]), key="home_equity_chart", toolbar=False
+        )
 
 
 def _positions(
@@ -105,7 +125,7 @@ def _positions(
         st.caption("No open positions.")
     split = today_split((acct or {}).get("day_pl"), live)
     if split and (rows or abs((acct or {}).get("day_pl") or 0.0) >= 0.5):
-        st.caption(split)
+        st.caption(ui.md(split))
     unexpected = (theses or {}).get("unexpected") or []
     if unexpected:
         st.warning(
@@ -294,6 +314,7 @@ def _page() -> None:
     acct = guarded(lambda: api().get("/trading/account"), "account")
     live = guarded(lambda: api().get("/trading/positions"), "positions")
     _account(acct)
+    _equity(guarded(lambda: api().get("/trading/performance"), "performance"))
     _positions(
         live,
         acct,
