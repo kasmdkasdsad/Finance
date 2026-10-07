@@ -735,19 +735,19 @@ class Settings(BaseSettings):
         "be listed; naked short options are never executable. Adding a family needs a person (protected).",
     )
     options_max_loss_per_trade: float = Field(
-        default=500.0, gt=0, description="Largest possible loss of one new option position, in dollars."
+        default=1500.0, gt=0, description="Largest possible loss of one new option position, in dollars."
     )
     options_max_loss_pct_per_trade: float = Field(
-        default=0.01, gt=0, le=0.1, description="…and as a share of equity (the smaller limit applies)."
+        default=0.02, gt=0, le=0.1, description="…and as a share of equity (the smaller limit applies)."
     )
     options_max_total_risk_pct: float = Field(
-        default=0.06, gt=0, le=0.5, description="The sum of the maximum losses of every option position."
+        default=0.15, gt=0, le=0.5, description="The sum of the maximum losses of every option position."
     )
     options_max_underlying_risk_pct: float = Field(
-        default=0.02, gt=0, le=0.2, description="The maximum loss of all option positions on one underlying."
+        default=0.05, gt=0, le=0.2, description="The maximum loss of all option positions on one underlying."
     )
-    options_max_positions: int = Field(default=6, ge=1, le=50, description="Open option structures at most.")
-    options_max_contracts: int = Field(default=10, ge=1, le=200, description="Contracts per leg per order.")
+    options_max_positions: int = Field(default=12, ge=1, le=50, description="Open option structures at most.")
+    options_max_contracts: int = Field(default=20, ge=1, le=200, description="Contracts per leg per order.")
     options_min_dte: int = Field(
         default=7, ge=1, le=365, description="No new position closer to expiration (0DTE is research only)."
     )
@@ -767,13 +767,13 @@ class Settings(BaseSettings):
     )
     options_min_open_interest: float = Field(default=100.0, ge=0, description="Per leg, for new positions.")
     options_max_delta_pct: float = Field(
-        default=0.30,
+        default=0.50,
         gt=0,
         le=2,
         description="Net option delta (in dollars of underlying) across the book, as a share of equity.",
     )
     options_max_vega_pct: float = Field(
-        default=0.005,
+        default=0.01,
         gt=0,
         le=0.1,
         description="Net option vega (dollars per volatility point) across the book, as a share of equity.",
@@ -809,7 +809,7 @@ class Settings(BaseSettings):
         "Labelled as exploration everywhere; false: only fully validated strategies trade.",
     )
     options_exploration_max_loss: float = Field(
-        default=250.0, gt=0, description="Largest possible loss of one exploration trade, in dollars."
+        default=1000.0, gt=0, description="Largest possible loss of one exploration trade, in dollars."
     )
     options_research_budget_seconds: float = Field(
         default=180.0, ge=10, le=3600, description="Time the research lab may spend per run (background)."

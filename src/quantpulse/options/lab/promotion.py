@@ -24,6 +24,7 @@ executable list and for anything undefined-risk — which is never executable at
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -164,6 +165,22 @@ def demote_for(current: Stage, ev: Evidence) -> tuple[Stage, str] | None:
     if ev.decay_status == "DEGRADING" and current in EXECUTABLE_STAGES:
         return Stage.PAPER_SHADOW, "decay DEGRADING: back to shadow until the evidence recovers"
     return None
+
+
+# what a lab evaluation leaves on a version's newest stage record: its results, the false-discovery result,
+# where it stopped, when and on what data
+EVALUATION_KEYS = ("latest", "fdr", "stopped_at", "evaluated_at", "grade")
+
+
+def latest_evaluation(history: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
+    """The newest lab evaluation in a version's stage history (the ``EVALUATION_KEYS`` of the newest record that
+    has results). A promotion record carries the evaluation forward; histories written before it did are
+    searched back to the record that holds it."""
+    for rec in reversed(history or []):
+        ev = rec.get("evidence") or {}
+        if ev.get("latest"):
+            return {k: ev[k] for k in EVALUATION_KEYS if k in ev}
+    return {}
 
 
 def stage_record(

@@ -281,6 +281,17 @@ def test_no_stage_can_be_skipped_and_proven_needs_paper_evidence():
         promotion.demote_for(S.PAPER_ACTIVE, promotion.Evidence(decay_status="DEGRADING"))[0]
         == S.PAPER_SHADOW
     )
+    # what the lab validated travels with the version: found on the newest record that holds it
+    evaluated = {"latest": {"validation_ror": 0.04}, "fdr": {"discovery": True}, "grade": "model"}
+    history = [promotion.stage_record(S.WALK_FORWARD, "t0", "evaluated", evaluated),
+               promotion.stage_record(S.PAPER_SHADOW, "t1", "gate passed", {"walkforward_passed": True})]  # fmt: skip
+    assert promotion.latest_evaluation(history) == evaluated
+    newer = {**evaluated, "latest": {"validation_ror": 0.05}}
+    assert (
+        promotion.latest_evaluation([*history, promotion.stage_record(S.PAPER_SHADOW, "t2", "x", newer)])
+        == newer
+    )
+    assert promotion.latest_evaluation([]) == {} == promotion.latest_evaluation(history[1:])
     sc = scoring.score(metrics={"expectancy_on_risk": 0.06, "sharpe": 1.2, "max_drawdown": -0.05, "trades": 150},
                        walkforward={"oos": {"expectancy_on_risk": 0.04}},
                        montecarlo={"worst_risk_of_ruin": 0.0, "scenarios": {"bootstrap": {"final_pnl": {"p5": 100}}}},

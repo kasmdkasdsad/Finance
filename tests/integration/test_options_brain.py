@@ -128,6 +128,61 @@ async def test_research_strategies_never_trade_and_shadow_never_sends_orders(tmp
         ]  # a shadow trade is never an order
 
 
+PASSED = {"backtest_trades": 40, "ror_by_model": {"REALISTIC": 0.05, "PESSIMISTIC": 0.02}, "validation_ror": 0.08,
+          "overfit_risk": 0.2, "walkforward_passed": True, "montecarlo_ruin": 0.001, "tail_passed": True,
+          "beats_baselines": True, "critic_survived": True}  # fmt: skip
+
+
+async def test_a_strategy_the_lab_promotes_is_traded_on_its_validated_edge(tmp_path):
+    """The lab's own promotion carries the validated edge to the new stage record, so a strategy it promotes to
+    PAPER_SHADOW is traded: shadow on live quotes and one exploration contract on paper. (The edge used to stay
+    on the earlier record: every promoted strategy read as having none, and none ever traded.)"""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        lab = api.container.options_lab
+        vid = await promote(api, LONG_CALL, Stage.WALK_FORWARD)
+        async with api.container.db.session() as s:  # the lab's evaluation: every gate to PAPER_SHADOW passed
+            v = await s.get(OptionsStrategyVersionRow, vid)
+            last = v.stage_history[-1]
+            v.stage_history = [
+                *v.stage_history[:-1],
+                {**last, "evidence": {"latest": PASSED, "fdr": {"discovery": True}}},
+            ]
+        promoted, _ = await lab._promote_all(clock.now())
+        assert [(p["from"], p["to"]) for p in promoted] == [("WALK_FORWARD", "PAPER_SHADOW")]
+        [eligible] = await lab.eligible_versions()
+        assert eligible["stage"] == "PAPER_SHADOW" and eligible["expected_ror"] == 0.08
+        await run_cycle(api)
+        cands = await rows(api, OptionsTradeCandidateRow)
+        assert cands and all(c.gate != "no validated edge" for c in cands), [
+            (c.status, c.gate) for c in cands
+        ]
+        shadow = await rows(api, OptionsPositionRow, mode="shadow")
+        paper = await rows(api, OptionsPositionRow, mode="paper")
+        assert len(shadow) == 1 and shadow[0].version_id == vid
+        assert len(paper) == 1 and paper[0].structure["exploration"] and paper[0].quantity == 1
+        assert paper[0].max_loss <= api.container.settings.options_exploration_max_loss
+
+
+async def test_a_promoted_strategy_with_no_positive_edge_still_never_trades(tmp_path):
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        lab = api.container.options_lab
+        vid = await promote(api, LONG_CALL, Stage.WALK_FORWARD)
+        async with api.container.db.session() as s:
+            v = await s.get(OptionsStrategyVersionRow, vid)
+            v.stage = Stage.PAPER_SHADOW.value  # promoted, but what the lab validated was not positive
+            v.stage_history = [*v.stage_history[:-1], {**v.stage_history[-1], "evidence": {"latest": {**PASSED, "validation_ror": -0.01}}},
+                               stage_record(Stage.PAPER_SHADOW, clock.now().isoformat(), "gate for PAPER_SHADOW passed",
+                                            {"walkforward_passed": True})]  # fmt: skip
+        [eligible] = await lab.eligible_versions()  # a history written before promotions carried the evidence
+        assert eligible["expected_ror"] == -0.01
+        await run_cycle(api)
+        assert await rows(api, OptionsPositionRow) == []
+        assert {c.gate for c in await rows(api, OptionsTradeCandidateRow)} == {"no validated edge"}
+        assert not [b for b in api.fake.bodies if b.get("position_intent")]
+
+
 async def test_nothing_is_sent_when_the_brain_does_not_own_the_account(tmp_path):
     clock = FakeClock(NOW)
     async for api in client(tmp_path, clock, brain_mode="paper_recommendation"):

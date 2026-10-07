@@ -81,20 +81,20 @@ class OptionLimits:
         "bear_call_spread",
         "covered_call",
     )
-    max_loss_per_trade: float = 500.0
-    max_loss_pct_per_trade: float = 0.01
-    max_total_risk_pct: float = 0.06
-    max_underlying_risk_pct: float = 0.02
-    max_positions: int = 6
-    max_contracts: int = 10
+    max_loss_per_trade: float = 1500.0
+    max_loss_pct_per_trade: float = 0.02
+    max_total_risk_pct: float = 0.15
+    max_underlying_risk_pct: float = 0.05
+    max_positions: int = 12
+    max_contracts: int = 20
     min_dte: int = 7
     max_dte: int = 60
     max_spread_pct: float = 0.15
     max_quote_age_seconds: float = 120.0
     min_open_interest: float = 100.0
-    max_delta_pct: float = 0.30
-    max_vega_pct: float = 0.005
-    exploration_max_loss: float = 250.0
+    max_delta_pct: float = 0.50
+    max_vega_pct: float = 0.01
+    exploration_max_loss: float = 1000.0
 
     @classmethod
     def from_settings(cls, s: Any) -> OptionLimits:

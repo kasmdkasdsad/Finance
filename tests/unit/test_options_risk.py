@@ -130,7 +130,8 @@ def test_a_covered_call_needs_the_shares_and_they_cover_only_once():
 
 
 def test_loss_limits_per_trade_underlying_and_book():
-    assert "max_loss" in failed(book().evaluate_option(spread(qty=2)))  # $720 > $500
+    assert "max_loss" not in failed(book().evaluate_option(spread(qty=4)))  # $1,440 ≤ $1,500
+    assert "max_loss" in failed(book().evaluate_option(spread(qty=5)))  # $1,800 > $1,500
     tight = RiskLimits(options=OptionLimits(max_underlying_risk_pct=0.003))
     assert "underlying_risk" in failed(book(limits=tight).evaluate_option(spread()))
     held = [opt_position(f"SPY2610{d}C00600000", 1, 20.0) for d in (16, 23)]  # $4,000 at risk already
@@ -138,7 +139,10 @@ def test_loss_limits_per_trade_underlying_and_book():
     d = book(positions=held, limits=small_book).evaluate_option(spread())
     assert "total_risk" in failed(d)
     explore = spread(exploration=True)
-    assert "max_loss" in failed(book().evaluate_option(explore))  # $360 > the $250 exploration cap
+    assert "max_loss" not in failed(book().evaluate_option(explore))  # $360 ≤ the $1,000 exploration cap
+    capped = RiskLimits(options=OptionLimits(exploration_max_loss=250.0))
+    assert "max_loss" in failed(book(limits=capped).evaluate_option(explore))  # $360 > a $250 exploration cap
+    assert "max_loss" in failed(book().evaluate_option(spread(qty=3, exploration=True)))  # never above $1,000
     assert book().evaluate_option(replace(explore, limit_price=2.4, legs=(leg(C210, "buy", "buy_to_open"),
                                   leg(C220, "sell", "sell_to_open")))).approved is False  # fmt: skip
 
@@ -246,7 +250,7 @@ def test_property_an_approved_vertical_never_risks_more_than_the_cap(lo, width, 
     o = OptionOrderIntent("AAPL", family, legs, qty, round(limit, 2), "entry", "t", True, 200.0)
     d = book(quotes=quotes).evaluate_option(o)
     if d.approved:
-        cap = min(OptionLimits().max_loss_per_trade, 0.01 * 100_000)
+        cap = min(OptionLimits().max_loss_per_trade, OptionLimits().max_loss_pct_per_trade * 100_000)
         assert true_loss <= cap + 1.0 + 2 * qty  # cents of rounding per unit
         assert not any(c.name == "no_naked_short" and not c.passed for c in d.checks)
 

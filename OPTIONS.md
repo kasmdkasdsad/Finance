@@ -171,6 +171,13 @@ an AI model (`POST /registry/models/{id}/approve`, typed confirmation). The repl
 
 ## 8. Settings
 
+The option loss limits below were raised at the account owner's request (paper only), so the lab learns from
+more real paper fills: $1,500 or 2% per position (was $500 / 1%), 15% across all options (6%), 5% per
+underlying (2%), 12 positions (6), 20 contracts (10), 50% net delta and 1% net vega (30% / 0.5%), $1,000 per
+exploration contract ($250). Each one can still be tightened in the server's environment, never loosened past
+these. Paper-only, the kill switches, the account's 4% daily loss limit, defined risk only, no 0DTE, closing
+before expiration and the quote checks are unchanged.
+
 | Setting | Default | Meaning |
 |---|---|---|
 | `QP_OPTIONS_ENABLED` | `true` | research, shadow trading and the Options Brain |
@@ -178,15 +185,15 @@ an AI model (`POST /registry/models/{id}/approve`, typed confirmation). The repl
 | `QP_OPTIONS_PRIORITY_WEIGHT` | `0.15` | favour options over shares in close calls; never forces |
 | `QP_OPTIONS_UNIVERSE` | SPY,QQQ,IWM,AAPL,MSFT,NVDA,AMZN,META | chains read each cycle |
 | `QP_OPTIONS_ALLOWED_STRUCTURES` | the seven defined-risk defaults | may drop families; adding needs a person |
-| `QP_OPTIONS_MAX_LOSS_PER_TRADE` / `_PCT_PER_TRADE` | $500 / 1% | per new position |
-| `QP_OPTIONS_MAX_TOTAL_RISK_PCT` / `_UNDERLYING_RISK_PCT` | 6% / 2% | book limits |
-| `QP_OPTIONS_MAX_POSITIONS` / `_MAX_CONTRACTS` | 6 / 10 | |
+| `QP_OPTIONS_MAX_LOSS_PER_TRADE` / `_PCT_PER_TRADE` | $1,500 / 2% | per new position |
+| `QP_OPTIONS_MAX_TOTAL_RISK_PCT` / `_UNDERLYING_RISK_PCT` | 15% / 5% | book limits |
+| `QP_OPTIONS_MAX_POSITIONS` / `_MAX_CONTRACTS` | 12 / 20 | |
 | `QP_OPTIONS_MIN_DTE` / `_MAX_DTE` / `_CLOSE_DTE` | 7 / 60 / 2 | entry window; close before expiration |
 | `QP_OPTIONS_MAX_SPREAD_PCT` / `_MAX_QUOTE_AGE_SECONDS` / `_MIN_OPEN_INTEREST` | 15% / 120 / 100 | per leg |
-| `QP_OPTIONS_MAX_DELTA_PCT` / `_MAX_VEGA_PCT` | 30% / 0.5% | the book's net Greeks |
+| `QP_OPTIONS_MAX_DELTA_PCT` / `_MAX_VEGA_PCT` | 50% / 1% | the book's net Greeks |
 | `QP_OPTIONS_TAKE_PROFIT_PCT` / `_STOP_LOSS_PCT` | 50% / 50% | protective overlay on live positions |
 | `QP_OPTIONS_MIN_SHADOW_TRADES` | 10 | before PAPER_ACTIVE |
-| `QP_OPTIONS_EXPLORATION` / `_EXPLORATION_MAX_LOSS` | true / $250 | one-contract exploration |
+| `QP_OPTIONS_EXPLORATION` / `_EXPLORATION_MAX_LOSS` | true / $1,000 | one-contract exploration |
 | `QP_OPTIONS_RESEARCH_TIME` / `_RESEARCH_BUDGET_SECONDS` | 16:40 / 180 | the daily research run (the research queue adds 25 min every 2 h while the market is closed) |
 | `QP_EVOLUTION_ENABLED` / `_TIME` / `_REFERENCE_DAYS` / `_RECENT_DAYS` | true / 16:50 / 120 / 20 | the monitor |
 

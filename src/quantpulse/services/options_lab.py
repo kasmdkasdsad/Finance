@@ -483,9 +483,10 @@ class OptionsLabService:
     def _evidence(
         self, v: OptionsStrategyVersionRow, family: str, live: Mapping[str, Any]
     ) -> promotion.Evidence:
-        latest = (v.stage_history[-1].get("evidence") or {}) if v.stage_history else {}
-        ev = dict(latest.get("latest") or {})
-        fdr = latest.get("fdr") or {}
+        last = (v.stage_history[-1].get("evidence") or {}) if v.stage_history else {}
+        evaluation = promotion.latest_evaluation(v.stage_history)
+        ev = dict(evaluation.get("latest") or {})
+        fdr = last.get("fdr") or evaluation.get("fdr") or {}
         e = promotion.Evidence(family=family)
         for k in ("genome_problems", "backtests", "ror_by_model", "backtest_trades", "validation_ror", "overfit_risk",
                   "walkforward_passed", "montecarlo_ruin", "tail_passed", "beats_baselines", "critic_survived"):  # fmt: skip
@@ -499,7 +500,7 @@ class OptionsLabService:
             sh.get("ror"),
         )
         e.paper_trades, e.paper_ror, e.paper_t = pp.get("trades", 0), pp.get("ror"), pp.get("t")
-        e.decay_status = latest.get("decay")
+        e.decay_status = last.get("decay")
         return e
 
     async def _promote_all(self, now: datetime) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -516,6 +517,9 @@ class OptionsLabService:
                 family = genome.family if genome else ""
                 live = await self.live_evidence(s, v.id)
                 ev = self._evidence(v, family, live)
+                # every new stage record carries the lab's evaluation forward: what the strategy was validated to
+                # earn is what the Options Brain checks before it trades it
+                carry = promotion.latest_evaluation(v.stage_history)
                 stage = S(v.stage)
                 if stage in promotion.SHADOW_STAGES:
                     returns = (
@@ -533,7 +537,7 @@ class OptionsLabService:
                     if down is not None:
                         v.stage, v.stage_changed_at = down[0].value, now
                         v.stage_history = [*v.stage_history, promotion.stage_record(down[0], now.isoformat(), down[1],
-                                                                                    {"decay": status})]  # fmt: skip
+                                                                                    jsonable({"decay": status, **carry}))]  # fmt: skip
                         demoted.append(
                             {
                                 "version_id": v.id,
@@ -548,7 +552,7 @@ class OptionsLabService:
                     if new == stage:
                         break
                     v.stage_history = [*v.stage_history, promotion.stage_record(new, now.isoformat(), f"gate for {new.value} passed",
-                                                                                jsonable(ev.__dict__))]  # fmt: skip
+                                                                                jsonable({**ev.__dict__, **carry}))]  # fmt: skip
                     promoted.append(
                         {"version_id": v.id, "strategy": v.strategy_key, "from": stage.value, "to": new.value}
                     )
@@ -847,8 +851,7 @@ class OptionsLabService:
                     continue
                 out.append({"version_id": v.id, "key": f"{v.strategy_key}@v{v.version}", "stage": v.stage,
                             "genome": g.params, "family": g.family, "direction": g.direction,
-                            "expected_ror": ((v.stage_history[-1].get("evidence") or {}).get("latest") or {}).get("validation_ror")
-                            if v.stage_history else None})  # fmt: skip
+                            "expected_ror": (promotion.latest_evaluation(v.stage_history).get("latest") or {}).get("validation_ror")})  # fmt: skip
             return out
 
 
@@ -866,7 +869,7 @@ def _uses(g: Genome, feature: str) -> bool:
 
 def _findings(v: OptionsStrategyVersionRow, regimes: Mapping[str, float]) -> list[str]:
     """Recognisable failure modes from a version's evidence (the experiment generator's inputs)."""
-    ev = ((v.stage_history[-1].get("evidence") or {}).get("latest") or {}) if v.stage_history else {}
+    ev = promotion.latest_evaluation(v.stage_history).get("latest") or {}
     ror = ev.get("ror_by_model") or {}
     out = []
     if (ror.get("OPTIMISTIC") or 0) > 0 and (ror.get("REALISTIC") or 0) <= 0:
