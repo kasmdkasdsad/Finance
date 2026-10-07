@@ -8,6 +8,11 @@ Generation 2   combinations of complementary survivors (crossover: one's entry a
 Generation 3   regime-specific variants: a survivor restricted to the regimes where it earned its keep
 Generation 4   portfolio-aware variants: smaller risk for strategies correlated with what is already active
 Generation 5+  evolutionary: tournament selection on the robust score, with a novelty bonus
+Every one      random immigrants: brand-new strategies (the most novel of several random draws), at least
+               two and any budget the generation's own rule leaves unused, so the search keeps trying what
+               nothing in the population resembles
+Exploration    while no strategy has passed VALIDATION yet, the search does not wait: two-gene mutations of
+               the best-scoring candidates and random immigrants (the generations above start once one passes)
 =============  ==========================================================================================
 
 Every child records its parents, its generation, its origin and the reason it exists; a child identical to an
@@ -23,7 +28,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from quantpulse.options.lab.extraction import extract
-from quantpulse.options.lab.genome import Genome
+from quantpulse.options.lab.genome import Genome, random_genome
 from quantpulse.options.lab.research import SEED, Source
 
 
@@ -148,7 +153,47 @@ def next_generation(
             child = child.mutate(rng, changes=1)
             out.append(Child(child, generation, "evolution", tuple(sorted({a.key, b.key})),
                              "tournament selection on the robust score, crossed and mutated"))  # fmt: skip
-    return _unique(out, existing)[:budget]
+    picked = _unique(out, existing)[: max(0, budget - IMMIGRANTS)]
+    return picked + immigrants(population, picked, rng, generation, budget - len(picked))
+
+
+IMMIGRANTS = 2  # brand-new random strategies in every generation
+DRAWS = 8  # random draws per immigrant; the most novel one is kept
+
+
+def immigrants(population: Sequence[Member], also: Sequence[Child], rng: random.Random, generation: int,
+               n: int) -> list[Child]:  # fmt: skip
+    """``n`` brand-new random strategies, each the most novel of ``DRAWS`` draws against everything known."""
+    known = [m.genome for m in population] + [c.genome for c in also]
+    seen = {g.hash for g in known}
+    out: list[Child] = []
+    for _ in range(max(0, n)):
+        draws = [g for g in (random_genome(rng) for _ in range(DRAWS)) if g.hash not in seen]
+        if not draws:
+            continue
+        best = max(draws, key=lambda g: novelty(g, known))
+        known.append(best)
+        seen.add(best.hash)
+        out.append(Child(best, generation, "immigrant", (), f"a brand-new random strategy (novelty "
+                         f"{novelty(best, known[:-1]):.2f} against everything tried): {best.family}, "
+                         f"entry {best.entry_signal}"))  # fmt: skip
+    return out
+
+
+def explore(population: Sequence[Member], *, budget: int, seed: int) -> list[Child]:
+    """While nothing has passed VALIDATION: two-gene mutations of the best-scoring candidates so far, and
+    random immigrants. Seeded by the population's size, so each round tries something new."""
+    rng = random.Random(f"{seed}:{len(population)}")
+    existing = {m.genome.hash for m in population}
+    scored = sorted((m for m in population if m.score is not None and m.stage != "RETIRED"),
+                    key=lambda m: m.score or 0.0, reverse=True)  # fmt: skip
+    out: list[Child] = []
+    for m in scored[: max(1, budget // 4)]:
+        for _ in range(2):
+            out.append(Child(m.genome.mutate(rng, changes=2), 0, "exploration", (m.key,),
+                             f"nothing has passed VALIDATION yet: a wider variation of the best-scoring {m.key}"))  # fmt: skip
+    picked = _unique(out, existing)[: budget // 2]
+    return picked + immigrants(population, picked, rng, 0, budget - len(picked))
 
 
 _REGIME_LABELS = frozenset({"TRENDING_UP", "TRENDING_DOWN", "MEAN_REVERTING", "CALM", "PANIC", "HIGH_IV", "LOW_IV",

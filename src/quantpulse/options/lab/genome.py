@@ -256,6 +256,50 @@ class Genome:
         return "; ".join(parts)
 
 
+# Random new strategies are drawn only from the families executable by default, so one that earns its stages
+# can trade (one-contract exploration, then PAPER_ACTIVE) without a person having to enable its family first.
+RANDOM_FAMILIES = ("long_call", "long_put", "bull_call_spread", "bear_put_spread", "bull_put_spread",
+                   "bear_call_spread")  # fmt: skip
+RANDOM_ENTRIES = {
+    "bullish": ("always", "trend_up", "momentum_up", "breakout_up", "reversion_up", "iv_low", "iv_high", "pre_event"),
+    "bearish": ("always", "trend_down", "momentum_down", "breakout_down", "reversion_down", "iv_low", "iv_high",
+                "pre_event"),
+}  # fmt: skip
+SPREADS = ("bull_call_spread", "bear_put_spread", "bull_put_spread", "bear_call_spread")
+
+
+def random_genome(rng: random.Random) -> Genome:
+    """A brand-new strategy drawn from the whole searchable space of the default executable families: entry
+    signal, IV filter, expiry window, delta, width, exits and size, all at random within their bounds. Always
+    valid and defined-risk (never 0DTE, never naked)."""
+    for _ in range(100):
+        family = rng.choice(RANDOM_FAMILIES)
+        fam = FAMILIES[family]
+        credit = fam.vol == "short_vol"
+        signal = rng.choice(RANDOM_ENTRIES[fam.direction])
+        dte_min = rng.randrange(14, 61)
+        iv: dict[str, Any] = {}
+        if rng.random() < 0.5:  # credit spreads sell rich volatility; debits buy it cheap
+            iv = (
+                {"iv_rank_min": float(rng.randrange(30, 75, 5))}
+                if credit
+                else {"iv_rank_max": float(rng.randrange(30, 75, 5))}
+            )
+        g = Genome(
+            family, fam.direction, entry_signal=signal,
+            event_filter="require" if signal == "pre_event" else rng.choice(("avoid", "ignore")),
+            dte_min=dte_min, dte_max=dte_min + rng.randrange(10, 46),
+            delta_target=round(rng.uniform(0.15, 0.35) if credit else rng.uniform(0.25, 0.65), 2),
+            width_pct=round(rng.choice((0.02, 0.03, 0.04, 0.05, 0.06, 0.08)), 3) if family in SPREADS else None,
+            take_profit=rng.choice((0.25, 0.5, 0.75, 1.0)), stop_loss=rng.choice((0.5, 1.0, 1.5, 2.0)),
+            max_hold_days=rng.randrange(5, 46), exit_dte=rng.randrange(1, min(dte_min, 15)),
+            risk_per_trade=rng.choice((0.005, 0.01, 0.015, 0.02)), **iv,
+        )  # fmt: skip
+        if g.valid:
+            return g
+    return Genome("long_call", "bullish", entry_signal="trend_up", dte_min=30, dte_max=60, delta_target=0.5)
+
+
 def _with(g: Genome, **changes: Any) -> Genome:
     return replace(g, **changes)
 

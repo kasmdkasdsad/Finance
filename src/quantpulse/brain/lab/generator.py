@@ -7,6 +7,8 @@ Each batch mixes three kinds of candidate, all built from the same point-in-time
   removed, the weighting switched), so the search climbs from what has worked;
 * **combinations** of the features the feature research found to rank returns, each with the sign of its
   information coefficient;
+* **novelty**: the least-explored corner of the feature space (the features tried least so far, now and then
+  with a filter nothing has used yet), so the search keeps going where it has not been;
 * **exploration**: one random pair of features, so the search does not only circle what it already knows.
 
 Nothing is tried twice: a candidate is identified by what it does (its fingerprint), not by its name. The
@@ -29,6 +31,9 @@ from quantpulse.domain.features import FEATURES
 from .spec import GRID, WEIGHTINGS, StrategySpec
 
 TREND = "trend_50_200"
+# features whose sign means something on its own, so "only where it is ≥ 0" is a real condition
+SIGNED = tuple(f for f in ("mom_12_1", "mom_6_1", "mom_3m", "ret_1m", "ret_5d", "trend_50_200", "px_vs_sma50",
+                            "sharpe_126", "skew_63") if f in FEATURES)  # fmt: skip
 MAX_SIGNALS = 4  # a strategy blends at most this many features (simpler rules overfit less)
 
 
@@ -50,6 +55,10 @@ class Evidence:
     tried: set[str] = field(default_factory=set)  # fingerprints already in the lab
     leaders: list[StrategySpec] = field(default_factory=list)  # best out-of-sample active Sharpe first
     features: dict[str, float] = field(default_factory=dict)  # feature -> mean rank IC (research-backed)
+    usage: dict[str, int] = field(default_factory=dict)  # feature -> strategies tried that rank on it
+    filter_usage: dict[str, int] = field(
+        default_factory=dict
+    )  # feature -> strategies tried that filter on it
 
 
 @dataclass(frozen=True)
@@ -141,9 +150,30 @@ def exploration(rng: random.Random, features: dict[str, float]) -> Candidate:
                 rebalance_days=rng.choice((5, 21)))  # fmt: skip
 
 
+def novel(rng: random.Random, evidence: Evidence) -> Candidate:
+    """Two or three of the features tried least so far (ties at random; signs from research where known), and
+    half the time a filter on a signed feature that nothing has filtered on yet."""
+    order = sorted(FEATURES, key=lambda f: (evidence.usage.get(f, 0), rng.random()))
+    chosen = [f for f in order if f in FEATURES][: rng.choice((2, 3))]
+
+    def sign(name: str) -> float:
+        ic = evidence.features.get(name)
+        return (1.0 if ic > 0 else -1.0) if ic else rng.choice((1.0, -1.0))
+
+    signal = {f: sign(f) * w for f, w in zip(chosen, (1.0, 0.5, 0.5), strict=False)}
+    filters: dict[str, float] = {}
+    if rng.random() < 0.5:
+        pool = [f for f in SIGNED if f not in chosen]
+        fresh = [f for f in pool if not evidence.filter_usage.get(f)]
+        filters = {rng.choice(fresh or pool): 0.0}
+    where = f", only where {next(iter(filters))} ≥ 0" if filters else ""
+    return make(signal, f"novel: the least-explored features ({', '.join(chosen)}){where}", filters=filters,
+                rebalance_days=rng.choice((5, 10, 21)))  # fmt: skip
+
+
 def propose(evidence: Evidence, n: int, seed: str) -> list[Candidate]:
-    """Up to ``n`` new candidates: about half mutations of the leaders, then combinations, and one exploration;
-    none already tried, none twice."""
+    """Up to ``n`` new candidates: about half mutations of the leaders, then combinations, one novel and one
+    exploration; none already tried, none twice."""
     if n <= 0:
         return []
     rng = random.Random(seed)
@@ -166,7 +196,8 @@ def propose(evidence: Evidence, n: int, seed: str) -> list[Candidate]:
     top = evidence.leaders[:3]
     for parent in top:
         take(mutations(parent, evidence.features), max(1, (n + 1) // 2 // max(1, len(top))))
-    take(combinations(evidence.features), n - len(picked) - 1)
+    take(combinations(evidence.features), n - len(picked) - 2)
+    take([novel(rng, evidence) for _ in range(10)], 1)  # a few draws, in case the first were tried already
     explore(rng, evidence, take, picked, len(picked) + 1)
     for parent in evidence.leaders:  # still short: more mutations of the leaders ...
         take(mutations(parent, evidence.features), n - len(picked))

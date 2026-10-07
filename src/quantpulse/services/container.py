@@ -292,6 +292,7 @@ class Container:
         )
         if settings.options_enabled:
             self.brain.orchestrator.options = self.options_brain
+            self.brain.options_lab = self.options_lab  # the closed-market research queue runs it too
 
         # cloud monitoring: alerts (ntfy / webhook / heartbeat, all optional) and the health monitor, whose
         # order-critical checks (database, Alpaca, reconciliation) fail Brain orders closed at the last gate

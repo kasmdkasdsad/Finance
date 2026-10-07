@@ -36,10 +36,10 @@ from quantpulse.options.lab.counterfactuals import evaluate as cf_evaluate
 from quantpulse.options.lab.counterfactuals import verdict as cf_verdict
 from quantpulse.options.lab.extraction import extract
 from quantpulse.options.lab.features import history, signal, trend_regime
-from quantpulse.options.lab.genome import Genome, from_dict
+from quantpulse.options.lab.genome import RANDOM_FAMILIES, Genome, from_dict, random_genome
 from quantpulse.options.lab.research import SEED, claim_test, sign_test
 from quantpulse.options.selection import Spec, build, evaluate, rank
-from quantpulse.options.structures import bull_put_spread
+from quantpulse.options.structures import FAMILIES, bull_put_spread
 
 
 def gbm(
@@ -349,10 +349,60 @@ def test_generations_are_tracked_and_never_overwrite_parents():
     before = [m.genome.hash for m in members]
     for gen in (1, 2, 3, 4, 5):
         kids = population.next_generation(members, gen, budget=5, seed=1)
-        assert len(kids) <= 5 and all(k.generation == gen and k.parents for k in kids)
+        assert len(kids) <= 5 and all(
+            k.generation == gen and (k.parents or k.origin == "immigrant") for k in kids
+        )
+        assert (
+            sum(k.origin == "immigrant" for k in kids) >= population.IMMIGRANTS
+        )  # new random ideas, every time
         assert not {k.genome.hash for k in kids} & set(before)
     assert [m.genome.hash for m in members] == before
     assert population.novelty(g0[0].genome, [g0[0].genome]) == 0.0
+
+
+def test_random_strategies_are_valid_defined_risk_and_executable_by_default():
+    rng = random.Random(7)
+    drawn = [random_genome(rng) for _ in range(300)]
+    assert all(g.valid and g.family in RANDOM_FAMILIES for g in drawn)
+    assert all(FAMILIES[g.family].defined_risk and FAMILIES[g.family].default_executable for g in drawn)
+    assert all(not g.zero_dte and g.dte_min >= 14 and g.exit_dte < g.dte_min for g in drawn)
+    assert len({g.hash for g in drawn}) > 290  # a wide space, hardly ever the same draw twice
+    assert {g.family for g in drawn} == set(RANDOM_FAMILIES)
+    assert len({g.entry_signal for g in drawn}) >= 10
+    assert all(g.event_filter == "require" for g in drawn if g.entry_signal == "pre_event")
+    assert [random_genome(random.Random(3)).hash for _ in range(2)] == [
+        random_genome(random.Random(3)).hash
+    ] * 2
+
+
+def test_immigrants_are_the_most_novel_of_their_draws():
+    g0 = population.generation0()
+    members = [population.Member(f"s{i}", i, c.genome, "BACKTESTING", score=None) for i, c in enumerate(g0)]
+    kids = population.immigrants(members, [], random.Random(1), 3, 4)
+    assert len(kids) == 4 and all(
+        k.origin == "immigrant" and not k.parents and k.generation == 3 for k in kids
+    )
+    known = [m.genome for m in members]
+    assert all(population.novelty(k.genome, known) > 0 for k in kids)
+    assert len({k.genome.hash for k in kids} | {g.hash for g in known}) == len(known) + 4
+
+
+def test_with_nothing_passed_the_search_explores_instead_of_waiting():
+    g0 = population.generation0()
+    members = [
+        population.Member(f"s{i}", i, c.genome, "BACKTESTING", score=0.01 * i) for i, c in enumerate(g0)
+    ]
+    assert not [m for m in members if m.stage in population.PASSED]
+    kids = population.explore(members, budget=8, seed=1)
+    assert len(kids) == 8
+    origins = [k.origin for k in kids]
+    assert "exploration" in origins and "immigrant" in origins
+    best = max(members, key=lambda m: m.score or 0).key
+    assert any(k.parents == (best,) for k in kids if k.origin == "exploration")  # climbs from the best so far
+    assert not {k.genome.hash for k in kids} & {m.genome.hash for m in members}
+    grown = members + [population.Member(f"k{i}", None, k.genome, "EXTRACTED") for i, k in enumerate(kids)]
+    again = population.explore(grown, budget=8, seed=1)  # the next round tries something new
+    assert again and not {k.genome.hash for k in again} & {m.genome.hash for m in grown}
 
 
 # --------------------------------------------------------------------------- learning

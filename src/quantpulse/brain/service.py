@@ -157,6 +157,7 @@ class BrainService:
             else None
         )
         self.lab = StrategyLab(settings, clock, db, market, data, self.store)
+        self.options_lab: Any = None  # the options research lab (the container sets it when options are on)
         self.improvements = ImprovementEngine(
             db, settings.brain_min_reliability_observations, settings.brain_min_confidence
         )

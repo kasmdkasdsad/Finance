@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 S = promotion.Stage
 RESEARCH_STAGES = (S.RESEARCH, S.EXTRACTED, S.BACKTESTING, S.VALIDATION, S.WALK_FORWARD)
 REEVALUATE_AFTER = timedelta(days=7)
+GENERATION_BUDGET = 12  # new candidates per generation (2 of them random immigrants)
 HISTORY_DAYS = 1300  # about three and a half years of daily prices
 RULE_TYPES = {"entry_signal": "entry", "iv_rank_min": "filter", "iv_rank_max": "filter", "iv_rv_min": "filter",
               "iv_rv_max": "filter", "event_filter": "filter", "regime_filter": "filter", "dte_min": "expiration",
@@ -103,6 +104,7 @@ class OptionsLabService:
         self._jobs = jobs
         self._reference = reference
         self._seeded = False
+        self._running = asyncio.Lock()  # one research run at a time (the daily run and the research queue)
         self.last_run: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ seeding
@@ -229,7 +231,22 @@ class OptionsLabService:
         closes: Mapping[str, Mapping[date, float]] | None = None,
         max_evaluations: int | None = None,
     ) -> dict[str, Any]:
-        """One budgeted research run (see the module docstring). ``closes`` replaces the market data (tests)."""
+        """One budgeted research run (see the module docstring). ``closes`` replaces the market data (tests).
+        One run at a time: a second caller while one runs gets ``{"skipped": ...}``."""
+        if self._running.locked():
+            return {"skipped": "an options research run is already in progress"}
+        async with self._running:
+            return await self._research(
+                budget_seconds=budget_seconds, closes=closes, max_evaluations=max_evaluations
+            )
+
+    async def _research(
+        self,
+        *,
+        budget_seconds: float | None,
+        closes: Mapping[str, Mapping[date, float]] | None,
+        max_evaluations: int | None,
+    ) -> dict[str, Any]:
         started = time.monotonic()
         budget = budget_seconds if budget_seconds is not None else self._s.options_research_budget_seconds
         deadline = started + budget
@@ -275,7 +292,7 @@ class OptionsLabService:
         report["promoted"], report["demoted"] = await self._promote_all(now)
         report["experiments"] = await self._experiments(now)
         if time.monotonic() < deadline:
-            report["generation"] = await self._generation(now, budget=6)
+            report["generation"] = await self._generation(now, budget=GENERATION_BUDGET)
         report["seconds"] = round(time.monotonic() - started, 1)
         self.last_run = report
         logger.info("options research: %d evaluated, %d promoted, %d experiments", len(report["evaluated"]),
@@ -607,25 +624,37 @@ class OptionsLabService:
                 members.append(population.Member(f"{v.strategy_key}@v{v.version}", v.id, from_dict(genome.params), v.stage,
                                                  score=m.get("expectancy_on_risk"), regimes=regimes))  # fmt: skip
             alive = [m for m in members if m.stage in population.PASSED]
-            if not alive:
+            if alive:
+                gen = last + 1
+                children = population.next_generation(
+                    members, gen, budget=budget, seed=self._s.options_min_shadow_trades
+                )
+            else:  # nothing has passed VALIDATION yet: explore instead of waiting (the generations start later)
+                gen = last
+                children = population.explore(members, budget=budget, seed=self._s.options_min_shadow_trades)
+            if not children:
                 return None
-            gen = last + 1
-            run = OptionsGenerationRunRow(generation=gen, started_at=now, budget={"children": budget})
+            run = OptionsGenerationRunRow(generation=gen, started_at=now, budget={"children": budget},
+                                          summary={"kind": "generation" if alive else "exploration"})  # fmt: skip
             s.add(run)
             await s.flush()
-            children = population.next_generation(
-                members, gen, budget=budget, seed=self._s.options_min_shadow_trades
-            )
             by_key = {m.key: m for m in members}
             for c in children:
                 parents = [by_key[p] for p in c.parents if p in by_key]
-                key = parents[0].key.split("@")[0] if len(parents) == 1 else f"x-{c.genome.hash[:10]}"
+                key = (
+                    parents[0].key.split("@")[0]
+                    if len(parents) == 1
+                    else f"x-{c.genome.hash[:10]}"
+                    if parents
+                    else f"new-{c.genome.hash[:10]}"
+                )
                 await self._add_version(s, c.genome, key=key, origin=c.origin, reason=c.reason, generation=gen, now=now,
                                         parent_id=parents[0].version_id if parents else None,
                                         second_parent_id=parents[1].version_id if len(parents) > 1 else None)  # fmt: skip
             run.created, run.finished_at = len(children), now
-            run.summary = {"origins": sorted({c.origin for c in children})}
-            return {"generation": gen, "children": len(children)}
+            run.summary = {**run.summary, "origins": sorted({c.origin for c in children})}
+            return {"generation": gen, "children": len(children), "kind": run.summary["kind"],
+                    "origins": run.summary["origins"]}  # fmt: skip
 
     async def revalidate(
         self,

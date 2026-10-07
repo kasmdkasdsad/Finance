@@ -1574,7 +1574,7 @@ enforcement all still apply unchanged.
 
 **Research while the market is closed.** The research scheduler works through a persistent queue
 (`brain_research_jobs`). The poller ticks it once a minute, separately from the supervisor, so it never delays
-a supervisor tick. It has 23 kinds of job (`GET /brain/research/catalog`):
+a supervisor tick. It has 24 kinds of job (`GET /brain/research/catalog`):
 
 * **Grade:** matured predictions and ideas.
 * **Analyze:**
@@ -1591,7 +1591,10 @@ a supervisor tick. It has 23 kinds of job (`GET /brain/research/catalog`):
     multiple testing;
   * agent combinations (leave-one-out on graded calls);
   * redundant agents;
-  * the strategy lab (backtests, walk-forward, random portfolios, stress);
+  * the strategy lab: new strategies generated and validated (backtests, walk-forward, random portfolios,
+    stress), every 3 hours;
+  * the options lab: option strategies evaluated, promoted one gate at a time and bred (or explored while
+    nothing has passed), 25 minutes every 2 hours;
   * the improvement engine's proposals.
 * **Learn:** long-term memory.
 * **Prepare:**
@@ -1695,6 +1698,8 @@ uptrend), and people can add versions with other parameters.
 
 **The search does not stop at the templates.** Research keeps `QP_BRAIN_LAB_BACKLOG` (6) new strategies
 waiting to be tested, from the generator (`brain/lab/generator.py`):
+* **Novelty:** the least-explored corner of the feature space: the features tried least so far, half the time
+  with a filter nothing has used yet. The search keeps going where it has not been.
 * **Mutations** of the strategies with the best out-of-sample active Sharpe so far, one change each:
   * a weight halved or raised by half;
   * a research-backed feature added;

@@ -60,7 +60,7 @@ def test_a_batch_is_new_unique_and_reproducible():
     prints = [g.fingerprint(c.spec) for c in batch]
     assert len(set(prints)) == 6 and not set(prints) & ev.tried  # nothing tried twice
     kinds = {c.origin.split(":")[0].split(" of ")[0] for c in batch}
-    assert {"mutation", "combination", "exploration"} <= kinds  # climbs, combines and explores
+    assert {"mutation", "combination", "novel", "exploration"} <= kinds  # climbs, combines, goes new places
     assert all(len(c.spec.signal) <= g.MAX_SIGNALS and set(c.spec.signal) <= set(FEATURES) for c in batch)
     assert [c.spec for c in g.propose(ev, 6, seed="2026-10-07:6")] == [c.spec for c in batch]
     ev.tried |= set(prints)
@@ -70,7 +70,8 @@ def test_a_batch_is_new_unique_and_reproducible():
 
 def test_with_no_evidence_yet_it_explores():
     batch = g.propose(g.Evidence(), 4, seed="x")
-    assert len(batch) == 4 and all(c.origin.startswith("exploration") for c in batch)
+    assert len(batch) == 4 and all(c.origin.startswith(("exploration", "novel")) for c in batch)
+    assert sum(c.origin.startswith("novel") for c in batch) == 1
     assert g.propose(g.Evidence(), 0, seed="x") == []
 
 
@@ -126,3 +127,20 @@ def test_the_batch_size_is_respected(n):
 def test_exploration_draws_real_features():
     c = g.exploration(random.Random(1), {})
     assert set(c.spec.signal) <= set(FEATURES) and len(c.spec.signal) == 2
+
+
+def test_novelty_goes_where_the_search_has_not_been():
+    usage = dict.fromkeys(FEATURES, 10)
+    usage.update({"skew_63": 0, "max_ret_21": 0, "idio_vol_63": 1})
+    filters = dict.fromkeys(g.SIGNED, 3)
+    filters["px_vs_sma50"] = 0
+    ev = g.Evidence(usage=usage, filter_usage=filters, features={"skew_63": -0.02})
+    picks = [g.novel(random.Random(i), ev) for i in range(40)]
+    for c in picks:
+        assert set(c.spec.signal) <= {"skew_63", "max_ret_21", "idio_vol_63"}  # the least-tried features only
+        if "skew_63" in c.spec.signal:
+            assert c.spec.signal["skew_63"] < 0  # the sign research found
+        assert c.origin.startswith("novel: the least-explored features")
+    filtered = [c for c in picks if c.spec.filters]
+    assert filtered and all(c.spec.filters == {"px_vs_sma50": 0.0} for c in filtered)  # a filter never used
+    assert any(not c.spec.filters for c in picks)

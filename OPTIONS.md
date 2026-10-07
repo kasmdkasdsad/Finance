@@ -86,6 +86,23 @@ strategy back to shadow, BROKEN retires it. Nothing is deleted; a change is alwa
 paper (maximum loss ≤ `QP_OPTIONS_EXPLORATION_MAX_LOSS`) while its shadow record builds — to measure real
 paper fills. It is labelled as exploration everywhere.
 
+**Research time.** Besides the daily run after the close (`QP_OPTIONS_RESEARCH_BUDGET_SECONDS`, 3 minutes), the
+closed-market research queue runs the lab for **25 minutes every 2 hours** (`options_research`), under the same
+resource limits as all research, one run at a time. Each run evaluates never-tested and stale strategies,
+applies the false-discovery control, moves strategies through their stages, runs experiments and breeds the
+next generation.
+
+**The search never stalls, and keeps trying new things.**
+* Every generation brings random immigrants: brand-new strategies drawn from the whole searchable space of the
+  default-executable families, each the most novel of eight draws against everything tried.
+  * There are at least two per generation, plus any budget the generation's own rule leaves unused.
+  * Anything that earns its stages can trade without a person enabling its family.
+* While no strategy has passed VALIDATION yet, a run explores instead of waiting: wider (two-gene) variations
+  of the best-scoring candidates, plus immigrants.
+
+The more that is tried, the higher the population-wide false-discovery bar. Nothing reaches the paper account
+without passing every stage above.
+
 ## 4. Evidence is never mixed
 
 | Label | What it is | What it can justify |
@@ -170,7 +187,7 @@ an AI model (`POST /registry/models/{id}/approve`, typed confirmation). The repl
 | `QP_OPTIONS_TAKE_PROFIT_PCT` / `_STOP_LOSS_PCT` | 50% / 50% | protective overlay on live positions |
 | `QP_OPTIONS_MIN_SHADOW_TRADES` | 10 | before PAPER_ACTIVE |
 | `QP_OPTIONS_EXPLORATION` / `_EXPLORATION_MAX_LOSS` | true / $250 | one-contract exploration |
-| `QP_OPTIONS_RESEARCH_TIME` / `_RESEARCH_BUDGET_SECONDS` | 16:40 / 180 | the daily research run |
+| `QP_OPTIONS_RESEARCH_TIME` / `_RESEARCH_BUDGET_SECONDS` | 16:40 / 180 | the daily research run (the research queue adds 25 min every 2 h while the market is closed) |
 | `QP_EVOLUTION_ENABLED` / `_TIME` / `_REFERENCE_DAYS` / `_RECENT_DAYS` | true / 16:50 / 120 / 20 | the monitor |
 
 ## 9. API and dashboard

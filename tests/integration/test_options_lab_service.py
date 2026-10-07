@@ -95,3 +95,52 @@ async def test_shadow_is_the_only_way_to_paper(api):
     detail = await lab.strategy(vid)
     assert detail["stage"] == "PAPER_SHADOW"
     assert any("shadow trades" in r for r in detail["next_gate"])
+
+
+async def test_with_nothing_passed_yet_a_run_still_breeds_new_ideas_and_runs_alone(api):
+    """The search never stalls waiting for a first success: a run with time left explores (wider variations of
+    the best-scoring candidates and brand-new random strategies). One run at a time."""
+    import asyncio
+
+    lab = api.container.options_lab
+    report = await lab.research(closes=CLOSES, budget_seconds=240, max_evaluations=2)
+    gen = report["generation"]
+    assert gen is not None and gen["children"] > 0 and "immigrant" in gen["origins"]
+    async with api.container.db.session() as s:
+        versions = (await s.scalars(select(OptionsStrategyVersionRow))).all()
+    new = [v for v in versions if v.origin == "immigrant"]
+    assert new and all(v.strategy_key.startswith("new-") and v.stage == "EXTRACTED" for v in new)
+    if gen["kind"] == "exploration":  # nothing reached VALIDATION in this short run
+        assert any(v.origin == "exploration" for v in versions) or len(new) == gen["children"]
+    first, second = await asyncio.gather(
+        lab.research(closes=CLOSES, budget_seconds=30, max_evaluations=1),
+        lab.research(closes=CLOSES, budget_seconds=30, max_evaluations=1),
+    )
+    assert [r.get("skipped") is not None for r in (first, second)].count(True) == 1
+
+
+async def test_options_research_runs_in_the_closed_market_research_queue(api):
+    from quantpulse.brain.research import handlers
+    from quantpulse.brain.research.catalog import CATALOG
+
+    spec = CATALOG["options_research"]
+    assert (
+        spec.cost == "heavy" and spec.refresh == timedelta(hours=2) and spec.timeout == timedelta(minutes=40)
+    )
+    brain = api.container.brain
+    assert brain.options_lab is api.container.options_lab
+    calls = []
+
+    async def research(**kw):
+        calls.append(kw)
+        return {"evaluated": [{"version_id": 1}], "promoted": [], "demoted": [], "experiments": 0,
+                "generation": {"generation": 0, "children": 12, "kind": "exploration"}, "data": {}, "seconds": 1.0,
+                "label": "model-priced chains over real underlying prices"}  # fmt: skip
+
+    brain.options_lab.research = research
+    ctx = handlers.JobContext(job={"id": None, "kind": "options_research"}, brain=brain,
+                              settings=api.container.settings, clock=api.container.clock,
+                              ledger=brain.research.ledger, lifecycle=brain.research.lifecycle)  # fmt: skip
+    out = await handlers.options_research(ctx)
+    assert calls == [{"budget_seconds": handlers.OPTIONS_BUDGET.total_seconds()}]  # 25 minutes, not 3
+    assert out["evaluated"] == 1 and out["generation"]["kind"] == "exploration"

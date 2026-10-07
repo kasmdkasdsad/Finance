@@ -1047,9 +1047,32 @@ async def strategy_research(ctx: JobContext) -> dict[str, Any]:
     }
 
 
-STRATEGY_BUDGET = timedelta(
-    minutes=35
-)  # no new validation starts after this (the job's timeout is 60 minutes)
+async def options_research(ctx: JobContext) -> dict[str, Any]:
+    """The options research lab, given real time: evaluate never-tested and stale option strategies (model-priced
+    chains on real prices), run the false-discovery control across the population, move strategies through
+    their stages (at most one gate each), run experiments and breed the next generation — or explore, while
+    nothing has passed yet. A strategy that reaches PAPER_SHADOW is shadow-traded on live quotes, and may trade
+    one exploration contract on the paper account under the option risk limits; nothing here sends an order."""
+    lab = getattr(ctx.brain, "options_lab", None)
+    if lab is None or not ctx.settings.options_enabled:
+        return {"skipped": "options are switched off"}
+    report = await lab.research(budget_seconds=OPTIONS_BUDGET.total_seconds())
+    if report.get("skipped"):
+        return dict(report)
+    return {
+        "evaluated": len(report.get("evaluated") or []),
+        "promoted": _brief(report.get("promoted")),
+        "demoted": _brief(report.get("demoted")),
+        "experiments": report.get("experiments"),
+        "generation": report.get("generation"),
+        "data": _brief(report.get("data")),
+        "seconds": report.get("seconds"),
+        "label": report.get("label"),
+    }
+
+
+OPTIONS_BUDGET = timedelta(minutes=25)  # one run's research time (the job's timeout is 40 minutes)
+STRATEGY_BUDGET = timedelta(minutes=35)  # no new validation after this (the job's timeout: 60 minutes)
 
 BACKTEST_GATES = (
     "better than random portfolios",

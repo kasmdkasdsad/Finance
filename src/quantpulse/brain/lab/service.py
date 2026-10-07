@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import statistics
 import time
+from collections import Counter
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any
@@ -208,10 +209,13 @@ class StrategyLab:
         waiting = sum(1 for r in rows if r["status"] == "proposed") + len(out)
         want = self._s.brain_lab_backlog - waiting
         if want > 0:
+            specs = [StrategySpec.from_dict(r["spec"]) for r in rows]
             evidence = Evidence(
-                tried={fingerprint(StrategySpec.from_dict(r["spec"])) for r in rows},
+                tried={fingerprint(x) for x in specs},
                 leaders=leaders(rows),
                 features=dict(features or {}),
+                usage=dict(Counter(f for x in specs for f in x.signal)),
+                filter_usage=dict(Counter(f for x in specs for f in x.filters)),
             )
             seed = f"{self._clock.now().date().isoformat()}:{len(rows)}"
             for c in generate(evidence, want, seed):
