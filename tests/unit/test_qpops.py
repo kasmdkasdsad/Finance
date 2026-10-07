@@ -110,6 +110,12 @@ class Server:
         self.compose_of: dict[str, str] = {}  # a commit's deploy/compose.yaml (default: the real one)
         self.tailscale = {"BackendState": "Running", "Self": {"DNSName": "quantpulse.tail1234.ts.net."}}
         self.serve = "https://quantpulse.tail1234.ts.net (tailnet only)\n|-- / proxy http://127.0.0.1:8501\n"
+        self.serve_json: dict = {
+            "TCP": {"443": {"HTTPS": True}},
+            "Web": {
+                "quantpulse.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8501"}}}
+            },
+        }
         self.up_fails = False  # `docker compose up` fails: the old container keeps running
 
     # -------------------------------------------------------------- commands
@@ -122,6 +128,8 @@ class Server:
             return self._docker(a[1:])
         if a[:3] == ["tailscale", "status", "--json"]:
             return 0, json.dumps(self.tailscale), ""
+        if a[:4] == ["tailscale", "serve", "status", "--json"]:
+            return 0, json.dumps(self.serve_json), ""
         if a[:3] == ["tailscale", "serve", "status"]:
             return 0, self.serve, ""
         raise AssertionError(f"unexpected command {a}")
@@ -150,6 +158,8 @@ class Server:
         raise AssertionError(f"unexpected git {a}")
 
     def _compose(self, a: list[str], env: dict[str, str]) -> tuple[int, str, str]:
+        while a[:1] == ["--profile"]:  # a compose profile (the reader's) changes nothing here
+            a = a[2:]
         if a[:2] == ["exec", "-T"] and "backup" in a and "sh" in a:
             name = next(x.split("=", 1)[1] for x in a if x.startswith("QP_NAME="))
             script = a[-1]
@@ -921,3 +931,71 @@ def test_qp_runs_the_server_preflight_first_and_keeps_the_dashboard_on_tailscale
     assert 'access:-tailscale}" == "public"' in start  # --public needs QP_DASHBOARD_ACCESS=public
     assert "tailscale serve --bg --https=443 http://127.0.0.1:8501" in qp  # tailnet only, never Funnel
     assert "funnel" not in qp.lower()
+
+
+# ================================================================================================ the reader
+READ_KEY = "r" * 64
+
+
+def with_reader(world, published: bool = True, funnel: bool = False):
+    """``./qp reader on`` has run: the read-only key in deploy/.env (and published on the tailnet)."""
+    ops, server, clock = world
+    env = ops.dir / ".env"
+    env.write_text(env.read_text() + f"QP_API_READ_TOKEN={READ_KEY}\n")
+    if published:
+        host = "quantpulse.tail1234.ts.net:8443"
+        server.serve_json["TCP"]["8443"] = {"HTTPS": True}
+        server.serve_json["Web"][host] = {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8090"}}}
+        if funnel:
+            server.serve_json["AllowFunnel"] = {host: True}
+    return qpops.Ops(ops.dir, host=ops.host, urlopen=server.urlopen, now=clock.now, sleep=clock.sleep)
+
+
+def test_the_status_shows_the_reader_off_by_default_and_on_the_tailnet_only_when_on(world, monkeypatch):
+    ops, server, _ = world
+    monkeypatch.setattr(qpops.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert "reader      off (./qp reader on" in qpops.render_status(ops.status())
+    on = with_reader(world)
+    text = qpops.render_status(on.status())
+    assert "reader      on: https://quantpulse.tail1234.ts.net:8443 (tailnet only;" in text
+    assert READ_KEY not in text and READ_KEY not in json.dumps(on.status())  # never shown
+    server.serve_json["AllowFunnel"] = {"quantpulse.tail1234.ts.net:8443": True}
+    assert "reader      PUBLIC (Tailscale Funnel on port 8443)" in qpops.render_status(on.status())
+    server.serve_json = {}
+    assert "the reader is not published on the tailnet" in qpops.render_status(on.status())
+
+
+def test_a_deploy_or_a_rollback_keeps_the_reader_on_the_new_version(world):
+    ops = with_reader(world)
+    _, server, _ = world
+    server.remote = NEW
+    server.ci[NEW] = ([run(NEW)], GREEN_JOBS)
+    assert ops.auto_update() == f"deployed {NEW[:12]}"
+    switch = next(c for c in server.compose_calls() if "up" in c)
+    assert switch[:2] == ["--profile", "reader"] and switch[-3:] == ["api", "dashboard", "reader"]
+    assert not world[0].reader_on  # without the read-only key: neither named nor its profile used
+
+
+def test_a_rollback_brings_the_reader_back_too(world):
+    ops = with_reader(world)
+    _, server, _ = world
+    server.remote = BAD  # a version that never comes up: it is rolled back
+    server.ci[BAD] = ([run(BAD)], GREEN_JOBS)
+    assert ops.auto_update().startswith(f"rolled back to {OLD[:12]}")
+    ups = [c for c in server.compose_calls() if "up" in c]
+    assert all(c[:2] == ["--profile", "reader"] for c in ups) and len(ups) == 2
+
+
+def test_qp_reader_publishes_on_the_tailnet_only_and_off_revokes_the_key():
+    qp = (ROOT / "deploy" / "qp").read_text()
+    reader = qp[qp.index("  reader)") : qp.index("  down)")]
+    assert (
+        "sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090" in reader
+    )  # the tailnet, never public
+    assert "openssl rand -hex 32" in reader  # a 64-character key, made on the server
+    off = reader[reader.index("      off)") : reader.index("      key)")]
+    assert (
+        off.index("serve --https=8443 off")
+        < off.index('set_var QP_API_READ_TOKEN ""')
+        < off.index("--force-recreate api")
+    )  # unpublished, the key removed, and the API restarted without it

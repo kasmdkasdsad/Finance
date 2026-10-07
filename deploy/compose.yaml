@@ -7,9 +7,12 @@
 #   backup     the database tools (pg_dump, pg_restore) with the password, for `./qp backup`, the nightly backup
 #              timer (verified, uploaded off the server) and the weekly restore test — see deploy/systemd/
 #   caddy      only with `--profile public`: HTTPS for the dashboard on your own domain name
+#   reader     only after `./qp reader on` (the "reader" profile): the read-only door on your tailnet. It
+#              forwards GETs for the monitoring pages, with the read-only key, and refuses everything else
 #
 # Nothing listens on the public internet by default: the api and the dashboard are bound to 127.0.0.1 and
-# reached through Tailscale (recommended) or the caddy profile. The api is never exposed at all.
+# reached through Tailscale (recommended) or the caddy profile. The api is never exposed at all; the reader,
+# when on, is published on the tailnet only.
 #
 # Secrets live in deploy/.env on the server only (chmod 600, ignored by git and by the Docker build).
 # Use the `qp` helper next to this file: ./qp setup | preflight | start | status | logs | stop-trading | ...
@@ -103,6 +106,28 @@ services:
       retries: 3
     ports:
       - "127.0.0.1:8501:8501"  # reached through Tailscale (`tailscale serve`) or the caddy profile
+    restart: unless-stopped
+    logging: *logging
+
+  reader:
+    profiles: ["reader"]
+    image: quantpulse:${QP_IMAGE_TAG:-current}
+    depends_on:
+      api:
+        condition: service_healthy
+    # only the read-only key: no Alpaca key, no database password, not QP_API_TOKEN (quantpulse/reader.py)
+    environment:
+      QP_API_READ_TOKEN: ${QP_API_READ_TOKEN:-}
+      QP_READER_UPSTREAM: http://api:8000
+    command: ["uvicorn", "quantpulse.reader:app", "--host", "0.0.0.0", "--port", "8090", "--no-server-header"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    ports:
+      - "127.0.0.1:8090:8090"  # reached only through `tailscale serve --https=8443` (./qp reader on)
+    mem_limit: 256m
     restart: unless-stopped
     logging: *logging
 

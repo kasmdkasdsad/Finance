@@ -206,6 +206,12 @@ class Settings(BaseSettings):
     api_token: SecretStr | None = Field(
         default=None, description="If set, every /api request must send `X-API-Key: <token>`."
     )
+    api_read_token: SecretStr | None = Field(
+        default=None,
+        description="Optional read-only key. A request sending it as `X-API-Key` may only read (GET) the "
+        "monitoring pages (`quantpulse.readonly`), and is refused for anything else. It works only alongside "
+        "QP_API_TOKEN, and must differ from it. `./qp reader on|off` on the server makes and revokes it.",
+    )
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:8501", "http://127.0.0.1:8501"]
     dashboard_password_hash: SecretStr | None = Field(
         default=None,
@@ -901,6 +907,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "api_token",
+        "api_read_token",
         "dashboard_password_hash",
         "polygon_api_key",
         "alpaca_api_key_id",

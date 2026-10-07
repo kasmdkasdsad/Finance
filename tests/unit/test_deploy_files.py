@@ -53,6 +53,18 @@ def test_the_dashboard_gets_no_broker_key_and_no_database_password():
     assert env["QP_DEPLOYMENT"] == "cloud" and env["STREAMLIT_CLIENT_SHOW_ERROR_DETAILS"] == "false"
 
 
+def test_the_reader_gets_the_read_only_key_and_nothing_else():
+    reader = compose()["services"]["reader"]
+    assert "env_file" not in reader  # no Alpaca key, no database password, not QP_API_TOKEN
+    assert env_of(reader) == {
+        "QP_API_READ_TOKEN": "${QP_API_READ_TOKEN:-}",
+        "QP_READER_UPSTREAM": "http://api:8000",
+    }
+    assert reader["profiles"] == ["reader"]  # only after ./qp reader on
+    assert reader["ports"] == ["127.0.0.1:8090:8090"]  # published on the tailnet by tailscale serve only
+    assert "quantpulse.reader:app" in reader["command"]
+
+
 def test_every_service_restarts_by_itself_and_logs_rotate():
     for name, svc in compose()["services"].items():
         assert svc["restart"] == "unless-stopped", name
@@ -239,3 +251,70 @@ def test_qp_setup_works_on_a_fresh_server(tmp_path):
     assert restart.returncode == 0, restart.stderr
     # recreated, so the containers take the new deploy/.env (a plain `docker compose restart` would not)
     assert "up -d --no-deps --force-recreate api dashboard" in log.read_text().splitlines()
+
+
+FAKE_TAILSCALE = r"""#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_TAILSCALE_LOG"], "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\n")
+if sys.argv[1:3] == ["status", "--json"]:
+    print(json.dumps({"BackendState": "Running", "Self": {"DNSName": "quantpulse.tail1234.ts.net."}}))
+"""
+
+
+def test_qp_reader_on_publishes_a_new_read_only_key_on_the_tailnet_and_off_revokes_it(tmp_path):
+    import shutil
+    import subprocess
+
+    deploy = tmp_path / "repo" / "deploy"
+    deploy.mkdir(parents=True)
+    for name in ("qp", "compose.yaml"):
+        shutil.copy2(DEPLOY / name, deploy / name)
+    (deploy / ".env").write_text("POSTGRES_PASSWORD=pw\nQP_API_TOKEN=" + "t" * 64 + "\n"
+                                 "QP_DASHBOARD_PASSWORD_HASH=pbkdf2_sha256:600000:x:y\nQP_ALPACA_PAPER=true\n")  # fmt: skip
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, text in (
+        ("docker", FAKE_DOCKER),
+        ("tailscale", FAKE_TAILSCALE),
+        ("sudo", '#!/bin/sh\nexec "$@"\n'),
+    ):
+        (bin_dir / name).write_text(text)
+        (bin_dir / name).chmod(0o755)
+    docker_log, ts_log = tmp_path / "docker.log", tmp_path / "tailscale.log"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QP_")}
+    env.update(
+        PATH=f"{bin_dir}:{env['PATH']}", FAKE_DOCKER_LOG=str(docker_log), FAKE_TAILSCALE_LOG=str(ts_log)
+    )
+
+    def qp(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(deploy / "qp"), *args], text=True, capture_output=True, env=env,
+                              timeout=60)  # fmt: skip
+
+    assert "off" in qp("reader", "key").stderr  # nothing to show yet
+    on = qp("reader", "on")
+    assert on.returncode == 0, on.stderr
+    key = re.search(r"^QP_API_READ_TOKEN=([0-9a-f]{64})$", (deploy / ".env").read_text(), re.M).group(1)
+    assert key in on.stdout and "https://quantpulse.tail1234.ts.net:8443" in on.stdout
+    calls = docker_log.read_text().splitlines()
+    recreate_api = calls.index("up -d --no-deps --force-recreate api")
+    assert calls.index("--profile reader up -d --no-deps --force-recreate reader") > recreate_api
+    assert "serve --bg --https=8443 http://127.0.0.1:8090" in ts_log.read_text().splitlines()
+    assert qp("reader", "key").stdout.strip() == key
+    assert qp("reader", "on").returncode == 0 and key in (deploy / ".env").read_text()  # the same key again
+    assert qp("restart").returncode == 0
+    assert "up -d --no-deps --force-recreate api dashboard reader" in docker_log.read_text().splitlines()
+
+    off = qp("reader", "off")
+    assert off.returncode == 0, off.stderr
+    assert re.search(r"^QP_API_READ_TOKEN=$", (deploy / ".env").read_text(), re.M) and key not in off.stdout
+    assert "serve --https=8443 off" in ts_log.read_text().splitlines()
+    tail = docker_log.read_text().splitlines()[-4:]
+    assert "--profile reader rm -sf reader" in tail and tail[-2] == "up -d --no-deps --force-recreate api"
+    assert qp("restart").returncode == 0
+    assert docker_log.read_text().splitlines()[-2] == "up -d --no-deps --force-recreate api dashboard"
+
+    (deploy / "state").mkdir()
+    (deploy / "state" / "stopped").touch()
+    stopped = qp("reader", "on")
+    assert stopped.returncode != 0 and "./qp start first" in stopped.stderr

@@ -123,6 +123,14 @@ them when you sign up. **Nothing is bought by QuantPulse or by these scripts.**
   - The dashboard is published with `tailscale serve` (your tailnet only).
   - `QP_DASHBOARD_ACCESS=tailscale` (the default) makes `./qp start --public` refuse.
   - `./qp status` flags the dashboard as PUBLIC if Tailscale Funnel or the caddy profile ever exposes it.
+* **Read-only access is off until you turn it on, and then it can only read** (see
+  [Read-only access](#read-only-access-qp-reader)).
+  - `./qp reader on` makes a second key and publishes a reader gateway on your tailnet only. The gateway
+    forwards GET requests for the monitoring pages and refuses everything else. It holds no Alpaca key, no
+    database password and not the API token.
+  - The API checks the key again: with it, only GETs to the monitoring pages pass, never an order, a control,
+    a switch, a setting or a promotion. `./qp reader off` revokes it at once.
+  - `./qp status` flags the reader as PUBLIC if Tailscale Funnel ever exposes it.
 
 ---
 
@@ -298,6 +306,8 @@ merging, so that nothing that failed CI (ARM64 included) can be merged either.
 - **the API and the Brain supervisor**: the watchdog verdict, the last tick, the last Brain cycle, the last delivered heartbeat;
 - **backups**: the last backup (size, off-site object) and the last restore test;
 - **the deployment**: the deployed commit and its CI result, the auto-update state, the watchdog's recent restarts;
+- **the dashboard and the reader**: their tailnet addresses (or that the reader is off), and PUBLIC if either is
+  ever exposed to the internet;
 - the health of every part, and anything holding new Brain orders.
 
 ### Verify that it is paper only
@@ -311,6 +321,70 @@ grep -E '^QP_ALPACA_(PAPER|API_KEY_ID)=' .env | sed 's/=\(PK...\).*/=\1…/'   #
 The dashboard banner reads *ALPACA PAPER TRADING — SIMULATED MONEY ONLY*. In Alpaca's own website, orders
 appear under the **Paper** account. Nothing in QuantPulse can point at a live account: there is no setting for
 it, and the preflight refuses any variable that names Alpaca's live or broker API.
+
+---
+
+## Read-only access (`./qp reader`)
+
+A way to watch QuantPulse from another device, script or assistant without giving it the dashboard password or
+the API token. It is **off** until you turn it on.
+
+```bash
+./qp reader on     # makes the read-only key, restarts the API gracefully, publishes the reader on the tailnet
+./qp reader key    # shows the key again
+./qp reader off    # revokes the key at once and unpublishes the reader
+```
+
+`./qp reader on` and `off` restart the API the way a deploy does: the running tick finishes, and the Brain
+reconciles before any order. Outside market hours is best.
+
+**What it can do.** It can send GET requests to the monitoring pages, at most 60 a minute:
+* the system: status, health, alerts, watchdog;
+* the paper account: account, positions, orders, cycles, events, performance, risk;
+* the Brain: status, positions, cycles, decisions and their audit trail, learning, research, reviews;
+* the options book, market changes, the model registry, the prediction record and background jobs.
+
+**What it cannot do.** It cannot send any other request: no order, cancel, control, kill switch, setting or
+promotion, whatever the page. The forecasts, stock reports, quotes, option chains and quote streams are left
+out, so it cannot slow the server or use up the market-data allowance. Two layers enforce this:
+* The reader gateway (`quantpulse/reader.py`) is the only thing on the tailnet. It checks the key, the method,
+  the page and the rate before it forwards anything. It holds only the read-only key.
+* The API refuses the read-only key for anything but a GET to a monitoring page, and for WebSockets.
+
+The key cannot change anything, but it shows your positions and history: keep it out of chats, emails and
+GitHub.
+
+**From a device on your tailnet:**
+
+```bash
+curl -H "X-API-Key: <the read-only key>" https://quantpulse.<tailnet>.ts.net:8443/api/v1/brain/status
+```
+
+**From a cloud machine** (for example an assistant's container). It has to join your tailnet, and should reach
+the reader and nothing else:
+1. In the Tailscale admin console → **Access controls**, keep tagged machines away from everything but the
+   reader. Change the default rule's source from `"*"` to `"autogroup:member"` (your own devices), then add:
+   ```json
+   "tagOwners": { "tag:reader": ["autogroup:admin"] },
+   "hosts":     { "quantpulse": "100.x.y.z" },
+   "grants":    [ { "src": ["tag:reader"], "dst": ["quantpulse"], "ip": ["tcp:8443"] } ]
+   ```
+   `100.x.y.z` is the server's Tailscale address (`tailscale ip -4` on the server). In an older policy file
+   that uses `"acls"`, the rule is `{"action": "accept", "src": ["tag:reader"], "dst": ["quantpulse:8443"]}`.
+2. **Settings → Keys → Generate auth key**: ephemeral (the machine disappears when it stops), tagged
+   `tag:reader`, with an expiry. Store it, and the read-only key, as that machine's secrets, never in a
+   repository.
+3. On the machine, Tailscale runs without changing its network (userspace mode), and requests go through its
+   local proxy:
+   ```bash
+   tailscaled --tun=userspace-networking --socks5-server=localhost:1055 --state=mem: &
+   tailscale up --auth-key="$TS_AUTHKEY" --hostname=quantpulse-reader
+   curl --socks5-hostname localhost:1055 -H "X-API-Key: $QP_READ_KEY" \
+     https://quantpulse.<tailnet>.ts.net:8443/api/v1/brain/status
+   ```
+
+To take the access away: `./qp reader off` (the key stops working at once), revoke the auth key, and remove
+the machine in the admin console if it is still listed.
 
 ---
 
@@ -405,6 +479,7 @@ orders; the backup brings back the Brain's history and learning.
 |---|---|---|
 | `POSTGRES_PASSWORD` | generated by `./qp setup` | yes |
 | `QP_API_TOKEN` | generated (64 hex characters) | yes |
+| `QP_API_READ_TOKEN` | empty (off); `./qp reader on` generates it (64 hex characters), `./qp reader off` empties it | yes (it can only read) |
 | `QP_DASHBOARD_PASSWORD_HASH` | made by `./qp setup` / `./qp password` from your password | hash |
 | `QP_ALPACA_API_KEY_ID`, `QP_ALPACA_API_SECRET_KEY` | your Alpaca **paper** keys (Alpaca → Paper Trading → API Keys; the id starts with `PK`) — typed into `./qp setup` | **yes** |
 | `QP_ALPACA_PAPER` | `true` (compose forces it too) | no |

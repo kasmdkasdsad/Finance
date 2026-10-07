@@ -250,6 +250,28 @@ def run(settings: Settings, environ: Mapping[str, str] | None = None) -> Report:
         else ""
     )
     add("api_token", not weak, weak or f"set ({len(token)} characters); required on every API request")
+    reader = _secret(settings.api_read_token)
+    weak = (
+        ""
+        if not reader
+        else f"QP_API_READ_TOKEN is shorter than {MIN_TOKEN} characters"
+        if len(reader) < MIN_TOKEN
+        else "QP_API_READ_TOKEN looks like a placeholder"
+        if any(p in reader.lower() for p in PLACEHOLDERS)
+        else "QP_API_READ_TOKEN must differ from QP_API_TOKEN and the Alpaca credentials"
+        if reader in (token, key, secret)
+        else ""
+    )
+    add(
+        "api_read_token",
+        not weak,
+        weak
+        or (
+            f"set ({len(reader)} characters): it may only read the monitoring pages"
+            if reader
+            else "not set: no read-only access"
+        ),
+    )
     # The dashboard enforces its own password (it stays locked without one); a hash given to this service too
     # must at least be a valid one.
     hashed = _secret(settings.dashboard_password_hash)

@@ -125,6 +125,23 @@ def test_a_strong_api_token_is_required(token):
     assert_no_secret("\n".join(report.lines()))
 
 
+READ_TOKEN = "r" * 20 + "abcdefghij0123456789"  # 40 characters, read-only
+
+
+@pytest.mark.parametrize("token", ["short-read-key", "your-read-key-" + "x" * 30, TOKEN, SECRET])
+def test_a_read_only_key_must_be_strong_and_its_own(token):
+    report = preflight.run(cloud(api_read_token=token), ENV)
+    assert "api_read_token" in failed(report)
+    assert_no_secret("\n".join(report.lines()))
+
+
+def test_the_read_only_key_is_optional():
+    for token in (None, READ_TOKEN):
+        report = preflight.run(cloud(api_read_token=token), ENV)
+        assert report.ok, report.lines()
+        assert READ_TOKEN not in "\n".join(report.lines())
+
+
 @pytest.mark.parametrize("hashed", ["plain-password", "pbkdf2_sha256:1000:c2FsdHNhbHQ:" + "A" * 43])
 def test_a_dashboard_password_hash_given_to_the_api_must_be_valid(hashed):
     assert "dashboard_password" in failed(preflight.run(cloud(dashboard_password_hash=hashed), ENV))

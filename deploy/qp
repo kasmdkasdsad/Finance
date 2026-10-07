@@ -28,6 +28,8 @@
 #   ./qp watchdog | auto-update  what the timers run (by hand: once)
 #   ./qp password              change the dashboard password
 #   ./qp tailscale             publish the dashboard on your private Tailscale network (HTTPS)
+#   ./qp reader on|off|key     read-only access on your tailnet: GETs to the monitoring pages, nothing else
+#                              (a separate key; off revokes it at once)
 #   ./qp down                  stop everything (the Brain stops; the timers leave it stopped; ./qp start)
 set -euo pipefail
 
@@ -56,6 +58,10 @@ open(path, "w", encoding="utf-8").write(text)
 PY
 }
 get_var() { grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2- || true; }
+# The reader gateway runs only while the read-only key is set (./qp reader on); so does its compose profile.
+reader_on() { [[ -n "$(get_var QP_API_READ_TOKEN)" ]]; }
+reader_profile() { if reader_on; then printf '%s\n' --profile reader; fi; }
+tailnet_name() { tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'; }
 
 # Call the API from inside its own container (the token never leaves the server or shows up anywhere).
 api_call() { # METHOD PATH [JSON]
@@ -172,7 +178,8 @@ case "$cmd" in
     dc build --build-arg QP_GIT_COMMIT="$(git -C "$HERE/.." rev-parse HEAD)" api
     dc run --rm --no-deps -T api quantpulse-preflight || die "preflight failed: nothing was started"
     rm -f "$HERE/state/stopped"
-    dc "${profile[@]}" up -d
+    mapfile -t reader < <(reader_profile)
+    dc "${profile[@]}" "${reader[@]}" up -d
     record_deploy
     "${OPS[@]}" record-start || true
     wait_healthy
@@ -190,7 +197,9 @@ case "$cmd" in
     need_env
     # recreated, not just restarted: a container keeps the settings it was created with, so a plain restart
     # would ignore changes to deploy/.env (new keys, alert URLs); the API still stops gracefully first
-    if [[ $# -gt 0 ]]; then dc up -d --no-deps --force-recreate "$@"; else dc up -d --no-deps --force-recreate api dashboard; fi
+    services=(api dashboard)
+    if reader_on; then services+=(reader); fi
+    if [[ $# -gt 0 ]]; then dc up -d --no-deps --force-recreate "$@"; else dc up -d --no-deps --force-recreate "${services[@]}"; fi
     wait_healthy
     ;;
   keys)
@@ -289,15 +298,55 @@ case "$cmd" in
   tailscale)
     command -v tailscale >/dev/null || die "install Tailscale first: curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up"
     sudo tailscale serve --bg --https=443 http://127.0.0.1:8501
-    say "Dashboard on your tailnet: https://$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
+    say "Dashboard on your tailnet: https://$(tailnet_name)"
+    ;;
+  reader)
+    need_env
+    case "${1:-}" in
+      on)
+        command -v tailscale >/dev/null || die "install Tailscale first (bootstrap-oracle.sh does it; then ./qp tailscale)"
+        [[ ! -f "$HERE/state/stopped" ]] || die "QuantPulse is stopped (./qp down): ./qp start first"
+        if ! reader_on; then
+          set_var QP_API_READ_TOKEN "$(openssl rand -hex 32)"
+          say "generated the read-only key"
+        fi
+        # the API learns the key: recreated, so it stops gracefully and the Brain recovers before any order
+        say "restarting the API with the read-only key (a graceful restart, like a deploy) ..."
+        dc up -d --no-deps --force-recreate api
+        wait_healthy
+        dc --profile reader up -d --no-deps --force-recreate reader
+        sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090
+        say "Read-only access is on: https://$(tailnet_name):8443 (your tailnet only)"
+        echo "It reads the monitoring pages (GET requests) and nothing else: no order, control, switch or setting."
+        echo "The read-only key (send it as the X-API-Key header). Keep it out of chats, emails and GitHub:"
+        echo "  $(get_var QP_API_READ_TOKEN)"
+        echo "Revoke it at any time with ./qp reader off."
+        ;;
+      off)
+        if command -v tailscale >/dev/null; then sudo tailscale serve --https=8443 off || true; fi
+        dc --profile reader rm -sf reader || true
+        set_var QP_API_READ_TOKEN ""
+        say "restarting the API without the read-only key (a graceful restart) ..."
+        dc up -d --no-deps --force-recreate api
+        wait_healthy
+        say "Read-only access is off: the key no longer works."
+        ;;
+      key)
+        reader_on || die "read-only access is off (./qp reader on)"
+        get_var QP_API_READ_TOKEN
+        ;;
+      *)
+        die "usage: ./qp reader on | off | key"
+        ;;
+    esac
     ;;
   down)
     need_env
     mkdir -p "$HERE/state" && touch "$HERE/state/stopped"  # the watchdog and auto-update leave it stopped
-    dc --profile public stop
+    dc --profile public --profile reader stop
     say "stopped. Start again with ./qp start"
     ;;
   help|*)
-    sed -n '2,31p' "$HERE/qp" | sed 's/^# \{0,1\}//'
+    sed -n '2,33p' "$HERE/qp" | sed 's/^# \{0,1\}//'
     ;;
 esac

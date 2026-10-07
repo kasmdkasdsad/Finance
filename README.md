@@ -284,7 +284,9 @@ also be changed in the sidebar.
 ## API reference
 
 Every route is under `/api/v1` except `/health`. When `QP_API_TOKEN` is set, every request must send
-`X-API-Key`. WebSocket clients may pass `?api_key=` instead. Errors always use the same shape:
+`X-API-Key`. WebSocket clients may pass `?api_key=` instead. An optional read-only key (`QP_API_READ_TOKEN`)
+is accepted only for GET requests to the monitoring pages (`quantpulse/readonly.py`), never for anything that
+acts, nor for WebSockets. Errors always use the same shape:
 `{"error": "...", "detail": ..., "request_id": "..."}`. Validation errors return 422, unknown entities
 404, a refusal to act on synthetic prices (emailing picks, filling a paper order) 409, missing SMTP
 settings 503, and SMTP delivery failures 502. Paper trading answers 503 without Alpaca keys, 422 for an
@@ -2256,6 +2258,8 @@ QuantPulse runs in the cloud so the Brain keeps supervising the Alpaca **paper**
     an order).
   - Nightly verified backups go to Object Storage through a write-only link, with a weekly restore test.
   - `./qp status` shows the whole server.
+  - `./qp reader on` gives read-only access on the tailnet: a separate key that can only GET the monitoring
+    pages, through a gateway that forwards nothing else. `./qp reader off` revokes it.
 * A self-hosted server (Docker Compose, e.g. Hetzner CX23 at about €6 a month, reached through Tailscale):
   [`deploy/README.md`](deploy/README.md).
 
@@ -2403,7 +2407,9 @@ tests/                   unit · providers · integration · frontend · fixture
 ## Security and operations
 
 * **Auth.** Set `QP_API_TOKEN` to require `X-API-Key` (compared in constant time). `/health` stays open
-  for probes.
+  for probes. The optional read-only key, `QP_API_READ_TOKEN`, works only alongside it and only for GET
+  requests to the monitoring pages. A test calls every one of those pages with it and checks that nothing was
+  sent to Alpaca and nothing was written but display refreshes.
 * **Secrets.** Stored as `SecretStr`; never logged or returned. `/system/status` reports only whether
   each credential is configured. `httpx` URL logging is suppressed because some vendors take keys in
   query strings.

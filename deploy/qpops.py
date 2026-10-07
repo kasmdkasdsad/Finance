@@ -63,6 +63,7 @@ STALLED_CHECKS = 2  # consecutive "stalled" verdicts before a restart
 MAX_RESTARTS, RESTART_WINDOW = 3, timedelta(hours=6)
 PRE_SWITCH_TRIES = 3  # a commit whose build or checks failed this often is not tried again automatically
 VERIFY_FOR = timedelta(minutes=10)  # a new version must be ticking within this long after the switch
+READER_PORT = 8443  # ./qp reader on publishes the read-only reader here, on the tailnet only
 INTERRUPTED_AFTER = timedelta(minutes=45)  # a deploy still "switching" this long ago was cut off (a reboot)
 HEALTHY_AFTER_DEPLOY = {"ok", "paused", "not_applicable"}
 KEEP_DUMPS_DAYS, KEEP_MANUAL_DAYS, KEEP_AT_LEAST = 14, 60, 3
@@ -184,6 +185,14 @@ class Ops:
     # ------------------------------------------------------------------ small helpers
     def setting(self, name: str, default: str = "") -> str:
         return os.environ.get(name) or self.cfg.get(name) or default
+
+    @property
+    def reader_on(self) -> bool:
+        """``./qp reader on`` set the read-only key: the reader gateway runs beside the API."""
+        return bool(self.app_env.get("QP_API_READ_TOKEN", "").strip())
+
+    def reader_profile(self) -> list[str]:
+        return ["--profile", "reader"] if self.reader_on else []
 
     def flag(self, name: str, default: bool) -> bool:
         value = self.setting(name, "true" if default else "false").strip().lower()
@@ -510,7 +519,8 @@ class Ops:
         self.save("deploy.json", state)
         self._retag(target)
         self.git("checkout", "--quiet", "--detach", target)
-        self.dc("up", "-d", "--no-build", "api", "dashboard", timeout=900, check=False)
+        services = ["api", "dashboard", *(["reader"] if self.reader_on else [])]
+        self.dc(*self.reader_profile(), "up", "-d", "--no-build", *services, timeout=900, check=False)
         state["phase"] = "verifying"
         self.save("deploy.json", state)
         ok, verdict = self.wait_ticking(commit=target)
@@ -612,7 +622,7 @@ class Ops:
         if self.host.run(["docker", "image", "inspect", "quantpulse:previous"], check=False).returncode == 0:
             self.host.run(["docker", "tag", "quantpulse:previous", "quantpulse:current"])
         self.git("checkout", "--quiet", "--detach", previous)
-        self.dc("up", "-d", "--no-build", timeout=900, check=False)
+        self.dc(*self.reader_profile(), "up", "-d", "--no-build", timeout=900, check=False)
         ok, verdict = self.wait_ticking()
         state.setdefault("failed", {})[target] = why[:300]
         state.update(phase="rolled_back" if ok else "rollback_unhealthy", deployed=previous,
@@ -691,6 +701,30 @@ class Ops:
         return {**out, "installed": True, "state": info.get("BackendState"),
                 "name": str((info.get("Self") or {}).get("DNSName") or "").rstrip("."),
                 "serving": "8501" in text, "funnel": "funnel on" in text.lower()}  # fmt: skip
+
+    def reader(self) -> dict[str, Any]:
+        """The read-only door (``./qp reader on``): published on the tailnet only (``tailscale serve`` on port
+        8443 → the reader on 8090), never through Tailscale Funnel."""
+        out: dict[str, Any] = {"on": self.reader_on}
+        if not self.reader_on or shutil.which("tailscale") is None:
+            return out
+        serve = self.host.run(["tailscale", "serve", "status", "--json"], check=False, timeout=15)
+        try:
+            cfg = json.loads(serve.stdout) if serve.returncode == 0 and serve.stdout.strip() else {}
+        except ValueError:
+            cfg = {}
+        cfg = cfg if isinstance(cfg, dict) else {}
+        published = [
+            hostport
+            for hostport, web in (cfg.get("Web") or {}).items()
+            if str(hostport).endswith(f":{READER_PORT}")
+            and any(str((h or {}).get("Proxy", "")).rstrip("/").endswith(":8090")
+                    for h in ((web or {}).get("Handlers") or {}).values())
+        ]  # fmt: skip
+        funnel = any(
+            str(k).endswith(f":{READER_PORT}") and v for k, v in (cfg.get("AllowFunnel") or {}).items()
+        )
+        return {**out, "url": f"https://{published[0]}" if published else None, "funnel": funnel}
 
     def record_start(self) -> None:
         """``./qp start`` built and started the working tree's commit by hand: what runs now."""
@@ -1064,6 +1098,7 @@ class Ops:
             out["dashboard"]["caddy"] = any(
                 d["service"] == "caddy" and d["state"] == "running" for d in out["docker"]
             )
+        out["reader"] = self.reader()
         out["preflight"] = self.host_preflight()
         wd = self.load("watchdog.json")
         recent = [
@@ -1211,6 +1246,16 @@ def render_status(s: dict[str, Any]) -> str:
     else:
         text = f"not published on the tailnet yet (./qp tailscale); Tailscale {dash.get('state')}"
     lines.append(f"  dashboard   {text}")
+    r = s.get("reader") or {}
+    if not r.get("on"):
+        text = "off (./qp reader on: read-only access to the monitoring pages, on the tailnet only)"
+    elif r.get("funnel"):
+        text = f"PUBLIC (Tailscale Funnel on port {READER_PORT}): sudo tailscale funnel --https={READER_PORT} off"
+    elif r.get("url"):
+        text = f"on: {r['url']} (tailnet only; GETs to the monitoring pages, nothing else; ./qp reader off)"
+    else:
+        text = "the read-only key is set but the reader is not published on the tailnet (./qp reader on)"
+    lines.append(f"  reader      {text}")
     if s.get("preflight"):
         lines.append("  PREFLIGHT   FAILED: " + "; ".join(s["preflight"]))
     w = s["watchdog"]
