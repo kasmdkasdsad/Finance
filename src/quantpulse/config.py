@@ -621,6 +621,20 @@ class Settings(BaseSettings):
     brain_lab_min_oos_sessions: int = Field(
         default=500, ge=50, le=5000, description="Out-of-sample sessions a strategy needs before a verdict."
     )
+    brain_lab_backlog: int = Field(
+        default=6,
+        ge=0,
+        le=50,
+        description="New strategies the lab keeps waiting to be tested: once the catalogue templates are tried, "
+        "the generator proposes mutations of the best out-of-sample strategies, combinations of research-backed "
+        "features and some random exploration (0: no generated strategies).",
+    )
+    brain_lab_validations_per_run: int = Field(
+        default=4,
+        ge=1,
+        le=20,
+        description="Strategies one research run validates (market data and features are loaded once per run).",
+    )
     brain_lab_paper_days: int = Field(
         default=20,
         ge=1,

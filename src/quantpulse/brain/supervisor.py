@@ -16,8 +16,9 @@ after hours        once a day (from 16:40): a learning pass (grade the day's mat
                    holdings, the strategy lab's paper (shadow) portfolios, a self-improvement review
                    (proposals only), the **daily review** — and after the week's last session the
                    **weekly review** (lessons; proposals only, never a change)
-weekend, holiday   once a day: a learning pass; a *deep* research cycle; the strategy lab proposes
-                   untried templates and validates up to two (it never promotes: that is a person's call)
+weekend, holiday   once a day: a learning pass; a *deep* research cycle; the strategy lab proposes new
+                   strategies (templates, then generated ideas) and validates up to two (it never promotes:
+                   that is a person's call; research validates more while the market is closed)
 =================  =========================================================================================
 
 Events turn into wake-ups: a price move, a volume spike, a news item or earnings approaching for a
@@ -529,7 +530,7 @@ class Supervisor:
         return {"proposals": len(found)}
 
     async def _lab(self) -> dict[str, Any]:
-        """Weekend lab work: propose untried templates, validate up to two proposals (never promotes)."""
+        """Weekend lab work: propose new strategies, validate up to two proposals (never promotes)."""
         proposed = await self._brain.lab.propose()
         validated = await self._brain.lab.validate_pending(limit=2)
         return {"proposed": len(proposed), "validated": len(validated),

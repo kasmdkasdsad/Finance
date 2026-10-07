@@ -1693,6 +1693,28 @@ A version never changes; a different rule is a new version. The brain proposes s
 momentum, momentum in uptrends, short-term reversal, low volatility, steady trend, buying the dip in an
 uptrend), and people can add versions with other parameters.
 
+**The search does not stop at the templates.** Research keeps `QP_BRAIN_LAB_BACKLOG` (6) new strategies
+waiting to be tested, from the generator (`brain/lab/generator.py`):
+* **Mutations** of the strategies with the best out-of-sample active Sharpe so far, one change each:
+  * a weight halved or raised by half;
+  * a research-backed feature added;
+  * the weakest feature dropped;
+  * the uptrend filter added or removed;
+  * the weighting switched.
+* **Combinations** of the features the feature research found to rank returns (false-discovery adjusted
+  q < 0.1), each with the sign of its information coefficient.
+* **Exploration:** a random pair of features, so the search does not only circle what it knows.
+
+Nothing is tested twice: a strategy is identified by what it does, not its name. A batch is seeded by the
+date, so it can be reproduced. Each research run loads the data and features once and validates up to
+`QP_BRAIN_LAB_VALIDATIONS_PER_RUN` (4) strategies within 35 minutes. The run repeats every 3 hours while the
+market is closed (feature research, which feeds the generator, every 2 days).
+
+Searching harder must not mean fooling itself more easily: **every strategy ever tried counts in the
+deflated Sharpe** (all their grid variants are trials, and the spread of their out-of-sample Sharpe ratios
+is the luck to beat), so each new idea faces a higher bar than the last. Whatever passes still goes to
+forward shadow tracking, on data that did not exist when it was chosen, and only a person can promote it.
+
 **Validation** (`POST /brain/lab/strategies/{id}/{version}/validate`) runs on real daily history only
 (`QP_BRAIN_LAB_HISTORY_DAYS`, the `QP_BRAIN_LAB_UNIVERSE_SIZE` most liquid names). Synthetic prices are
 refused. The universe is today's candidates, so results carry survivorship bias, and the report says
@@ -1708,7 +1730,8 @@ so. Validation has six parts:
   *active* Sharpe (versus equal weight, so market beta is not mistaken for skill) is run untouched on the
   next window. Only the stitched test windows count.
 * **Overfitting checks:**
-  * the deflated Sharpe ratio of the out-of-sample active returns, given the number of variants tried;
+  * the deflated Sharpe ratio of the out-of-sample active returns, given every variant of every strategy
+    the lab has tried;
   * the out-of-sample / in-sample ratio;
   * the share of folds that beat equal weight;
   * the percentile against random portfolios.
@@ -1746,8 +1769,8 @@ validated version paper-tracked for `QP_BRAIN_LAB_PAPER_DAYS` sessions without f
 benchmark. A promoted strategy becomes one voice in the consensus (the `strategy_lab` agent), and its
 calls are graded like any agent's.
 
-The supervisor updates paper portfolios after the close. At weekends it proposes untried templates and
-validates up to two. It never promotes.
+The supervisor updates paper portfolios after the close, and at weekends also proposes and validates up to
+two. Research does most of the testing while the market is closed, as above. Neither ever promotes.
 
 ### Self-improvement (proposals only)
 
@@ -2201,7 +2224,7 @@ QP_API_TOKEN=...                          # recommended once orders are enabled
 | `GET /brain/research/catalog` · `/jobs?status=&kind=` · `/jobs/{id}` · `POST /brain/research/questions {"kind": …}` · `POST /brain/research/jobs/{id}/cancel` | Research jobs · the queue and the experiment history · one job and its result · ask a question (queued; answered while the market is closed) · cancel a queued one |
 | `GET /brain/research/learnings?status=&topic=&current=` | The learning ledger: conclusions with their evidence (UNPROVEN until enough) |
 | `GET /brain/research/hypotheses?stage=&kind=` · `POST /brain/research/hypotheses/{id}/promote` · `/reject` `{"by": "your name", "note": "…"}` | The improvement lifecycle · a person's promotion to production (strategies also pass the lab's gates) or rejection |
-| `POST /brain/lab/propose` · `/lab/strategies {"template": …}` · `/lab/strategies/{id}/{version}/validate` · `/lab/strategies/{id}/{version}/status {"status": "paper"\|"promoted"\|"retired"}` · `/lab/paper` | Propose templates · create a version · validate (202 while running) · paper / promote (gated) / retire · update paper portfolios |
+| `POST /brain/lab/propose` · `/lab/strategies {"template": …}` · `/lab/strategies/{id}/{version}/validate` · `/lab/strategies/{id}/{version}/status {"status": "paper"\|"promoted"\|"retired"}` · `/lab/paper` | Propose templates, then generated ideas · create a version · validate (202 while running) · paper / promote (gated) / retire · update paper portfolios |
 
 The `POST` endpoints follow the trading order endpoints' rule: from another machine they need
 `QP_API_TOKEN`.

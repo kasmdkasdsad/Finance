@@ -502,7 +502,9 @@ async def lab_strategies(
 
 
 @router.post(
-    "/lab/propose", dependencies=ControlAuth, summary="Propose every template not tried yet (version 1)"
+    "/lab/propose",
+    dependencies=ControlAuth,
+    summary="Propose every template not tried yet (version 1), then generated ideas up to QP_BRAIN_LAB_BACKLOG",
 )
 async def lab_propose(c: Container = ContainerDep) -> list[dict[str, Any]]:
     return await c.brain.lab.propose()

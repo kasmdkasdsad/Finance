@@ -1000,12 +1000,19 @@ async def agent_redundancy(ctx: JobContext) -> dict[str, Any]:
 
 
 async def strategy_research(ctx: JobContext) -> dict[str, Any]:
-    """The strategy lab: propose untried templates, validate one (backtest, walk-forward, random portfolios,
-    stress), keep paper (shadow) tracking up to date, and move each strategy's hypothesis along its stages."""
+    """The strategy lab: propose untried templates and new generated ideas (mutations of the best out-of-sample
+    strategies, combinations of the research-backed features, exploration), validate several (backtest,
+    walk-forward, random portfolios, stress, the deflated Sharpe over every strategy tried), keep paper (shadow)
+    tracking up to date, and move each strategy's hypothesis along its stages."""
+    from quantpulse.brain.lab.generator import research_features
+
     lab = ctx.brain.lab
-    proposed = await lab.propose()
+    features = research_features(await ctx.ledger.learnings(current_only=True, limit=5000))
+    proposed = await lab.propose(features=features)
     try:
-        validated = await lab.validate_pending(limit=1)
+        validated = await lab.validate_pending(
+            limit=ctx.settings.brain_lab_validations_per_run, budget=STRATEGY_BUDGET
+        )
     except Exception as exc:  # no price data: reported, the rest still runs
         validated = [{"error": f"{type(exc).__name__}: {exc}"[:200]}]
     paper = (
@@ -1032,11 +1039,17 @@ async def strategy_research(ctx: JobContext) -> dict[str, Any]:
             )
     return {
         "proposed": len(proposed),
+        "generated": [p["key"] for p in proposed if p.get("source") == "generated"],
+        "research_features": features,
         "validated": _brief(validated),
         "paper": _brief(paper),
         "lifecycle": moved,
     }
 
+
+STRATEGY_BUDGET = timedelta(
+    minutes=35
+)  # no new validation starts after this (the job's timeout is 60 minutes)
 
 BACKTEST_GATES = (
     "better than random portfolios",

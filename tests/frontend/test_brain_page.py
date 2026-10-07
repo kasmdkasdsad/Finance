@@ -222,3 +222,16 @@ def test_each_position_says_when_it_is_sold():
     }
     assert brain_view._stop_line(fixed) == "sells below $92.00; it starts trailing the high at $110.00"
     assert brain_view._stop_line({"stop_price": None}) == "none recorded"
+
+
+def test_the_lab_says_how_much_research_has_tried():
+    rows = [
+        {"status": "rejected", "source": "template", "validation": {"verdict": "rejected"}},
+        {"status": "paper", "source": "template", "validation": {"verdict": "validated"}},
+        {"status": "validated", "source": "generated", "validation": {"verdict": "validated"}},
+        {"status": "rejected", "source": "generated", "validation": {"verdict": "rejected"}},
+        {"status": "proposed", "source": "generated", "validation": {}},
+    ]
+    assert brain_view._lab_summary(rows) == (
+        "4 strategies tested (3 generated so far) · 1 validated · 1 in shadow tracking · 0 promoted · 1 waiting"
+    )

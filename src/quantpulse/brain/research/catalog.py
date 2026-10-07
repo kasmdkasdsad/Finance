@@ -63,12 +63,13 @@ CATALOG: dict[str, JobSpec] = {
         JobSpec("agent_redundancy", "Are two agents effectively measuring the same factor?", "RESEARCH", "medium", 4,
                 7 * D, h.agent_redundancy, topic="redundancy:"),
         JobSpec("feature_research", "Which features consistently rank future returns, out of sample and across "
-                "volatility regimes?", "RESEARCH", "heavy", 5, 7 * D, h.feature_research, topic="feature:",
+                "volatility regimes?", "RESEARCH", "heavy", 5, 2 * D, h.feature_research, topic="feature:",
                 timeout=timedelta(minutes=45)),
         JobSpec("agent_combinations", "Would the consensus predict better without one of its agents?", "TEST",
                 "medium", 5, 7 * D, h.agent_combinations, topic="combination:"),
-        JobSpec("strategy_research", "Do new strategies survive backtests, walk-forward, random portfolios and "
-                "stress — and how do the paper-tracked ones hold up?", "TEST", "heavy", 6, 12 * H,
+        JobSpec("strategy_research", "Do new strategies (templates, then generated ideas) survive backtests, "
+                "walk-forward, random portfolios and stress — and how do the paper-tracked ones hold up?", "TEST",
+                "heavy", 7, 3 * H,
                 h.strategy_research, topic="strategy:", timeout=timedelta(minutes=60)),
         JobSpec("improvement_review", "What weaknesses does the record show, and what evidence-based changes follow?",
                 "LEARN", "medium", 5, D, h.improvement_review),

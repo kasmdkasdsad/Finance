@@ -5,9 +5,13 @@ stress tests) → paper (shadow) tracking → compare → promote only if valida
   (warehouse first, then vendors), completed sessions only. Synthetic prices are refused: the lab says it
   cannot test rather than test on invented data. The universe is today's candidates, so results carry
   survivorship bias (names that left the index are missing); the report says so.
-* **Proposals** — the brain proposes the template catalogue (:mod:`.spec`); people can add versions with
-  different parameters. A version never changes.
-* **Validation** — :func:`.validation.validate`; the verdict is *validated* only if every gate passes.
+* **Proposals** — the brain proposes the template catalogue (:mod:`.spec`), then keeps a backlog of new ideas
+  from the generator (:mod:`.generator`: mutations of the best out-of-sample strategies, combinations of
+  research-backed features, random exploration; nothing tried twice). People can add versions with different
+  parameters. A version never changes.
+* **Validation** — :func:`.validation.validate`; the verdict is *validated* only if every gate passes. Every
+  strategy ever tried counts as trials in the deflated Sharpe, so a bigger search faces a higher bar. A run
+  loads the data and features once and validates several strategies within its time budget.
 * **Paper** — a validated version can be paper-tracked: on its own schedule the lab records the portfolio it
   would hold (no orders — a shadow portfolio) and measures, from real closes afterwards, how it did against
   the benchmark.
@@ -20,7 +24,10 @@ stress tests) → paper (shadow) tracking → compare → promote only if valida
 from __future__ import annotations
 
 import asyncio
+import statistics
+import time
 from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -39,8 +46,10 @@ from quantpulse.services.market import MarketService
 from quantpulse.services.trading_data import TradingDataLoader
 
 from .backtest import scores
+from .generator import Evidence, fingerprint, leaders
+from .generator import propose as generate
 from .spec import TEMPLATES, StrategySpec, from_template
-from .validation import Thresholds, validate
+from .validation import Population, Thresholds, validate
 
 STATUSES = ("proposed", "validated", "rejected", "paper", "promoted", "retired")
 SIGNAL_KEY = "promoted_signals"
@@ -189,22 +198,62 @@ class StrategyLab:
         spec = from_template(template, version=int(latest or 0) + 1, **overrides)
         return await self.create(spec, source, parent=int(latest) if latest else None)
 
-    async def propose(self) -> list[dict[str, Any]]:
-        """The brain proposes every catalogue template it has not tried yet (version 1)."""
-        have = {r["strategy_id"] for r in await self.strategies()}
-        return [await self.create(from_template(t), "template") for t in TEMPLATES if t not in have]
+    async def propose(self, features: dict[str, float] | None = None) -> list[dict[str, Any]]:
+        """Every catalogue template not tried yet (version 1), then generated ideas until the backlog of
+        strategies waiting to be tested is ``QP_BRAIN_LAB_BACKLOG`` (``features``: the research-backed features
+        and their information coefficients, for the generator)."""
+        rows = await self.strategies()
+        have = {r["strategy_id"] for r in rows}
+        out = [await self.create(from_template(t), "template") for t in TEMPLATES if t not in have]
+        waiting = sum(1 for r in rows if r["status"] == "proposed") + len(out)
+        want = self._s.brain_lab_backlog - waiting
+        if want > 0:
+            evidence = Evidence(
+                tried={fingerprint(StrategySpec.from_dict(r["spec"])) for r in rows},
+                leaders=leaders(rows),
+                features=dict(features or {}),
+            )
+            seed = f"{self._clock.now().date().isoformat()}:{len(rows)}"
+            for c in generate(evidence, want, seed):
+                out.append(await self.create(c.spec, "generated"))
+        return out
+
+    async def population(self) -> Population:
+        """The strategies tried so far (validated at least once): their count and the spread of their
+        out-of-sample active Sharpe ratios, for the deflated Sharpe of the next one."""
+        rows = [r for r in await self.strategies() if r["validation"]]
+        sharpes = [
+            float(sr)
+            for r in rows
+            if (sr := ((r["validation"] or {}).get("walk_forward") or {}).get("oos_active_sharpe"))
+            is not None
+        ]
+        return Population(
+            tried=len(rows) + 1, sharpe_variance=statistics.pvariance(sharpes) if len(sharpes) > 1 else 0.0
+        )
 
     # ------------------------------------------------------------------ validation
-    async def validate(self, strategy_id: str, version: int) -> dict[str, Any]:
+    async def prepare(self) -> tuple[Panel, dict[str, Any], dict[str, pd.DataFrame]]:
+        """The price panel and its features, for one or more validations."""
+        panel, meta = await self.panel()
+        # CPU-heavy: off the event loop, so the supervisor and the API keep running meanwhile
+        features = await asyncio.to_thread(compute_features, panel)
+        return panel, meta, features
+
+    async def validate(
+        self,
+        strategy_id: str,
+        version: int,
+        prepared: tuple[Panel, dict[str, Any], dict[str, pd.DataFrame]] | None = None,
+    ) -> dict[str, Any]:
         async with self._db.session() as s:
             row = await self._row(s, strategy_id, version)
             if row.status in ("retired",):
                 raise DomainError(f"{strategy_id}@v{version} is retired")
             spec = StrategySpec.from_dict(row.spec)
-        panel, meta = await self.panel()
-        # CPU-heavy (features, backtests, walk-forward, random portfolios): off the event loop, so the supervisor
-        # and the API keep running meanwhile
-        features = await asyncio.to_thread(compute_features, panel)
+        panel, meta, features = prepared or await self.prepare()
+        population = await self.population()
+        # CPU-heavy (backtests, walk-forward, random portfolios): off the event loop, as above
         report = await asyncio.to_thread(
             lambda: validate(
                 spec,
@@ -214,6 +263,7 @@ class StrategyLab:
                 self.thresholds,
                 volume=panel.volume,
                 capital=self._s.brain_book_capital,
+                population=population,
             )
         )
         report["data"] = meta
@@ -241,10 +291,19 @@ class StrategyLab:
             )
         return summary
 
-    async def validate_pending(self, limit: int = 3) -> list[dict[str, Any]]:
-        out = []
-        for r in (await self.strategies("proposed"))[:limit]:
-            out.append({"key": r["key"], **(await self.validate(r["strategy_id"], r["version"]))})
+    async def validate_pending(self, limit: int = 3, budget: timedelta | None = None) -> list[dict[str, Any]]:
+        """Validate up to ``limit`` waiting strategies, oldest first, on data and features loaded once; no new
+        one starts once ``budget`` (wall-clock time) is spent."""
+        pending = (await self.strategies("proposed"))[:limit]
+        if not pending:
+            return []
+        prepared = await self.prepare()
+        started = time.monotonic()
+        out: list[dict[str, Any]] = []
+        for r in pending:
+            if out and budget is not None and time.monotonic() - started > budget.total_seconds():
+                break
+            out.append({"key": r["key"], **(await self.validate(r["strategy_id"], r["version"], prepared))})
         return out
 
     # ------------------------------------------------------------------ paper, promotion

@@ -1420,16 +1420,33 @@ STATUS_BADGE = {
 }
 
 
+def _lab_summary(rows: list[dict[str, Any]]) -> str:
+    """The search at a glance: how much it has tried, and where the ideas stand."""
+    tested = [r for r in rows if r.get("validation")]
+    generated = sum(1 for r in rows if r.get("source") == "generated")
+    count = {
+        s: sum(1 for r in rows if r["status"] == s) for s in ("validated", "paper", "promoted", "proposed")
+    }
+    return (
+        f"{len(tested)} strategies tested ({generated} generated so far) · {count['validated']} validated · "
+        f"{count['paper']} in shadow tracking · {count['promoted']} promoted · {count['proposed']} waiting"
+    )
+
+
 def _lab() -> None:
     st.markdown(
-        "Strategies are **proposed → validated → paper-tracked → promoted**. Validation needs every gate to pass: "
-        "enough out-of-sample history, walk-forward value over the equal-weight universe, a deflated Sharpe "
-        "that survives the number of variants tried, better than random portfolios, and stress tests. One "
-        "attractive backtest is never enough, and **only a person can promote**. A promoted strategy becomes one "
-        "voice in the consensus; nothing here places an order."
+        "Strategies are **proposed → validated → paper-tracked → promoted**. After the catalogue templates, "
+        "research keeps **generating new ideas**: variations of the strategies with the best out-of-sample "
+        "record, combinations of the features research found to rank returns, and some random exploration. "
+        "Validation needs every gate to pass: enough out-of-sample history, walk-forward value over the "
+        "equal-weight universe, a deflated Sharpe that survives **every strategy ever tried**, better than "
+        "random portfolios, and stress tests. One attractive backtest is never enough, and **only a person can "
+        "promote**. A promoted strategy becomes one voice in the consensus; nothing here places an order."
     )
     rows = guarded(lambda: api().get(f"{BASE}/lab/strategies"), "strategy lab") or []
-    propose = st.button("Propose untried templates", icon=":material/add_circle:", key="lab-propose")
+    if rows:
+        st.caption(_lab_summary(rows))
+    propose = st.button("Propose new strategies", icon=":material/add_circle:", key="lab-propose")
     if propose and guarded(lambda: api().post(f"{BASE}/lab/propose"), "propose") is not None:
         st.rerun()
     if not rows:
@@ -1441,6 +1458,7 @@ def _lab() -> None:
                 {
                     "strategy": r["key"],
                     "name": r["name"],
+                    "source": r.get("source"),
                     "status": r["status"],
                     "verdict": (r["validation"] or {}).get("verdict"),
                     "gates passed": f"{sum(g['passed'] for g in (r['validation'] or {}).get('gates', []))}"

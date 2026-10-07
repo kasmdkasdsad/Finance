@@ -6,8 +6,10 @@
   *test* window that follows. Only the stitched test windows count as out-of-sample performance; the
   in-sample/out-of-sample ratio shows how much of the backtest was fitting.
 * **Deflated Sharpe ratio** (Bailey & López de Prado) — the probability that the out-of-sample active Sharpe is
-  above what the best of ``N`` luck-only trials would reach, given the returns' skew and kurtosis; every
-  grid combination is a trial, and their spread is measured within each training window.
+  above what the best of ``N`` luck-only trials would reach, given the returns' skew and kurtosis. Every grid
+  combination of every strategy the lab has ever tried is a trial (:class:`Population`), so the bar rises as
+  the search tries more ideas; the spread of the trials is the larger of the variants' spread within each
+  training window and the spread of the tried strategies' out-of-sample Sharpe ratios.
 * **Random portfolios** — the percentile of the strategy's Sharpe among portfolios of the same number of
   random names on the same schedule.
 * **Stress tests** — the benchmark's worst drawdown episodes and worst 20-session windows in the sample
@@ -38,6 +40,14 @@ from .spec import StrategySpec
 
 EULER = 0.5772156649
 NORMAL = statistics.NormalDist()
+
+
+@dataclass(frozen=True)
+class Population:
+    """The strategies the lab has tried so far: each one's grid counts as trials in the deflated Sharpe."""
+
+    tried: int = 1  # strategies tested, this one included
+    sharpe_variance: float = 0.0  # variance of their out-of-sample active Sharpe ratios (annualised)
 
 
 @dataclass(frozen=True)
@@ -102,9 +112,11 @@ def walk_forward(
     *,
     train: int = 252,
     test: int = 126,
+    population: Population | None = None,
 ) -> dict[str, Any]:
     """Choose the grid variant with the best *active* Sharpe (vs the equal-weight universe) on each training
     window, run it untouched on the next test window, and stitch the test windows together."""
+    population = population or Population()
     variants = spec.variants()
     shared = scores(spec, features)  # the grid changes sizing and timing, not the ranking
     start = warmup(spec, features)
@@ -171,11 +183,15 @@ def walk_forward(
             else None
         ),
         "fold_win_rate": round(sum(f["beat_baseline"] for f in folds) / len(folds), 4),
-        "trials": len(variants),
+        "trials": len(variants) * max(1, population.tried),
+        "strategies_tried": max(1, population.tried),
         "dsr": deflated_sharpe(
             active_all.to_numpy(),
-            len(variants),
-            sum(fold_variances) / len(fold_variances) if fold_variances else 0.0,
+            len(variants) * max(1, population.tried),
+            max(
+                sum(fold_variances) / len(fold_variances) if fold_variances else 0.0,
+                population.sharpe_variance,
+            ),
         ),
         "returns": stitched.returns,
     }
@@ -269,7 +285,8 @@ def gates(report: dict[str, Any], th: Thresholds) -> list[dict[str, Any]]:
         ("beats the equal-weight baseline in most folds", (wf.get("fold_win_rate") or 0) >= th.min_fold_win_rate,
          f"{wf.get('fold_win_rate')} of folds (needs ≥ {th.min_fold_win_rate})"),
         ("not explained by trying many variants (deflated Sharpe)", (wf.get("dsr") or 0) >= th.min_dsr,
-         f"DSR {wf.get('dsr')} over {wf.get('trials')} trials (needs ≥ {th.min_dsr})"),
+         f"DSR {wf.get('dsr')} over {wf.get('trials')} trials, {wf.get('strategies_tried', 1)} strategies tried "
+         f"(needs ≥ {th.min_dsr})"),
         ("better than random portfolios", (report.get("random_percentile") or 0) >= th.min_random_percentile,
          f"percentile {report.get('random_percentile')} (needs ≥ {th.min_random_percentile})"),
         ("survives doubled costs", (st.get("double_costs_sharpe") or -1) > 0, f"Sharpe {st.get('double_costs_sharpe')}"),
@@ -309,6 +326,7 @@ def validate(
     *,
     volume: pd.DataFrame | None = None,
     capital: float = 100_000.0,
+    population: Population | None = None,
 ) -> dict[str, Any]:
     """The full report: backtest, baselines, walk-forward, overfitting checks, stress tests, scrutiny (the
     reasons it may not work), gates."""
@@ -316,7 +334,7 @@ def validate(
     start = warmup(spec, features)
     full = backtest(spec, features, close, benchmark, start)
     base = equal_weight(close, benchmark, spec, start, len(close))
-    wf = walk_forward(spec, features, close, benchmark)
+    wf = walk_forward(spec, features, close, benchmark, population=population)
     sharpe = metrics(full).get("sharpe")
     randoms = random_sharpes(close, spec, start, len(close))
     percentile = (

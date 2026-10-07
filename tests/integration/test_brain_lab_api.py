@@ -77,6 +77,51 @@ async def test_the_strategy_lifecycle(tmp_path):
         assert only_reads(api.fake)
 
 
+async def test_once_the_templates_are_tried_research_keeps_generating_and_testing_new_ideas(tmp_path):
+    """Research does not stop at the catalogue: it validates several strategies per run on data loaded once,
+    every one tried raises the bar for the next, and generated ideas keep the backlog full. No order."""
+    from quantpulse.brain.research import handlers
+
+    clock = FakeClock(NOW)
+    feed = TrendFeed(clock, drifts=WIDE, sessions=1200)
+    async for api in brain_client(tmp_path, clock, feed=feed, brain_lab_history_days=1700, brain_lab_backlog=4,
+                                  brain_lab_validations_per_run=3):  # fmt: skip
+        brain = api.container.brain
+        lab = brain.lab
+        templates = await lab.propose()
+        assert len(templates) == 6 and all(t["source"] == "template" for t in templates)
+        loads = []
+        prepare = lab.prepare
+
+        async def counted(loads=loads, prepare=prepare):
+            loads.append(1)
+            return await prepare()
+
+        lab.prepare = counted
+        first = await lab.validate_pending(limit=6)
+        assert len(first) == 6 and loads == [1]  # six validations, one data load
+        tried = [v["walk_forward"].get("strategies_tried") for v in first]
+        assert tried == [1, 2, 3, 4, 5, 6]  # each one judged against all those tried before it
+        assert [v["walk_forward"]["trials"] for v in first] == [6 * k for k in range(1, 7)]
+
+        research = brain.research
+        ctx = handlers.JobContext(job={"id": None, "kind": "strategy_research"}, brain=brain,
+                                  settings=api.container.settings, clock=clock, ledger=research.ledger,
+                                  lifecycle=research.lifecycle)  # fmt: skip
+        out = await handlers.strategy_research(ctx)
+        assert out["proposed"] == 4 and len(out["generated"]) == 4  # the backlog refilled with new ideas
+        assert len(out["validated"]) == 3 and loads == [1, 1]  # three of them tested in the same run
+        rows = {r["key"]: r for r in await lab.strategies()}
+        for key in out["generated"]:
+            r = rows[key]
+            assert key.startswith("gen-") and r["source"] == "generated" and r["spec"]["grid"]
+        tested = [rows[v["key"]] for v in out["validated"]]
+        assert all(r["status"] in ("validated", "rejected", "paper") for r in tested)
+        assert [r["validation"]["walk_forward"]["strategies_tried"] for r in tested] == [7, 8, 9]
+        assert sum(1 for r in rows.values() if r["status"] == "proposed") == 1
+        assert only_reads(api.fake)
+
+
 async def test_the_lab_refuses_synthetic_prices(tmp_path, clock):
     async for api in _client(make_settings(tmp_path), clock):  # live data off: only synthetic prices exist
         await api.post(f"{LAB}/propose")
