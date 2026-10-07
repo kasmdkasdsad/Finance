@@ -60,7 +60,8 @@ def scores(spec: StrategySpec, features: dict[str, pd.DataFrame]) -> pd.DataFram
     return out
 
 
-def _weights(names: list[str], vol: pd.Series | None) -> dict[str, float]:
+def portfolio_weights(names: list[str], vol: pd.Series | None) -> dict[str, float]:
+    """Equal weights, or inverse-volatility weights when ``vol`` (one row of volatilities) is given."""
     if not names:
         return {}
     if vol is None:
@@ -143,7 +144,7 @@ def backtest(
         row = row[close.iloc[t].reindex(row.index).notna()]
         if len(row) >= spec.top_n:
             names = [str(x) for x in row.sort_values(ascending=False).index[: spec.top_n]]
-            targets.append((t, _weights(names, vol.iloc[t] if vol is not None else None)))
+            targets.append((t, portfolio_weights(names, vol.iloc[t] if vol is not None else None)))
             holdings.append((close.index[t], names))
         t += spec.rebalance_days
     daily, turnover = simulate(

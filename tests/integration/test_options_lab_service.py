@@ -97,6 +97,52 @@ async def test_shadow_is_the_only_way_to_paper(api):
     assert any("shadow trades" in r for r in detail["next_gate"])
 
 
+async def test_live_evidence_carries_a_strategy_to_paper_active_and_proven(api):
+    """The rest of the ladder, through the lab's own promotion: a winning shadow record over enough sessions
+    earns PAPER_ACTIVE (full-size paper trades); 50 winning paper trades with t ≥ 2 earn PROVEN. A losing
+    shadow record earns nothing."""
+    from quantpulse.db.options_models import OptionsPositionRow
+    from quantpulse.options.lab.promotion import stage_record
+
+    lab = api.container.options_lab
+    await lab.seed()
+    now = api.container.clock.now()
+    evaluated = {"latest": {"validation_ror": 0.06, "walkforward_passed": True}, "fdr": {"discovery": True}}
+
+    def closed(vid, mode, i, pnl):
+        at = now - timedelta(days=60 - i)
+        return OptionsPositionRow(version_id=vid, underlying="SPY", family="bull_put_spread", direction="bullish",
+                                  mode=mode, structure={}, quantity=1, status="closed", opened_at=at - timedelta(days=5),
+                                  entry_value=-100.0, entry_underlying=500.0, max_loss=400.0, closed_at=at,
+                                  realized_pnl=pnl)  # fmt: skip
+
+    async with api.container.db.session() as s:
+        versions = (
+            await s.scalars(select(OptionsStrategyVersionRow).order_by(OptionsStrategyVersionRow.id))
+        ).all()
+        win, lose = versions[0], versions[1]
+        for v in (win, lose):
+            v.stage = Stage.PAPER_SHADOW.value
+            v.stage_history = [
+                *v.stage_history,
+                stage_record(Stage.PAPER_SHADOW, now.isoformat(), "test", evaluated),
+            ]
+        for i in range(12):  # 12 shadow trades on 12 sessions
+            s.add(closed(win.id, "shadow", i, 60.0 if i % 4 else -40.0))
+            s.add(closed(lose.id, "shadow", i, -50.0 if i % 4 else 30.0))
+        ids = win.id, lose.id
+    await lab._promote_all(now)
+    stages = {x["id"]: x["stage"] for x in await lab.strategies()}
+    assert stages[ids[0]] == "PAPER_ACTIVE" and stages[ids[1]] != "PAPER_ACTIVE"
+    async with api.container.db.session() as s:
+        for i in range(55):  # winning paper trades (realistic noise)
+            s.add(closed(ids[0], "paper", i % 50, 50.0 if i % 3 else -30.0))
+    await lab._promote_all(now)
+    detail = await lab.strategy(ids[0])
+    assert detail["stage"] == "PROVEN", detail["next_gate"]
+    assert [h["stage"] for h in detail["stage_history"]][-2:] == ["PAPER_ACTIVE", "PROVEN"]
+
+
 async def test_with_nothing_passed_yet_a_run_still_breeds_new_ideas_and_runs_alone(api):
     """The search never stalls waiting for a first success: a run with time left explores (wider variations of
     the best-scoring candidates and brand-new random strategies). One run at a time."""

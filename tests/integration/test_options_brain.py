@@ -3,6 +3,8 @@ validated strategy's candidate is deliberated, recorded with its thesis, traded 
 at PAPER_ACTIVE — sent as a paper order through the trading service; later exits close both, and every
 closed position feeds learning. Strategies still in research never trade."""
 
+from dataclasses import replace
+
 import pytest
 from sqlalchemy import select
 
@@ -47,14 +49,12 @@ async def client(tmp_path, clock, **overrides):
         yield api
 
 
-async def promote(api, genome: Genome, stage: Stage) -> int:
+async def promote(api, genome: Genome, stage: Stage, key: str = "test-long-call") -> int:
     """A strategy version as if the lab had validated it (test data through the lab's own writer)."""
     lab = api.container.options_lab
     now = api.container.clock.now()
     async with api.container.db.session() as s:
-        v = await lab._add_version(
-            s, genome, key="test-long-call", origin="seed", reason="test", generation=0, now=now
-        )
+        v = await lab._add_version(s, genome, key=key, origin="seed", reason="test", generation=0, now=now)
         v.stage = stage.value
         v.stage_history = [*v.stage_history, stage_record(stage, now.isoformat(), "test",
                                                           {"latest": {"validation_ror": 0.08}})]  # fmt: skip
@@ -181,6 +181,26 @@ async def test_a_promoted_strategy_with_no_positive_edge_still_never_trades(tmp_
         assert await rows(api, OptionsPositionRow) == []
         assert {c.gate for c in await rows(api, OptionsTradeCandidateRow)} == {"no validated edge"}
         assert not [b for b in api.fake.bodies if b.get("position_intent")]
+
+
+async def test_each_strategy_builds_its_own_shadow_record(tmp_path):
+    """Shadow trades are each strategy's own forward test: one strategy's shadow position on an underlying never
+    keeps another from trading it in shadow (it used to: every strategy shared one shadow book, so a handful
+    of positions starved the rest of the evidence PAPER_ACTIVE needs). A strategy still never stacks."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock, options_exploration=False):
+        a = await promote(api, LONG_CALL, Stage.PAPER_SHADOW)
+        b = await promote(api, replace(LONG_CALL, delta_target=0.4), Stage.PAPER_SHADOW, key="test-call-40")
+        await run_cycle(api)
+        shadow = await rows(api, OptionsPositionRow, mode="shadow")
+        assert sorted(p.version_id for p in shadow) == [a, b]  # both on MIDA, the only underlying
+        assert {p.underlying for p in shadow} == {"MIDA"}
+        clock.advance(35 * 60)
+        await run_cycle(api)
+        assert len(await rows(api, OptionsPositionRow, mode="shadow")) == 2  # neither stacks a second
+        gates = {c.gate for c in await rows(api, OptionsTradeCandidateRow) if c.gate}
+        assert gates <= {"this strategy already holds this underlying", "OptionsPortfolioAgent"}, gates
+        assert not [b for b in api.fake.bodies if b.get("position_intent")]  # shadow is never an order
 
 
 async def test_nothing_is_sent_when_the_brain_does_not_own_the_account(tmp_path):

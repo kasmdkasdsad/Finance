@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quantpulse.brain.lab.backtest import backtest, equal_weight, metrics
+from quantpulse.brain.lab.backtest import backtest, equal_weight, metrics, portfolio_weights
 from quantpulse.brain.lab.scrutiny import refute
 from quantpulse.brain.lab.service import _paper_performance
 from quantpulse.brain.lab.spec import TEMPLATES, StrategySpec, from_template
@@ -198,3 +198,20 @@ def test_paper_performance_chains_the_shadow_portfolios():
     a_gain = float(close["A"].iloc[10]) / 100 - 1
     assert perf["return"] == pytest.approx(a_gain, abs=1e-4)  # B was flat afterwards
     assert perf["excess_return"] == pytest.approx((1 + a_gain) - 404 / 400, abs=1e-4)
+
+
+def test_paper_tracking_measures_the_weights_that_were_validated():
+    """An inverse-volatility strategy's paper record is measured at its own weights, not equal weights (the
+    shadow portfolio it validated is the one tracked); entries recorded without weights stay equal-weight."""
+    idx = pd.bdate_range("2026-01-02", periods=11)
+    close = pd.DataFrame({"A": np.linspace(100, 120, 11), "B": np.full(11, 50.0)}, index=idx)
+    bench = pd.Series(np.full(11, 400.0), index=idx)
+    entry = {"date": str(idx[0].date()), "holdings": ["A", "B"], "prices": {"A": 100.0, "B": 50.0},
+             "benchmark": 400.0}  # fmt: skip
+    assert _paper_performance([entry], close, bench)["return"] == pytest.approx(0.10)  # 20% and 0%, equal
+    weighted = {**entry, "weights": {"A": 0.25, "B": 0.75}}
+    assert _paper_performance([weighted], close, bench)["return"] == pytest.approx(0.05)
+    vols = pd.Series({"A": 0.40, "B": 0.20})
+    w = portfolio_weights(["A", "B"], vols)
+    assert w["B"] == pytest.approx(2 * w["A"]) and sum(w.values()) == pytest.approx(1.0)
+    assert portfolio_weights(["A", "B"], None) == {"A": 0.5, "B": 0.5}

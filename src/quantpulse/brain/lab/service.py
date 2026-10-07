@@ -46,7 +46,7 @@ from quantpulse.schemas.common import DataStatus
 from quantpulse.services.market import MarketService
 from quantpulse.services.trading_data import TradingDataLoader
 
-from .backtest import scores
+from .backtest import portfolio_weights, scores
 from .generator import Evidence, fingerprint, leaders
 from .generator import propose as generate
 from .spec import TEMPLATES, StrategySpec, from_template
@@ -378,9 +378,14 @@ class StrategyLab:
                 recorded = [e.result for e in entries]
                 if due and len(score) >= spec.top_n:
                     holdings = [str(x) for x in score.index[: spec.top_n]]
+                    # the weights the validation used (equal, or inverse volatility), so the paper record
+                    # measures the strategy that passed
+                    vol = features.get("vol_63") if spec.weighting == "inverse_vol" else None
+                    weights = portfolio_weights(holdings, vol.iloc[-1] if vol is not None else None)
                     result = {
                         "date": str(today.date()),
                         "holdings": holdings,
+                        "weights": {h: round(w, 6) for h, w in weights.items()},
                         "prices": {h: float(close[h].iloc[-1]) for h in holdings},
                         "benchmark": float(bench.iloc[-1]),
                     }
@@ -441,7 +446,8 @@ class StrategyLab:
 def _paper_performance(
     entries: list[dict[str, Any]], close: pd.DataFrame, bench: pd.Series
 ) -> dict[str, Any]:
-    """Chain each recorded shadow portfolio's equal-weight return (to the next entry, or the latest close)."""
+    """Chain each recorded shadow portfolio's return (to the next entry, or the latest close), at the weights it
+    was recorded with (entries recorded before weights were kept: equal weights)."""
     if not entries:
         return {"entries": 0, "sessions": 0}
     total, bench_total, sessions = 1.0, 1.0, 0
@@ -450,12 +456,14 @@ def _paper_performance(
         end = pd.Timestamp(entries[i + 1]["date"]) if i + 1 < len(entries) else close.index[-1]
         if end <= start:
             continue
-        rets = []
+        weights = e.get("weights") or {}
+        rets, ws = [], []
         for h in e["holdings"]:
             if h in close.columns and pd.notna(close.at[end, h]) and e["prices"].get(h):
                 rets.append(float(close.at[end, h]) / e["prices"][h] - 1)
-        if rets:
-            total *= 1 + float(np.mean(rets))
+                ws.append(float(weights.get(h, 1.0)) if weights else 1.0)
+        if rets and sum(ws) > 0:
+            total *= 1 + float(np.average(rets, weights=ws))
         bench_total *= float(bench.at[end]) / e["benchmark"]
         sessions += int(((close.index > start) & (close.index <= end)).sum())
     return {

@@ -78,6 +78,8 @@ from .perception import UnderlyingView, perceive, record
 
 logger = logging.getLogger(__name__)
 SHADOW_PER_CYCLE = 5
+# open shadow positions at most (each is marked every cycle); a strategy holds at most one per underlying
+SHADOW_MAX_OPEN = 60
 # "assigned": a leg went (assigned early, or closed outside QuantPulse) while others remain — frozen for a person
 LIVE = ("pending", "open", "closing", "assigned")
 # an order that will not fill any further (whatever part of it did fill stays filled)
@@ -669,10 +671,18 @@ class OptionsBrain:
                        paper_allowed: bool) -> None:  # fmt: skip
         s = self._s
         open_rows = await self._open_positions()
-        # the paper and shadow books are separate: shadow evidence never blocks (or stands in for) a paper trade
-        books: dict[str, dict[str, list[int]]] = {"paper": defaultdict(list), "shadow": defaultdict(list)}
+        # the paper and shadow books are separate: shadow evidence never blocks (or stands in for) a paper trade.
+        # The paper book is the account's: one position per underlying across every strategy. Shadow trades are
+        # each strategy's own forward test, so each strategy has its own shadow book (one per underlying):
+        # one strategy's shadow position never keeps another from building its record.
+        paper_book: dict[str, list[int]] = defaultdict(list)
+        shadow_books: dict[int | None, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
         for r in open_rows:
-            books["paper" if r.mode == "paper" else "shadow"][r.underlying].append(r.id)
+            if r.mode == "paper":
+                paper_book[r.underlying].append(r.id)
+            else:
+                shadow_books[r.version_id][r.underlying].append(r.id)
+        shadow_open = sum(len(ids) for b in shadow_books.values() for ids in b.values())
         weights = await self._weights()
         decays = await self._decays()
         rng = random.Random(now.date().toordinal())
@@ -720,7 +730,7 @@ class OptionsBrain:
                 risk = self._preview(intent, ctx, view, now) if intent is not None else None
                 cc = A.CandidateContext(view=view, version=v, genome=g, cand=pick, now=now,
                                         stock_view=_stock_view(consensus.get(u)),
-                                        book=books["paper" if intent is not None else "shadow"],
+                                        book=paper_book if intent is not None else shadow_books[v["version_id"]],
                                         weight=weights.get((v["key"], view.regime or "", g.family, view.vol_regime or "")),
                                         decay=decays.get(v["version_id"]), risk=risk, paper=intent is not None)  # fmt: skip
                 verdict = A.deliberate(cc)
@@ -732,11 +742,15 @@ class OptionsBrain:
                 s.options_priority_weight if item["intent"] is not None else 0.0
             )
         scored.sort(key=lambda x: x["rank"], reverse=True)
-        chosen_under: set[str] = set()
+        # this cycle's new positions: paper by underlying, shadow by (strategy, underlying)
+        chosen_paper: set[str] = set()
+        chosen_shadow: set[tuple[int | None, str]] = set()
         n_shadow = n_paper = 0
         max_paper = s.brain_max_new_positions_per_cycle
         for item in scored:
             v, verdict, u = item["v"], item["verdict"], item["view"].underlying
+            own = shadow_books[v["version_id"]]
+            paper = item["intent"] is not None
             gate = None
             if verdict["vetoes"]:
                 gate = verdict["vetoes"][0]["agent"]
@@ -744,19 +758,26 @@ class OptionsBrain:
                 gate = "no validated edge"
             elif verdict["score"] <= 0.05:
                 gate = "weak verdict"
-            elif u in chosen_under or books["paper" if item["intent"] is not None else "shadow"].get(u):
+            elif paper and (u in chosen_paper or paper_book.get(u)):
                 gate = "one position per underlying"
+            elif not paper and ((v["version_id"], u) in chosen_shadow or own.get(u)):
+                gate = "this strategy already holds this underlying"
             elif n_shadow >= SHADOW_PER_CYCLE:
                 gate = "enough new positions this cycle"
+            elif not paper and shadow_open >= SHADOW_MAX_OPEN:
+                gate = "the shadow book is full"
             comparison = self._compare(item, consensus.get(u), stock_proposals)
             cyc.comparisons.append(comparison)
             cand_id, thesis_id = await self._record_candidate(cyc, item, gate, comparison, now)
             if gate is not None:
                 await self._missed(item, cand_id, gate, now)
                 continue
-            chosen_under.add(u)
+            if paper:
+                chosen_paper.add(u)
             n_shadow += 1
-            if not books["shadow"].get(u):
+            if not own.get(u) and (v["version_id"], u) not in chosen_shadow and shadow_open < SHADOW_MAX_OPEN:
+                chosen_shadow.add((v["version_id"], u))
+                shadow_open += 1
                 await self._open_shadow(cyc, item, cand_id, thesis_id, now)
             intent = item["intent"]
             if intent is not None and n_paper < max_paper and (item["risk"] or {}).get("approved"):
