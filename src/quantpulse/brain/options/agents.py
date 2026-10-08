@@ -53,6 +53,12 @@ class CandidateContext:
     risk: Mapping[str, Any] | None = None  # the risk book's preview
     paper: bool = False  # would this be a paper order (not only shadow)?
 
+    def shadow_only(self, book: Mapping[str, Any]) -> CandidateContext:
+        """The same candidate as a shadow trade alone: no order, so no risk preview, in the strategy's own book."""
+        return CandidateContext(view=self.view, version=self.version, genome=self.genome, cand=self.cand,
+                                now=self.now, stock_view=self.stock_view, book=book, weight=self.weight,
+                                decay=self.decay)  # fmt: skip
+
 
 def _op(agent: str, score: float, reasons: list[str], *, veto: bool = False, abstain: bool = False,
         **data: Any) -> Opinion:  # fmt: skip

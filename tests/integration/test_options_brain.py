@@ -359,6 +359,48 @@ async def test_a_scanned_company_gets_its_earnings_date_looked_up_once_a_day(tmp
         assert sorted(asked) == ["MIDA", "UPF"]  # once a day
 
 
+async def test_open_interest_comes_from_the_contract_list_once_a_day(tmp_path):
+    """Alpaca's chain snapshot carries no open interest (only the contract list does). Without it every leg failed
+    the risk preview's open-interest check, the risk agent vetoed every candidate, and no option ever traded —
+    paper or shadow. The chain now gets it from the contract list, read once a day per underlying."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        market, brain = api.market, api.container.options_brain
+        assert not market.oi_on_quotes  # like Alpaca
+        ctx = SimpleNamespace(close=pd.DataFrame(), earnings={}, sectors={})
+        views = await brain._perceive(["MIDA"], clock.now(), ctx)
+        assert views["MIDA"].chain is not None
+        assert {q.open_interest for q in views["MIDA"].chain.quotes} == {2500.0}
+        read = market.calls.count("contracts")
+        assert read == 1
+        await brain._perceive(["MIDA"], clock.now(), ctx)
+        assert market.calls.count("contracts") == read  # the last close's figure: once a day
+        clock.advance(24 * 3600)
+        await brain._perceive(["MIDA"], clock.now(), ctx)
+        assert market.calls.count("contracts") == read + 1
+
+
+async def test_a_paper_order_the_risk_engine_refuses_still_trades_in_shadow(tmp_path):
+    """A paper order the execution checks refuse (here open interest 50, under the 100 minimum) is not sent, but
+    the strategy's shadow test still runs: shadow evidence is what a strategy needs to earn PAPER_ACTIVE, and a
+    veto on the order used to throw it away. Why there is no paper order is recorded."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        api.market.open_interest = 50.0
+        await promote(api, replace(LONG_CALL, min_open_interest=10), Stage.PAPER_ACTIVE)
+        await run_cycle(api)
+        assert not [b for b in api.fake.bodies if b.get("position_intent")]  # the refused order is never sent
+        assert await rows(api, OptionsPositionRow, mode="paper") == []
+        shadow = await rows(api, OptionsPositionRow, mode="shadow")
+        assert len(shadow) == 1 and shadow[0].status == "open"
+        [cand] = await rows(api, OptionsTradeCandidateRow)
+        assert cand.mode == "shadow" and cand.gate is None
+        assert (
+            "open interest 50" in cand.audit["paper_blocked"]
+            and "OptionsRiskAgent" in cand.audit["paper_blocked"]
+        )
+
+
 async def test_nothing_is_sent_when_the_brain_does_not_own_the_account(tmp_path):
     clock = FakeClock(NOW)
     async for api in client(tmp_path, clock, brain_mode="paper_recommendation"):

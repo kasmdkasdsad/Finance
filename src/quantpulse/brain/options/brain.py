@@ -23,7 +23,7 @@ import math
 import random
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -89,6 +89,8 @@ RECORDED_PER_CYCLE = 60
 # option chains read at once (Alpaca's own limiter paces the requests: about 3 a second, 4 in flight)
 CHAINS_AT_ONCE = 4
 EARNINGS_TIMEOUT = 5.0  # seconds for one company's next earnings date
+# agents whose veto is about sending an order, not the trade idea: the shadow test goes ahead without the order
+EXECUTION_VETOES = frozenset({"OptionsRiskAgent", "OptionsDataQualityAgent"})
 # "assigned": a leg went (assigned early, or closed outside QuantPulse) while others remain — frozen for a person
 LIVE = ("pending", "open", "closing", "assigned")
 # an order that will not fill any further (whatever part of it did fill stays filled)
@@ -205,6 +207,8 @@ class OptionsBrain:
         self._read_at: dict[str, datetime] = {}
         self._read_seeded = False
         self._earnings: dict[str, tuple[date, date | None]] = {}  # underlying -> (looked up on, next date)
+        # open interest per contract, by underlying: (read on, symbol -> open interest as of the last close)
+        self._oi: dict[str, tuple[date, dict[str, float | None]]] = {}
 
     # ------------------------------------------------------------------ the cycle
     async def run(
@@ -359,6 +363,27 @@ class OptionsBrain:
         self._earnings[u] = (today, found)
         return found
 
+    async def _open_interest(self, u: str, today: date) -> dict[str, float | None]:
+        """Open interest per contract from the paper trading API's contract list. Alpaca's chain snapshot does not
+        carry it, and without it every leg fails the open-interest check (unknown is never assumed to be enough).
+        It is the last close's figure, so it is read once a day per underlying; a failed read is tried again."""
+        got = self._oi.get(u)
+        if got is not None and got[0] == today:
+            return got[1]
+        assert self.data is not None
+        try:
+            infos = await asyncio.wait_for(
+                self.data.contracts(u, expiration_from=today + timedelta(days=1),
+                                    expiration_to=today + timedelta(days=self._s.options_max_dte + 14)),
+                timeout=self._s.brain_research_timeout_seconds,
+            )  # fmt: skip
+        except Exception as exc:  # open interest stays unknown: those legs fail the check, as before
+            logger.warning("open interest for %s unavailable: %s", u, exc)
+            return {}
+        oi = {i.contract.symbol: i.open_interest for i in infos}
+        self._oi[u] = (today, oi)
+        return oi
+
     async def _perceive(self, unders: Sequence[str], now: datetime, ctx: Any) -> dict[str, UnderlyingView]:
         assert self.data is not None
         sem = asyncio.Semaphore(CHAINS_AT_ONCE)
@@ -393,6 +418,11 @@ class OptionsBrain:
                     )  # fmt: skip
                 except TimeoutError:
                     view = UnderlyingView(u, now, problems=["option data timed out"])
+                chain = view.chain
+                if chain is not None and any(q.open_interest is None for q in chain.quotes):
+                    oi = await self._open_interest(u, today)
+                    chain.quotes = [replace(q, open_interest=oi[q.symbol])
+                                    if q.open_interest is None and q.symbol in oi else q for q in chain.quotes]  # fmt: skip
                 view.earnings_unknown = company and earnings is None
                 self._read_at[u] = now
                 out[u] = view
@@ -862,8 +892,22 @@ class OptionsBrain:
                                         weight=weights.get((v["key"], view.regime or "", g.family, view.vol_regime or "")),
                                         decay=decays.get(v["version_id"]), risk=risk, paper=intent is not None)  # fmt: skip
                 verdict = A.deliberate(cc)
+                paper_blocked = None
+                if (
+                    intent is not None
+                    and verdict["vetoes"]
+                    and all(x["agent"] in EXECUTION_VETOES for x in verdict["vetoes"])
+                ):
+                    # only an execution check refused the paper order (the risk preview, or data not good enough
+                    # to trade on): the strategy's own shadow test still runs, if nothing vetoes it as a shadow trade
+                    shadow_cc = cc.shadow_only(shadow_books[v["version_id"]])
+                    shadow_verdict = A.deliberate(shadow_cc)
+                    if not shadow_verdict["vetoes"]:
+                        paper_blocked = "; ".join(f"{x['agent']}: {r}" for x in verdict["vetoes"]
+                                                  for r in x["reasons"])[:600]  # fmt: skip
+                        cc, verdict, intent, risk = shadow_cc, shadow_verdict, None, None
                 scored.append({"v": v, "g": g, "view": view, "cand": pick, "intent": intent, "risk": risk,
-                               "verdict": verdict, "cc": cc})  # fmt: skip
+                               "verdict": verdict, "cc": cc, "paper_blocked": paper_blocked})  # fmt: skip
         # the best first; a veto, a non-positive validated edge or a weak verdict never trades
         for item in scored:
             item["rank"] = item["verdict"]["score"] + (
@@ -1023,8 +1067,12 @@ class OptionsBrain:
         th = A.thesis(cc, verdict)
         db_ = A.debate(cc, verdict)
         text = A.explain(th, verdict, mode=mode if not gate else "rejected", comparison=comparison)
+        blocked = item.get("paper_blocked")
+        if blocked:
+            text = f"{text}\nNo paper order ({blocked})."
         cyc.candidates.append({"underlying": view.underlying, "strategy": v["key"], "family": g.family, "status": status,
-                               "gate": gate, "score": verdict["score"], "mode": mode, "explanation": text})  # fmt: skip
+                               "gate": gate, "score": verdict["score"], "mode": mode, "explanation": text,
+                               "paper_blocked": blocked})  # fmt: skip
         async with self._db.session() as s:
             row = OptionsTradeCandidateRow(
                 cycle_key=f"brain-{cyc.cycle_id}" if cyc.cycle_id else f"options-{now:%Y%m%dT%H%M}",
@@ -1034,7 +1082,7 @@ class OptionsBrain:
                 dte=cand.dte, iv_rank=f.iv_rank if f else None, mode=mode, status=status, gate=gate,
                 reject_reason="; ".join(r for x in verdict["vetoes"] for r in x["reasons"])[:2000] if gate else None,
                 data_quality=jsonable(view.quality),
-                audit=jsonable({"metrics": cand.metrics, "verdict": verdict, "risk": item["risk"],
+                audit=jsonable({"metrics": cand.metrics, "verdict": verdict, "risk": item["risk"], "paper_blocked": blocked,
                                 "comparison": comparison, "version": {k: v.get(k) for k in ("key", "stage", "expected_ror", "edge_basis")},
                                 "quotes": [{"symbol": q.symbol, "bid": q.bid, "ask": q.ask, "age": q.age(now),
                                             "feed": q.feed} for q in cand.quotes]}),

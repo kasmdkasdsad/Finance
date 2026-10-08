@@ -7,7 +7,8 @@ on the fake broker, so fills and position values agree with the quotes the risk 
 
 Knobs: ``vol`` (and ``vol_by`` per underlying), ``half_spread`` (share of the mid on each side), ``age``
 (seconds behind the clock), ``feed`` ("indicative", "opra" — or "model" to see it refused),
-``open_interest``, ``down`` (every call raises, as an outage would).
+``open_interest`` (reported by the contract list only, as Alpaca does; ``oi_on_quotes`` puts it on quotes too),
+``down`` (every call raises, as an outage would).
 """
 
 from __future__ import annotations
@@ -57,6 +58,8 @@ class FakeOptionsMarket:
         self.age = 3.0
         self._feed = "indicative"
         self.open_interest = 2500.0
+        # like Alpaca: chain snapshots and latest quotes carry no open interest; only the contract list does
+        self.oi_on_quotes = False
         self.down = False
         self.calls: list[str] = []
 
@@ -116,7 +119,7 @@ class FakeOptionsMarket:
             bid_size=10,
             ask_size=10,
             volume=500,
-            open_interest=self.open_interest,
+            open_interest=self.open_interest if self.oi_on_quotes else None,
             iv=vol,
             greeks=Greeks(v.delta, v.gamma, v.theta, v.vega, v.rho, "vendor"),
             underlying_price=spot,
