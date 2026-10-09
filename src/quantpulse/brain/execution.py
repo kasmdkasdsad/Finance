@@ -154,7 +154,9 @@ def entry_halts(ctx: BrainContext) -> list[dict[str, str]]:
             problems.append(
                 "short positions although short selling is disabled: " + ", ".join(sorted(shorts))
             )
-        held_value = sum(p.market_value for p in ctx.account.positions.values() if p.qty > 0)
+        # Alpaca's long market value includes long option contracts (short legs are in the short market value)
+        held = [*ctx.account.positions.values(), *ctx.account.option_positions.values()]
+        held_value = sum(p.market_value for p in held if p.qty > 0)
         if acct.equity > 0 and abs(held_value - acct.long_market_value) > max(0.01 * acct.equity, 1.0):
             problems.append(
                 f"positions are worth ${held_value:,.0f} but the account reports ${acct.long_market_value:,.0f}"

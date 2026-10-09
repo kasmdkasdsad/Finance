@@ -63,6 +63,28 @@ def test_each_condition_halts_new_positions():
     assert "unexpected_exposure" in codes(ctx)
 
 
+def test_a_held_option_is_part_of_what_the_account_reports():
+    """Alpaca's long market value includes long option contracts. Counting shares only, one QQQ call worth more
+    than 1% of equity read as an inconsistent account and halted every new stock and option position."""
+    from dataclasses import replace
+
+    call = replace(
+        position("QQQ261120C00757000", 1, 18.53, 18.53), market_value=1_853.0, asset_class="us_option"
+    )
+    short_leg = replace(
+        position("QQQ261120C00800000", -1, 9.0, 9.0), market_value=-900.0, asset_class="us_option"
+    )
+    acct = account(100_000, cash=73_147, long_mv=26_853)  # 250 shares at $100, and the call
+    ctx = owned(make_ctx(), acct, [position("AAA", 250, 100.0)])
+    ctx.account = ctx.portfolio = replace(
+        ctx.account, option_positions={c.symbol: c for c in (call, short_leg)}
+    )
+    assert entry_halts(ctx) == []
+    # a long option the account does not report is still a mismatch
+    ctx.account = ctx.portfolio = replace(ctx.account, account=account(100_000, cash=75_000))
+    assert codes(ctx) == {"inconsistent_state"}
+
+
 def test_the_market_closed_is_not_a_data_halt():
     ctx = owned(make_ctx(), account(100_000))
     ctx.market_open = False
