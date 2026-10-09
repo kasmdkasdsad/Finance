@@ -844,6 +844,13 @@ class OptionsBrain:
         weights = await self._weights()
         decays = await self._decays()
         rng = random.Random(now.date().toordinal())
+        # the account's option legs, priced from every chain read this cycle: the risk preview measures the whole
+        # book's delta and vega, and a leg it cannot price fails it closed (so a position on one underlying used
+        # to veto every paper order on all the others)
+        acct = getattr(ctx, "account", None) if ctx is not None else None
+        held = set(getattr(acct, "option_positions", None) or {})
+        held_quotes = {q.symbol: leg_quote(q, vw.chain.fetched_at, vw.spot) for vw in views.values()
+                       if vw.chain is not None for q in vw.chain.quotes if q.symbol in held}  # fmt: skip
         scored: list[dict[str, Any]] = []
         for v in versions:
             g = from_dict(v["genome"])
@@ -885,7 +892,7 @@ class OptionsBrain:
                     if paper_mode
                     else None
                 )
-                risk = self._preview(intent, ctx, view, now) if intent is not None else None
+                risk = self._preview(intent, ctx, view, now, held_quotes) if intent is not None else None
                 cc = A.CandidateContext(view=view, version=v, genome=g, cand=pick, now=now,
                                         stock_view=_stock_view(consensus.get(u)),
                                         book=paper_book if intent is not None else shadow_books[v["version_id"]],
@@ -1021,8 +1028,15 @@ class OptionsBrain:
                                  score=None, strategy_key=v["key"])  # fmt: skip
 
     def _preview(
-        self, o: OptionOrderIntent, ctx: Any, view: UnderlyingView, now: datetime
+        self,
+        o: OptionOrderIntent,
+        ctx: Any,
+        view: UnderlyingView,
+        now: datetime,
+        held_quotes: Mapping[str, OptionLegQuote] | None = None,
     ) -> dict[str, Any] | None:
+        """The risk engine's verdict on the order as the account stands: its legs priced from this chain (their age
+        measured when the chain was read), the account's other option legs from the chains they were read in."""
         acct = getattr(ctx, "account", None)
         if (
             acct is None
@@ -1031,8 +1045,9 @@ class OptionsBrain:
             or view.chain is None
         ):
             return {"approved": False, "summary": "the paper account could not be read"}
-        quotes = {q.symbol: leg_quote(q, now, view.spot) for q in view.chain.quotes
-                  if q.symbol in {x.symbol for x in o.legs} | set(acct.option_positions)}  # fmt: skip
+        legs = {x.symbol for x in o.legs} | set(acct.option_positions)
+        quotes = {**(held_quotes or {}), **{q.symbol: leg_quote(q, view.chain.fetched_at, view.spot)
+                                            for q in view.chain.quotes if q.symbol in legs}}  # fmt: skip
         book = RiskBook(RiskLimits.from_settings(self._s), acct.account, {**acct.positions, **acct.option_positions},
                         acct.open_orders, bool(getattr(ctx, "market_open", True)), bool(getattr(ctx, "kill_switch", False)),
                         {}, option_quotes=quotes, now=now)  # fmt: skip

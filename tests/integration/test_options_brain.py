@@ -401,6 +401,56 @@ async def test_a_paper_order_the_risk_engine_refuses_still_trades_in_shadow(tmp_
         )
 
 
+async def test_an_open_option_position_does_not_block_paper_orders_on_other_underlyings(tmp_path):
+    """The risk preview measures the whole option book's delta and vega. It was given quotes for the candidate's
+    own chain only, so once one option position was open, every paper order on any other underlying failed
+    closed ("the book's delta or vega cannot be measured") and the risk agent vetoed it. The account's legs are
+    now priced from the chains they were read in (every held underlying is read each cycle)."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        m = api.market
+        held = m.pick("UPF", "call", moneyness=1.3)  # far out of the money: little delta, within every limit
+        spot = api.feed.live_price("UPF")
+        leg = {"symbol": held.symbol, "side": "long", "ratio": 1, "kind": "call", "strike": held.strike,
+               "expiration": held.expiration.isoformat()}  # fmt: skip
+        async with api.container.db.session() as s:
+            s.add(OptionsPositionRow(underlying="UPF", family="long_call", direction="bullish", mode="paper",
+                                     structure={"legs": [leg]}, quantity=1, status="open", expiry_state="OPEN",
+                                     first_expiration=held.expiration, opened_at=clock.now() - timedelta(days=1),
+                                     entry_value=300.0, entry_underlying=spot, max_loss=300.0, marks=[]))  # fmt: skip
+        api.fake.hold(held.symbol, 1, 3.0)
+        await promote(api, LONG_CALL, Stage.PAPER_ACTIVE)
+        await run_cycle(api)
+        opened = [b for b in api.fake.bodies if b.get("position_intent") == "buy_to_open"]
+        assert any(str(b.get("symbol", "")).startswith("MIDA") for b in opened), [
+            (c.underlying, c.gate, c.reject_reason) for c in await rows(api, OptionsTradeCandidateRow)
+        ]
+        cands = [c for c in await rows(api, OptionsTradeCandidateRow) if c.underlying == "MIDA"]
+        assert cands and not any("cannot be measured" in (c.reject_reason or "") for c in cands)
+
+
+async def test_a_chain_read_late_in_the_cycle_is_judged_when_it_was_read(tmp_path):
+    """Chains are read one after another, up to a minute or more into the options pass. Their quality used to be
+    judged at the pass's start, so the freshest quotes of a chain read a minute later looked a minute "in the
+    future" (clock skew) and the chain was graded unusable for execution. It is judged when it was read."""
+    clock = FakeClock(NOW)
+    async for api in client(tmp_path, clock):
+        market, brain = api.market, api.container.options_brain
+        start = clock.now()
+        real_chain = market.chain
+
+        async def slow_chain(underlying, real_chain=real_chain, clock=clock, **kw):
+            clock.advance(60)  # the chain is read a minute into the pass
+            return await real_chain(underlying, **kw)
+
+        market.chain = slow_chain
+        ctx = SimpleNamespace(close=pd.DataFrame(), earnings={}, sectors={})
+        views = await brain._perceive(["MIDA"], start, ctx)
+        q = views["MIDA"].quality
+        assert q["OPTIONS_DATA_QUALITY"] == "execution", q["blockers"]
+        assert not any("future" in b for b in q["blockers"])
+
+
 async def test_nothing_is_sent_when_the_brain_does_not_own_the_account(tmp_path):
     clock = FakeClock(NOW)
     async for api in client(tmp_path, clock, brain_mode="paper_recommendation"):

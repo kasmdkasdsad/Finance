@@ -485,5 +485,10 @@ def explain(
     if comparison:
         parts.append(f"Versus shares: {comparison.get('verdict')}.")
     if verdict.get("vetoes"):
-        parts.append("Vetoed by " + ", ".join(v["agent"] for v in verdict["vetoes"]) + ".")
+        # each veto with its first reason, so the record says why and not only who
+        why = [
+            f"{v['agent']} ({str((v.get('reasons') or ['no reason given'])[0])[:220]})"
+            for v in verdict["vetoes"]
+        ]
+        parts.append("Vetoed by " + "; ".join(why) + ".")
     return " ".join(parts)

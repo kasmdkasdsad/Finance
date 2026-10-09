@@ -62,6 +62,11 @@ def test_vetoes_stop_a_candidate(ctx):
     assert "OptionsPortfolioAgent" in {x["agent"] for x in A.deliberate(stacked)["vetoes"]}
     risky = replace(ctx, risk={"approved": False, "summary": "max_loss: too large"})
     assert "OptionsRiskAgent" in {x["agent"] for x in A.deliberate(risky)["vetoes"]}
+    # the record says why, not only who
+    said = A.explain(
+        A.thesis(risky, A.deliberate(risky)), A.deliberate(risky), mode="rejected", comparison=None
+    )
+    assert "Vetoed by OptionsRiskAgent (risk preview: max_loss: too large)" in said
     decaying = replace(ctx, decay="DEGRADING")
     assert "StrategyDecayAgent" in {x["agent"] for x in A.deliberate(decaying)["vetoes"]}
     for stage in ("RESEARCH", "EXTRACTED", "BACKTESTING"):  # no positive backtest yet: never traded

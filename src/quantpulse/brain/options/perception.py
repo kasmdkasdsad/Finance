@@ -115,7 +115,8 @@ async def perceive(
         view.problems.append(f"option chain unavailable ({type(exc).__name__}: {str(exc)[:120]})")
         return view
     view.chain, view.spot = chain, chain.underlying_price
-    view.quality = chain.quality(now)
+    # judged when the chain was read: a chain read a minute into the cycle is not a minute "in the future"
+    view.quality = chain.quality(chain.fetched_at)
     view.expiries = by_expiry(chain.quotes, chain.underlying_price, now)
     view.term = term_structure(view.expiries)
     view.atm_iv_30d = constant_maturity_iv(view.expiries, 30)

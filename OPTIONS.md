@@ -68,6 +68,17 @@ only the contract list (the paper trading API) has it, as of the last close. The
 day per underlying and puts it on the chain, so the open-interest checks (the strategy's own minimum, the 100
 per leg of the risk engine) see the real figure. Unknown open interest still fails the check.
 
+**The risk preview sees the whole book.** Before a paper order, the Options Brain asks the risk engine for its
+verdict on the account as it stands. The account's other option legs are priced from the chains read that cycle
+(every underlying with a position is read each cycle), so the book's net delta and vega are measured; a leg
+that cannot be priced still fails the check closed. Each chain's data quality is judged when that chain was
+read, not when the pass began (a chain read a minute in is not "a minute in the future"). A rejected candidate's
+explanation names each veto with its reason.
+
+**Net delta.** The book's net delta is capped at 50% of equity. One at-the-money call on a high-priced fund
+(SPY, QQQ) carries tens of thousands of dollars of delta, so with about $100,000 of equity two such calls in
+the same direction exceed it, and the risk engine refuses the second until delta frees up (puts offset calls).
+
 **Shadow without the order.** When only an execution check refuses a paper order (the risk engine's preview,
 or data not good enough to trade on), the order is not sent, but the strategy's shadow test on live quotes
 still runs if nothing vetoes it as a shadow trade. The candidate records why there was no paper order. A veto
