@@ -195,6 +195,7 @@ def test_postgres_is_required_in_the_cloud():
         {"options_min_dte": 3},  # (0 is refused outright: 0DTE is never allowed)
         {"options_min_open_interest": 1},
         {"options_max_vega_pct": 0.05},
+        {"options_max_delta_pct": 2.0},  # 150% is the ceiling
         {"options_allowed_structures": ["long_call", "iron_condor"]},  # adding a family needs a person
     ],
 )
@@ -208,7 +209,10 @@ def test_protected_controls_may_be_tightened():
                  trading_max_positions=5, trading_min_dollar_volume=50_000_000)  # fmt: skip
     assert preflight.run(cloud(**tight), ENV).ok
     options = dict(
-        options_max_loss_per_trade=250, options_min_dte=14, options_allowed_structures=["bull_call_spread"]
+        options_max_loss_per_trade=250,
+        options_min_dte=14,
+        options_allowed_structures=["bull_call_spread"],
+        options_max_delta_pct=0.5,
     )
     assert preflight.run(cloud(**options), ENV).ok  # fewer structures and smaller losses are always allowed
 

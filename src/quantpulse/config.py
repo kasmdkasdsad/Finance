@@ -796,10 +796,11 @@ class Settings(BaseSettings):
     )
     options_min_open_interest: float = Field(default=100.0, ge=0, description="Per leg, for new positions.")
     options_max_delta_pct: float = Field(
-        default=0.50,
+        default=1.50,
         gt=0,
         le=2,
-        description="Net option delta (in dollars of underlying) across the book, as a share of equity.",
+        description="Net option delta (in dollars of underlying) across the book, as a share of equity (150%, "
+        "raised from 50% at the owner's request, paper only, so several index calls can be held at once).",
     )
     options_max_vega_pct: float = Field(
         default=0.01,

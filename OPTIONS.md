@@ -75,9 +75,11 @@ that cannot be priced still fails the check closed. Each chain's data quality is
 read, not when the pass began (a chain read a minute in is not "a minute in the future"). A rejected candidate's
 explanation names each veto with its reason.
 
-**Net delta.** The book's net delta is capped at 50% of equity. One at-the-money call on a high-priced fund
-(SPY, QQQ) carries tens of thousands of dollars of delta, so with about $100,000 of equity two such calls in
-the same direction exceed it, and the risk engine refuses the second until delta frees up (puts offset calls).
+**Net delta.** The book's net delta is capped at 150% of equity (50% until the owner asked for more room, paper
+only). One at-the-money call on a high-priced fund (SPY, QQQ) carries tens of thousands of dollars of delta: with
+about $100,000 of equity, three such calls in the same direction fit and a fourth is refused until delta frees up
+(puts offset calls). Losses stay capped by the per-trade, per-underlying and whole-book maximum-loss limits and
+the account's 4% daily loss limit; the delta limit bounds how far the book leans one way.
 
 **Shadow without the order.** When only an execution check refuses a paper order (the risk engine's preview,
 or data not good enough to trade on), the order is not sent, but the strategy's shadow test on live quotes
@@ -224,7 +226,7 @@ an AI model (`POST /registry/models/{id}/approve`, typed confirmation). The repl
 
 The account owner wants a high-risk, high-reward trader focused on options (paper only), so the limits below
 were raised at their request: $2,000 or 2% per position (first $500 / 1%), 25% across all options (6%), 5% per
-underlying (2%), 12 positions (6), 20 contracts (10), 50% net delta and 1% net vega (30% / 0.5%), $2,000 per
+underlying (2%), 12 positions (6), 20 contracts (10), 150% net delta (50%, at first 30%) and 1% net vega (0.5%), $2,000 per
 exploration contract ($250); a protective stop only at the whole maximum loss (was half of it), so positions have
 time to work; options favoured over shares with a weight of 0.5 (0.15); twelve underlyings (eight). Each limit
 can still be tightened in the server's environment, never loosened past these. Paper-only, the kill switches,
@@ -244,7 +246,7 @@ exits and the quote checks are unchanged.
 | `QP_OPTIONS_MAX_POSITIONS` / `_MAX_CONTRACTS` | 12 / 20 | |
 | `QP_OPTIONS_MIN_DTE` / `_MAX_DTE` / `_CLOSE_DTE` | 7 / 60 / 2 | entry window; close before expiration |
 | `QP_OPTIONS_MAX_SPREAD_PCT` / `_MAX_QUOTE_AGE_SECONDS` / `_MIN_OPEN_INTEREST` | 15% / 120 / 100 | per leg |
-| `QP_OPTIONS_MAX_DELTA_PCT` / `_MAX_VEGA_PCT` | 50% / 1% | the book's net Greeks |
+| `QP_OPTIONS_MAX_DELTA_PCT` / `_MAX_VEGA_PCT` | 150% / 1% | the book's net Greeks |
 | `QP_OPTIONS_TAKE_PROFIT_PCT` / `_STOP_LOSS_PCT` | 50% / 100% | protective overlay on live positions (the stop only at the whole maximum loss) |
 | `QP_OPTIONS_MIN_SHADOW_TRADES` | 10 | before PAPER_ACTIVE |
 | `QP_OPTIONS_EXPLORATION` / `_EXPLORATION_MAX_LOSS` | true / $2,000 | one-contract exploration from VALIDATION (at most 20 strategies) |

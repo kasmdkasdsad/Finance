@@ -174,6 +174,32 @@ def test_liquidity_greeks_level_expiration_and_price():
     assert "limit_price" in failed(book().evaluate_option(spread(limit=3.9)))  # natural is 6.10 − 2.40 = 3.70
 
 
+def test_the_net_delta_limit_leaves_room_for_more_than_one_index_call():
+    """At the owner's request (paper only) the book's net delta may reach 150% of equity (was 50%). One
+    at-the-money QQQ call carries about $38,000 of delta, so on $100,000 a second call in the same direction was
+    refused; now a second and a third fit, and a fourth does not."""
+    held_call, new_call = "QQQ261120C00757000", "QQQ261120C00760000"
+    quotes = {
+        held_call: quote(18.4, 18.6, delta=0.5, vega=0.9),
+        new_call: quote(17.0, 17.2, delta=0.49, vega=0.9),
+    }
+    order = OptionOrderIntent("QQQ", "long_call", (leg(new_call, "buy", "buy_to_open"),), 1, 17.2, "entry", "t",
+                              True, 757.0)  # fmt: skip
+
+    def qqq(n_held, limits=None):
+        return RiskBook(limits or RiskLimits(), account(), {held_call: opt_position(held_call, n_held, 18.5)}, [],
+                        True, False, {"QQQ": QuoteCheck(757.0, DataStatus.LIVE, "alpaca", 1.0, 2.0, 5e10)},
+                        option_quotes=quotes, now=NOW)  # fmt: skip
+
+    second = qqq(1).evaluate_option(order)
+    assert second.approved, second.summary  # $37,850 held + $37,093 = $74,943 of delta
+    was = RiskLimits(options=OptionLimits(max_delta_pct=0.50))
+    assert "greeks" in failed(qqq(1, was).evaluate_option(order))  # the old limit refused it
+    assert "greeks" not in failed(qqq(2).evaluate_option(order))  # $112,793
+    assert "greeks" in failed(qqq(3).evaluate_option(order))  # $150,643: over 150%
+    assert OptionLimits().max_delta_pct == RiskLimits().options.max_delta_pct == 1.50
+
+
 def test_the_same_switches_and_book_as_stocks():
     assert "kill_switch" in failed(book(kill=True).evaluate_option(spread()))
     assert "market_open" in failed(book(market_open=False).evaluate_option(spread()))

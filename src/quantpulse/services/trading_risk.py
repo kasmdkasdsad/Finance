@@ -92,7 +92,7 @@ class OptionLimits:
     max_spread_pct: float = 0.15
     max_quote_age_seconds: float = 120.0
     min_open_interest: float = 100.0
-    max_delta_pct: float = 0.50
+    max_delta_pct: float = 1.50
     max_vega_pct: float = 0.01
     exploration_max_loss: float = 2000.0
 
