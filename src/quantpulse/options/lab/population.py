@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from quantpulse.options.lab.extraction import extract
-from quantpulse.options.lab.genome import Genome, random_genome
+from quantpulse.options.lab.genome import Genome, random_genome, research_genome
 from quantpulse.options.lab.research import SEED, Source
 
 
@@ -154,21 +154,29 @@ def next_generation(
             out.append(Child(child, generation, "evolution", tuple(sorted({a.key, b.key})),
                              "tournament selection on the robust score, crossed and mutated"))  # fmt: skip
     picked = _unique(out, existing)[: max(0, budget - IMMIGRANTS)]
-    return picked + immigrants(population, picked, rng, generation, budget - len(picked))
+    return picked + immigrants(
+        population, picked, rng, generation, budget - len(picked), research=RESEARCH_IMMIGRANTS
+    )
 
 
 IMMIGRANTS = 2  # brand-new random strategies in every generation
 DRAWS = 8  # random draws per immigrant; the most novel one is kept
+RESEARCH_IMMIGRANTS = 1  # of them, drawn from the research families (shadow only until a person enables them)
 
 
 def immigrants(population: Sequence[Member], also: Sequence[Child], rng: random.Random, generation: int,
-               n: int) -> list[Child]:  # fmt: skip
-    """``n`` brand-new random strategies, each the most novel of ``DRAWS`` draws against everything known."""
+               n: int, *, research: int = 0) -> list[Child]:  # fmt: skip
+    """``n`` brand-new random strategies, each the most novel of ``DRAWS`` draws against everything known; the
+    last ``research`` of them from the research families (:data:`~quantpulse.options.lab.genome.RESEARCH_FAMILIES`),
+    and always at least one from the families executable by default."""
     known = [m.genome for m in population] + [c.genome for c in also]
     seen = {g.hash for g in known}
     out: list[Child] = []
-    for _ in range(max(0, n)):
-        draws = [g for g in (random_genome(rng) for _ in range(DRAWS)) if g.hash not in seen]
+    n = max(0, n)
+    research = min(max(0, research), max(0, n - 1))
+    for i in range(n):
+        draw = research_genome if i >= n - research else random_genome
+        draws = [g for g in (draw(rng) for _ in range(DRAWS)) if g.hash not in seen]
         if not draws:
             continue
         best = max(draws, key=lambda g: novelty(g, known))
@@ -193,7 +201,7 @@ def explore(population: Sequence[Member], *, budget: int, seed: int) -> list[Chi
             out.append(Child(m.genome.mutate(rng, changes=2), 0, "exploration", (m.key,),
                              f"nothing has passed VALIDATION yet: a wider variation of the best-scoring {m.key}"))  # fmt: skip
     picked = _unique(out, existing)[: budget // 2]
-    return picked + immigrants(population, picked, rng, 0, budget - len(picked))
+    return picked + immigrants(population, picked, rng, 0, budget - len(picked), research=RESEARCH_IMMIGRANTS)
 
 
 _REGIME_LABELS = frozenset({"TRENDING_UP", "TRENDING_DOWN", "MEAN_REVERTING", "CALM", "PANIC", "HIGH_IV", "LOW_IV",

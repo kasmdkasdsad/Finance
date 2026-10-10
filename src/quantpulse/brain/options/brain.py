@@ -209,6 +209,9 @@ class OptionsBrain:
         self._earnings: dict[str, tuple[date, date | None]] = {}  # underlying -> (looked up on, next date)
         # open interest per contract, by underlying: (read on, symbol -> open interest as of the last close)
         self._oi: dict[str, tuple[date, dict[str, float | None]]] = {}
+        # the options edge model (quantpulse.options.ml; the container sets it): recorded with every candidate,
+        # voting only once the model registry makes it AUTHORITATIVE
+        self.ml: Any = None
 
     # ------------------------------------------------------------------ the cycle
     async def run(
@@ -233,6 +236,8 @@ class OptionsBrain:
             return cyc
         market_open = ctx.market_open if ctx is not None else is_market_open(now)
         paper_allowed = paper_allowed and s.options_execution and market_open
+        if self.ml is not None:
+            await self.ml.ensure_loaded()
         versions = await self._lab.eligible_versions()
         open_rows = await self._open_positions()
         # every cycle: the core list and every underlying with an open position; then a rotating batch of the scan
@@ -884,6 +889,9 @@ class OptionsBrain:
                         k: emp.metrics.get(k) for k in ("expected_pnl", "pop", "expected_on_risk")
                     }
                 score(pick)
+                ml = (
+                    self.ml.assess(view, pick, _stock_view(consensus.get(u))) if self.ml is not None else None
+                )
                 paper_mode = paper_allowed and (
                     v["stage"] in ("PAPER_ACTIVE", "PROVEN") or s.options_exploration
                 )
@@ -897,7 +905,8 @@ class OptionsBrain:
                                         stock_view=_stock_view(consensus.get(u)),
                                         book=paper_book if intent is not None else shadow_books[v["version_id"]],
                                         weight=weights.get((v["key"], view.regime or "", g.family, view.vol_regime or "")),
-                                        decay=decays.get(v["version_id"]), risk=risk, paper=intent is not None)  # fmt: skip
+                                        decay=decays.get(v["version_id"]), risk=risk, paper=intent is not None,
+                                        ml=ml)  # fmt: skip
                 verdict = A.deliberate(cc)
                 paper_blocked = None
                 if (

@@ -203,6 +203,16 @@ async def learn(c: Container = ContainerDep) -> dict[str, Any]:
     return await c.options_brain.learn()
 
 
+@router.get(
+    "/ml", summary="The options edge model: its stage, out-of-sample and live record, and what drives it"
+)
+async def ml(c: Container = ContainerDep) -> dict[str, Any]:
+    svc = getattr(c, "options_ml", None)
+    if svc is None:
+        return {"enabled": False, "model": None}
+    return await svc.status()
+
+
 @router.get("/portfolio", summary="Open option positions (paper and shadow apart) and the book's risk")
 async def portfolio(c: Container = ContainerDep) -> dict[str, Any]:
     positions = await c.options_brain.positions(status="open")

@@ -176,10 +176,10 @@ class Genome:
             if v is not None and not (low <= v <= high):
                 out.append(f"{name}={v} outside [{low}, {high}]")
         spreads = ("bull_call_spread", "bear_put_spread", "bull_put_spread", "bear_call_spread", "iron_condor",
-                   "call_butterfly")  # fmt: skip
+                   "call_butterfly", "put_butterfly", "broken_wing_butterfly", "reverse_iron_condor")  # fmt: skip
         if self.family in spreads and self.width_pct is None:
             out.append(f"{self.family} needs an explicit width_pct")
-        if self.family in ("long_strangle", "iron_condor") and self.wing_pct is None:
+        if self.family in ("long_strangle", "iron_condor", "iron_butterfly") and self.wing_pct is None:
             out.append(f"{self.family} needs an explicit wing_pct")
         if self.entry_signal == "random" and self.seed is None:
             out.append("a random control needs a seed")
@@ -298,6 +298,52 @@ def random_genome(rng: random.Random) -> Genome:
         if g.valid:
             return g
     return Genome("long_call", "bullish", entry_signal="trend_up", dte_min=30, dte_max=60, delta_target=0.5)
+
+
+# The other defined-risk families, researched and shadow-traded on live quotes like any strategy — but never
+# traded on the paper account until a person enables the family (QP_OPTIONS_ALLOWED_STRUCTURES and the
+# promotion gate's family approval): their evidence builds while they wait. Calendars are left out: the
+# backtester reads one DTE window of a chain and a calendar needs a later expiration outside it.
+RESEARCH_FAMILIES = ("long_straddle", "long_strangle", "iron_condor", "call_butterfly", "put_butterfly",
+                     "iron_butterfly", "broken_wing_butterfly", "reverse_iron_condor")  # fmt: skip
+RESEARCH_ENTRIES = {"short_vol": ("always", "iv_high"), "long_vol": ("always", "iv_low", "pre_event")}
+
+
+def research_genome(rng: random.Random) -> Genome:
+    """A brand-new strategy of one of the research families (see :data:`RESEARCH_FAMILIES`): volatility sellers
+    enter when volatility is rich, buyers when it is cheap or before an event. Always valid and defined-risk."""
+    for _ in range(100):
+        family = rng.choice(RESEARCH_FAMILIES)
+        fam = FAMILIES[family]
+        short = fam.vol == "short_vol"
+        signal = rng.choice(RESEARCH_ENTRIES["short_vol" if short else "long_vol"])
+        dte_min = rng.randrange(14, 46)
+        iv: dict[str, Any] = {}
+        if rng.random() < 0.6:
+            iv = (
+                {"iv_rank_min": float(rng.randrange(40, 80, 5))}
+                if short
+                else {"iv_rank_max": float(rng.randrange(25, 60, 5))}
+            )
+        width = round(rng.choice((0.02, 0.03, 0.04, 0.05, 0.06)), 3)
+        wing = round(rng.choice((0.03, 0.04, 0.05, 0.07, 0.10)), 3)
+        g = Genome(
+            family, fam.direction, entry_signal=signal,
+            event_filter="require" if signal == "pre_event" else "avoid" if short else rng.choice(("avoid", "ignore")),
+            dte_min=dte_min, dte_max=dte_min + rng.randrange(10, 31),
+            delta_target=round(rng.uniform(0.15, 0.30) if family in ("iron_condor", "broken_wing_butterfly")
+                               else rng.uniform(0.25, 0.50), 2),
+            width_pct=width if family not in ("long_straddle", "long_strangle", "iron_butterfly") else None,
+            wing_pct=wing if family in ("long_strangle", "iron_condor", "iron_butterfly") else None,
+            take_profit=rng.choice((0.25, 0.5, 0.75)) if short else rng.choice((0.5, 1.0, 1.5)),
+            stop_loss=rng.choice((1.0, 1.5, 2.0)) if short else rng.choice((0.5, 0.75, 1.0)),
+            max_hold_days=rng.randrange(5, 31), exit_dte=rng.randrange(1, min(dte_min, 10)),
+            risk_per_trade=rng.choice((0.005, 0.01)), **iv,
+        )  # fmt: skip
+        if g.valid:
+            return g
+    return Genome("iron_condor", "neutral", entry_signal="iv_high", dte_min=30, dte_max=45, delta_target=0.2,
+                  width_pct=0.04, wing_pct=0.05)  # fmt: skip
 
 
 def _with(g: Genome, **changes: Any) -> Genome:

@@ -290,9 +290,17 @@ class Container:
             self.reference,
             refresh_orders=lambda cids: self.trading.orders.wait_for(cids, 0.0),
         )
+        # the options edge model: trained by the research queue, recorded with every candidate (it votes only
+        # once the model registry makes it AUTHORITATIVE)
+        from quantpulse.options.ml.service import OptionsMLService
+
+        self.options_ml = OptionsMLService(settings, self.db, self.clock, self.market, self.registry)
         if settings.options_enabled:
             self.brain.orchestrator.options = self.options_brain
             self.brain.options_lab = self.options_lab  # the closed-market research queue runs it too
+            if settings.options_ml_enabled:
+                self.options_brain.ml = self.options_ml
+                self.brain.options_ml = self.options_ml
 
         # cloud monitoring: alerts (ntfy / webhook / heartbeat, all optional) and the health monitor, whose
         # order-critical checks (database, Alpaca, reconciliation) fail Brain orders closed at the last gate

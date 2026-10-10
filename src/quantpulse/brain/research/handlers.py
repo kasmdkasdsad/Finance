@@ -1071,6 +1071,16 @@ async def options_research(ctx: JobContext) -> dict[str, Any]:
     }
 
 
+async def options_ml(ctx: JobContext) -> dict[str, Any]:
+    """Train the options edge model on model-priced, recorded and live outcomes; validate it out of sample (purged
+    walk-forward, combinatorial paths, stress) against the rule it would replace; register it as the rule's
+    challenger and advance it only as far as the evidence allows. It never sends an order."""
+    ml = getattr(ctx.brain, "options_ml", None)
+    if ml is None or not ctx.settings.options_enabled or not ctx.settings.options_ml_enabled:
+        return {"skipped": "the options edge model is switched off"}
+    return dict(await ml.train())
+
+
 OPTIONS_BUDGET = timedelta(minutes=25)  # one run's research time (the job's timeout is 40 minutes)
 STRATEGY_BUDGET = timedelta(minutes=35)  # no new validation after this (the job's timeout: 60 minutes)
 

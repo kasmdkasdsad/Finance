@@ -74,6 +74,9 @@ CATALOG: dict[str, JobSpec] = {
         JobSpec("options_research", "Which option strategies survive model-priced backtests, walk-forward, Monte "
                 "Carlo, stress and the false-discovery control — and what should the next generation try?", "TEST",
                 "heavy", 8, H, h.options_research, topic="options:", timeout=timedelta(minutes=40)),
+        JobSpec("options_ml", "Does a learned model rank option candidates better than the rule — out of sample, "
+                "under stress and on live outcomes?", "TEST", "heavy", 7, D, h.options_ml, topic="options_ml:",
+                timeout=timedelta(minutes=45)),
         JobSpec("improvement_review", "What weaknesses does the record show, and what evidence-based changes follow?",
                 "LEARN", "medium", 5, D, h.improvement_review),
         JobSpec("memory_maintenance", "Is long-term memory current?", "LEARN", "light", 3, D, h.memory_maintenance),

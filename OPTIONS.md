@@ -42,7 +42,8 @@ manage       paper orders synced with Alpaca; marks; exits (strategy rules + sto
              expiration); OCC settlements recorded
 candidates   only strategies that passed validation (PAPER_SHADOW and above); the lab's entry rules and
              contract selection
-deliberate   eighteen agents: support, oppose, abstain (and say what is missing) or veto
+deliberate   nineteen agents: support, oppose, abstain (and say what is missing) or veto — the nineteenth is the
+             options edge model (§8), recorded with every candidate and voting only once it is AUTHORITATIVE
 decide       thesis, bull/bear/devil's advocate, a plain-words explanation; options versus shares
 execute      shadow always; paper at PAPER_ACTIVE (one-contract exploration from VALIDATION) through the trading service
 learn        attribution, critique, counterfactual, learning events; weights, lessons, graded misses (daily)
@@ -222,7 +223,69 @@ In-sample results are recorded and **refused as evidence**; becoming authoritati
 walk-forward and stress evidence and a live shadow record that beats the champion — and a person's approval for
 an AI model (`POST /registry/models/{id}/approve`, typed confirmation). The replaced champion keeps its history.
 
-## 8. Settings
+## 8. The options edge model (machine learning)
+
+The rule that ranks a candidate — its expected value per dollar at risk under the market's lognormal or the
+underlying's past moves — sees the payoff, not the market's habits. The edge model (`quantpulse.options.ml`)
+learns from outcomes what the rule cannot see, and has to prove it before it decides anything.
+
+**What it reads** (one fixed vector per candidate, the same in research and live; unknown stays unknown):
+* the **implied-volatility surface** — an SVI smile fitted to every expiration (Gatheral's raw form, weighted by
+  how tight each market is, analytic Jacobian), checked for butterfly and calendar arbitrage (counted, never
+  hidden), read as 30-day level, skew, curvature, one-standard-deviation risk reversal and butterfly, term slope;
+  and each leg's **residual**: how many volatility points its quote sits above or below the smooth surface — a
+  structure's *surface edge* is what it gains, at its legs' vegas, if the legs come back to the surface;
+* a **volatility forecast** — HAR-RV (Corsi), fitted point in time to the horizon of the structure's life with a
+  smearing correction (EWMA with too little history) — and the forward-looking **volatility risk premium**: the
+  implied volatility at the structure's own expiration against that forecast;
+* the underlying (momentum, trend, realized volatility, IV rank and change, earnings timing), the structure
+  (family, direction, volatility stance, DTE, the main leg's |delta| and moneyness, debit or credit, costs,
+  Greeks and break-evens per dollar at risk, the rule's own expected value and probability of profit, tail loss,
+  liquidity), the stock Brain's signed consensus, and the data grade.
+
+**What it learns from** — rows labelled with their grade and weighted by it (model 0.35, recorded 1, shadow 1.5,
+paper 2) and by recency:
+* *model* — standard probe structures (every family, several deltas) on model-priced chains over the core
+  universe's real daily prices: many, cheap, biased;
+* *recorded* — the same probes on the chains QuantPulse recorded from Alpaca (one snapshot near 15:45 a day):
+  real, few, growing every session;
+* *shadow* / *paper* — closed positions the Options Brain opened while the model was scoring, with the vector
+  recorded at the time.
+
+The label is a **triple barrier** (take profit, stop, time; López de Prado): the return per dollar at risk under
+one standard exit policy, filled at REALISTIC prices with fees — one yardstick for every candidate.
+
+**The model** — gradient-boosted quantile regressors (10th/50th/90th percentile), a gradient-boosted mean stacked
+with a ridge baseline by out-of-sample error, a gradient-boosted classifier for the probability of profit
+(isotonic-calibrated out of sample), and **conformalized quantile regression** (an 80% interval that covers
+about 80% of outcomes it has not seen). Costs carry monotone constraints (paying more never helps). Every
+prediction comes with its drivers (local attributions) and a check of how far it is from the training data.
+
+**How it is validated** — purged, embargoed walk-forward (no label that overlaps a test window is trained on)
+and combinatorial purged cross-validation (a distribution of out-of-sample paths, not one lucky split), always
+against the **rule on the same rows** (the slot's champion, `options_candidate_score`): rank correlation,
+top-fifth return, Brier skill, conformal coverage on a held-out fold; stress = costs doubled, each volatility
+regime alone, each underlying left out, the share of combinatorial paths on which it beats the rule.
+
+**How it earns a vote** — the `options_ml` research job (daily, while the market is closed, under the research
+memory and CPU limits) registers each fitted model as the rule's challenger in the model registry with that
+evidence: CANDIDATE → OOS_VALIDATED (beats the rule out of sample) → WALK_FORWARD_VALIDATED → STRESS_VALIDATED →
+PAPER_SHADOW → AUTHORITATIVE (a live record on at least 30 closed positions ranking outcomes better than the
+rule). Until AUTHORITATIVE the `OptionsMLAgent` abstains — its prediction and vector are recorded with every
+candidate so its live record builds; it also abstains when a quarter of the inputs are outside what it learned
+from. Authoritative, it supports or opposes with weight 1.5 — it **never vetoes**: the hard checks decide. It
+never sends an order or changes a limit.
+
+**More ways to trade** — four new defined-risk families: `put_butterfly`, `iron_butterfly`,
+`broken_wing_butterfly` (a put butterfly whose wider lower wing usually pays the debit; risk only below) and
+`reverse_iron_condor` (a debit spread on each side: paid on a move either way); and `calendar` can now be built
+from a chain and priced (later legs by Black–Scholes at the first expiration). Together with the straddle,
+strangle, iron condor and call butterfly they are **research families**: one immigrant a generation is drawn
+from them, so the lab backtests them and the Options Brain shadow-trades them on live quotes. None of them trades
+on the paper account until a person enables the family (`QP_OPTIONS_ALLOWED_STRUCTURES` and the promotion gate's
+family approval).
+
+## 9. Settings
 
 The account owner wants a high-risk, high-reward trader focused on options (paper only), so the limits below
 were raised at their request: $2,000 or 2% per position (first $500 / 1%), 25% across all options (6%), 5% per
@@ -252,17 +315,20 @@ exits and the quote checks are unchanged.
 | `QP_OPTIONS_EXPLORATION` / `_EXPLORATION_MAX_LOSS` | true / $2,000 | one-contract exploration from VALIDATION (at most 20 strategies) |
 | `QP_OPTIONS_RESEARCH_TIME` / `_RESEARCH_BUDGET_SECONDS` | 16:40 / 180 | the daily research run (the research queue adds 25 min every hour while the market is closed) |
 | `QP_EVOLUTION_ENABLED` / `_TIME` / `_REFERENCE_DAYS` / `_RECENT_DAYS` | true / 16:50 / 120 / 20 | the monitor |
+| `QP_OPTIONS_ML_ENABLED` | `true` | train the edge model and record its view of every candidate (it votes only when AUTHORITATIVE) |
+| `QP_OPTIONS_ML_BUDGET_SECONDS` / `_TREES` | 1500 / 150 | one training run; boosting iterations per component |
+| `QP_OPTIONS_ML_STEP_DAYS` / `_MAX_ROWS` / `_MIN_ROWS` / `_RECORDED_DAYS` | 3 / 30,000 / 600 / 90 | the training data |
 
-## 9. API and dashboard
+## 10. API and dashboard
 
 `/api/v1/options/status | chains?underlying= | candidates | strategies | strategies/{id} | research |
-experiments | learning | portfolio | positions | greeks | performance | counterfactuals |
+experiments | learning | ml | portfolio | positions | greeks | performance | counterfactuals |
 missed-opportunities`, `POST /options/research/run`, `POST /options/learn`;
 `/api/v1/evolution/status | changes | relationships`, `POST /evolution/run`; `/api/v1/registry/models`;
 `/api/v1/brain/status` carries an options summary. Dashboard pages: **Options** and
 *Research → Market changes*.
 
-## 10. What is established — and what is not
+## 11. What is established — and what is not
 
 * The code, its safety checks and its tests are implemented and pass (fake Alpaca paper API, fake options
   market, synthetic prices).
@@ -270,3 +336,6 @@ missed-opportunities`, `POST /options/research/run`, `POST /options/learn`;
   evidence accumulates only once this runs against live Alpaca paper data.
 * IV rank needs 60 days of QuantPulse's own IV records before any strategy filtering on it can trade.
 * The indicative options feed is not firm; fills on the paper account may differ from any real market.
+* The edge model is **UNPROVEN**: its offline evidence is mostly model-priced (a few weeks of recorded chains), and
+  it has no live record yet. On synthetic data it ranks candidates better than the rule out of sample — and the
+  stress gate still refuses it when no candidate group makes money after doubled costs, which is the point.

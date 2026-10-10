@@ -28,7 +28,7 @@ READABLE: tuple[re.Pattern[str], ...] = tuple(
         r"/api/v1/market/session",
         rf"/api/v1/trading(?:/{_SEG}){{1,2}}",
         rf"/api/v1/brain(?:/{_SEG}){{1,4}}",
-        r"/api/v1/options/(?:status|candidates|research|experiments|learning|portfolio|positions|greeks"
+        r"/api/v1/options/(?:status|candidates|research|experiments|learning|ml|portfolio|positions|greeks"
         rf"|performance|counterfactuals|missed-opportunities|strategies(?:/{_SEG})?)",
         rf"/api/v1/(?:evolution|registry)(?:/{_SEG}){{1,2}}",
         r"/api/v1/predictions(?:/scorecard|/backfill)?",

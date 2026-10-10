@@ -107,6 +107,10 @@ FAMILIES: dict[str, Family] = {f.name: f for f in (
     Family("protective_put", "bullish", "long_vol", True, "a put bought against 100 shares held", False),
     Family("collar", "neutral", "neutral", True, "shares + a long put + a short call", False),
     Family("calendar", "neutral", "long_vol", True, "sell a near expiration, buy a later one (same strike)", False),
+    Family("put_butterfly", "neutral", "short_vol", True, "long 1 high, short 2 middle, long 1 low put", False),
+    Family("iron_butterfly", "neutral", "short_vol", True, "sell an at-the-money call and put, buy a wing on each side", False),
+    Family("broken_wing_butterfly", "neutral", "short_vol", True, "a put butterfly with a wider lower wing: little or no debit, risk only below", False),
+    Family("reverse_iron_condor", "volatility", "long_vol", True, "a put debit spread below and a call debit spread above: paid on a move either way", False),
     Family("naked_call", "bearish", "short_vol", False, "an uncovered short call: unlimited loss — never executed", False),
     Family("naked_put", "bullish", "short_vol", False, "an uncovered short put without cash: never executed", False),
     Family("stock", "bullish", "neutral", True, "shares only (the comparison every option trade must beat)", True),
@@ -508,6 +512,80 @@ def call_butterfly(
         raise StructureError("a butterfly's strikes run low < middle < high")
     return Structure("call_butterfly", mid.underlying, (
         Leg("long", 1, low_price, low), Leg("short", 2, mid_price, mid), Leg("long", 1, high_price, high),
+    ))  # fmt: skip
+
+
+def put_butterfly(
+    high: OptionContract,
+    high_price: float,
+    mid: OptionContract,
+    mid_price: float,
+    low: OptionContract,
+    low_price: float,
+) -> Structure:
+    for c in (low, mid, high):
+        _need(c, "put")
+    _same_expiry(low, mid, high)
+    if not (low.strike < mid.strike < high.strike):
+        raise StructureError("a butterfly's strikes run low < middle < high")
+    return Structure("put_butterfly", mid.underlying, (
+        Leg("long", 1, high_price, high), Leg("short", 2, mid_price, mid), Leg("long", 1, low_price, low),
+    ))  # fmt: skip
+
+
+def iron_butterfly(
+    long_put: OptionContract, long_put_price: float, short_put: OptionContract, short_put_price: float,
+    short_call: OptionContract, short_call_price: float, long_call: OptionContract, long_call_price: float,
+) -> Structure:  # fmt: skip
+    _same_expiry(long_put, short_put, short_call, long_call)
+    for c, k in ((long_put, "put"), (short_put, "put"), (short_call, "call"), (long_call, "call")):
+        _need(c, k)
+    if not (long_put.strike < short_put.strike == short_call.strike < long_call.strike):
+        raise StructureError(
+            "an iron butterfly sells one strike's call and put, with a long wing below and above"
+        )
+    return Structure("iron_butterfly", short_put.underlying, (
+        Leg("long", 1, long_put_price, long_put), Leg("short", 1, short_put_price, short_put),
+        Leg("short", 1, short_call_price, short_call), Leg("long", 1, long_call_price, long_call),
+    ))  # fmt: skip
+
+
+def broken_wing_butterfly(
+    high: OptionContract,
+    high_price: float,
+    mid: OptionContract,
+    mid_price: float,
+    low: OptionContract,
+    low_price: float,
+) -> Structure:
+    """A put butterfly whose lower wing is wider than its upper one: the extra width usually pays the debit, and
+    the risk (still limited by the low put) sits only below the lower strike."""
+    for c in (low, mid, high):
+        _need(c, "put")
+    _same_expiry(low, mid, high)
+    if not (low.strike < mid.strike < high.strike) or not (
+        mid.strike - low.strike > high.strike - mid.strike
+    ):
+        raise StructureError("a broken-wing butterfly's lower wing is wider than its upper wing")
+    return Structure("broken_wing_butterfly", mid.underlying, (
+        Leg("long", 1, high_price, high), Leg("short", 2, mid_price, mid), Leg("long", 1, low_price, low),
+    ))  # fmt: skip
+
+
+def reverse_iron_condor(
+    short_put: OptionContract, short_put_price: float, long_put: OptionContract, long_put_price: float,
+    long_call: OptionContract, long_call_price: float, short_call: OptionContract, short_call_price: float,
+) -> Structure:  # fmt: skip
+    _same_expiry(short_put, long_put, long_call, short_call)
+    for c, k in ((short_put, "put"), (long_put, "put"), (long_call, "call"), (short_call, "call")):
+        _need(c, k)
+    if not (short_put.strike < long_put.strike <= long_call.strike < short_call.strike):
+        raise StructureError(
+            "a reverse iron condor's strikes run short put < long put ≤ long call < short call"
+        )
+    return Structure("reverse_iron_condor", long_put.underlying, (
+        Leg("short", 1, short_put_price, short_put), Leg("long", 1, long_put_price, long_put),
+        Leg("long", 1, long_call_price, long_call), Leg("short", 1, short_call_price, short_call),
     ))  # fmt: skip
 
 

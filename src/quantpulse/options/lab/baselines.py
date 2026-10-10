@@ -63,7 +63,16 @@ def simple_option(g: Genome) -> Genome:
     }  # fmt: skip
     if g.direction == "bearish":
         return Genome("long_put", "bearish", dte_min=35, dte_max=55, delta_target=0.5, **base)
-    if g.family in ("bull_put_spread", "cash_secured_put", "covered_call", "iron_condor", "bear_call_spread"):
+    if g.family in (
+        "bull_put_spread",
+        "cash_secured_put",
+        "covered_call",
+        "iron_condor",
+        "bear_call_spread",
+        "iron_butterfly",
+        "put_butterfly",
+        "broken_wing_butterfly",
+    ):
         return Genome("bull_put_spread", "bullish", dte_min=25, dte_max=45, delta_target=0.3, width_pct=0.05,
                       **{**base, "take_profit": 0.5, "stop_loss": 2.0})  # fmt: skip
     return Genome("long_call", "bullish", dte_min=35, dte_max=55, delta_target=0.5, **base)

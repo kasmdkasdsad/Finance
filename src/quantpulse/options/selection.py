@@ -100,8 +100,42 @@ def _mid(q: OptionQuote) -> float:
     return q.mid or 0.0
 
 
+CALENDAR_GAP = (25, 75)  # a calendar's later expiration: 25 to 75 days after the nearer one
+
+
+def _calendars(spec: Spec, quotes: Sequence[OptionQuote], spot: float, now: datetime) -> list[Candidate]:
+    """Calendars: for every near expiration inside the DTE window, the at-the-money call sold there and the
+    same strike bought at the first expiration ``CALENDAR_GAP`` later (both two-sided)."""
+    by_exp: dict[date, list[OptionQuote]] = {}
+    for q in quotes:
+        if q.contract.kind == "call" and q.two_sided and not q.contract.expired(now):
+            by_exp.setdefault(q.contract.expiration, []).append(q)
+    out: list[Candidate] = []
+    exps = sorted(by_exp)
+    for near_exp in exps:
+        near_dte = (near_exp - now.date()).days
+        if not spec.dte_min <= near_dte <= spec.dte_max:
+            continue
+        far_exp = next((e for e in exps if CALENDAR_GAP[0] <= (e - near_exp).days <= CALENDAR_GAP[1]), None)
+        near = _by_strike(by_exp[near_exp], "call", spot)
+        if far_exp is None or near is None:
+            continue
+        far = next((q for q in by_exp[far_exp] if q.contract.strike == near.contract.strike), None)
+        if far is None:
+            continue
+        iv = quote_iv(near, now) or 0.3
+        try:
+            st = s.calendar(near.contract, _mid(near), far.contract, _mid(far), model_vol=iv)
+        except s.StructureError:
+            continue
+        out.append(Candidate(st, [near, far], near_exp, near.contract.dte(now)))
+    return out
+
+
 def build(spec: Spec, quotes: Sequence[OptionQuote], spot: float, now: datetime) -> list[Candidate]:
     """One candidate per eligible expiration (the structure the family calls for, if the chain has it)."""
+    if spec.family == "calendar":
+        return _calendars(spec, quotes, spot, now)
     by_exp: dict[date, list[OptionQuote]] = {}
     for q in quotes:
         dte = q.contract.dte(now)
@@ -200,6 +234,64 @@ def _one(
             mid,
             hi,
         ]
+    if f == "put_butterfly":
+        mid = _by_strike(qs, "put", spot)
+        if not mid:
+            return None
+        lo = _by_strike(qs, "put", mid.contract.strike * (1 - w), above=False)
+        hi = _by_strike(qs, "put", mid.contract.strike * (1 + w), above=True)
+        if not (lo and hi) or not lo.contract.strike < mid.contract.strike < hi.contract.strike:
+            return None
+        return s.put_butterfly(hi.contract, _mid(hi), mid.contract, _mid(mid), lo.contract, _mid(lo)), [
+            hi,
+            mid,
+            lo,
+        ]
+    if f == "iron_butterfly":
+        sc = _by_strike(qs, "call", spot)
+        sp = next((q for q in qs if q.contract.kind == "put" and sc and q.contract.strike == sc.contract.strike
+                   and q.two_sided), None)  # fmt: skip
+        if not (sc and sp):
+            return None
+        lp = _by_strike(qs, "put", sp.contract.strike * (1 - wing), above=False)
+        lc = _by_strike(qs, "call", sc.contract.strike * (1 + wing), above=True)
+        if (
+            not (lp and lc)
+            or lp.contract.strike >= sp.contract.strike
+            or lc.contract.strike <= sc.contract.strike
+        ):
+            return None
+        return s.iron_butterfly(lp.contract, _mid(lp), sp.contract, _mid(sp), sc.contract, _mid(sc), lc.contract,
+                                _mid(lc)), [lp, sp, sc, lc]  # fmt: skip
+    if f == "broken_wing_butterfly":
+        mid = _by_delta(qs, "put", t, now)
+        if not mid:
+            return None
+        hi = _by_strike(qs, "put", mid.contract.strike * (1 + w), above=True)
+        if not hi or hi.contract.strike <= mid.contract.strike:
+            return None
+        gap = hi.contract.strike - mid.contract.strike
+        lo = _by_strike(qs, "put", mid.contract.strike - 2 * gap, above=False)
+        if not lo or not mid.contract.strike - lo.contract.strike > gap:
+            return None
+        return s.broken_wing_butterfly(hi.contract, _mid(hi), mid.contract, _mid(mid), lo.contract, _mid(lo)), [
+            hi, mid, lo,
+        ]  # fmt: skip
+    if f == "reverse_iron_condor":
+        lp = _by_delta(qs, "put", t, now)
+        lc = _by_delta(qs, "call", t, now)
+        if not (lp and lc) or lp.contract.strike > lc.contract.strike:
+            return None
+        sp = _by_strike(qs, "put", lp.contract.strike * (1 - w), above=False)
+        sc = _by_strike(qs, "call", lc.contract.strike * (1 + w), above=True)
+        if (
+            not (sp and sc)
+            or sp.contract.strike >= lp.contract.strike
+            or sc.contract.strike <= lc.contract.strike
+        ):
+            return None
+        return s.reverse_iron_condor(sp.contract, _mid(sp), lp.contract, _mid(lp), lc.contract, _mid(lc), sc.contract,
+                                     _mid(sc)), [sp, lp, lc, sc]  # fmt: skip
     if f == "covered_call":
         c = _by_delta(qs, "call", t, now)
         stock = spec.stock_price or spot
@@ -312,8 +404,14 @@ def evaluate(
         "liquidity": worst_liq,
         "defined_risk": st.defined_risk,
     }
-    if terminal is not None and st.single_expiry:
-        pnl = np.asarray(st.pnl_at_expiry(terminal), dtype=float) - (fill_debit - mid_debit) - fee
+    multi = not st.single_expiry and atm_iv is not None and years > 0
+    if multi and terminal is None:
+        terminal = market_distribution(spot, float(per_leg[0]["iv"] or atm_iv), years, n=1500)  # type: ignore[arg-type]
+        distribution = "market"
+    if terminal is not None and (st.single_expiry or multi):
+        at_first = (np.asarray(st.pnl_at_expiry(terminal), dtype=float) if st.single_expiry
+                    else _pnl_at_first_expiry(st, terminal, [p["iv"] for p in per_leg]))  # fmt: skip
+        pnl = at_first - (fill_debit - mid_debit) - fee
         worst = np.sort(pnl)[: max(1, len(pnl) // 20)]
         m.update(
             distribution=distribution,
@@ -326,6 +424,50 @@ def evaluate(
         )
     cand.metrics = m
     return cand
+
+
+def _bsm_vec(
+    kind: str, spot: np.ndarray, strike: float, years: float, vol: float, rate: float = 0.04
+) -> np.ndarray:
+    """Black–Scholes prices for many spot prices at once (no dividends)."""
+    from scipy.special import ndtr
+
+    if years <= 0 or vol <= 0:
+        return np.maximum(spot - strike, 0.0) if kind == "call" else np.maximum(strike - spot, 0.0)
+    sq = vol * math.sqrt(years)
+    d1 = (np.log(np.maximum(spot, 1e-9) / strike) + (rate + 0.5 * vol * vol) * years) / sq
+    d2 = d1 - sq
+    disc = math.exp(-rate * years)
+    if kind == "call":
+        return np.asarray(spot * ndtr(d1) - strike * disc * ndtr(d2))
+    return np.asarray(strike * disc * ndtr(-d2) - spot * ndtr(-d1))
+
+
+def _pnl_at_first_expiry(
+    st: s.Structure, terminal: np.ndarray, leg_ivs: Sequence[float | None]
+) -> np.ndarray:
+    """Several expirations: P&L per unit when the first expires — expired legs at intrinsic value, later legs
+    valued by Black–Scholes at their own implied volatility (sticky strike: an approximation, labelled so by the
+    candidate's ``distribution``)."""
+    first = st.first_expiration
+    assert first is not None
+    total = np.zeros_like(terminal, dtype=float)
+    ivs = iter(leg_ivs)
+    for leg in st.legs:
+        c = leg.contract
+        if c is None:
+            total += leg.sign * leg.units * (terminal - leg.price)
+            continue
+        iv = next(ivs, None)
+        if c.expiration <= first:
+            value = np.asarray(leg.value_at_expiry(terminal), dtype=float)
+        else:
+            years_left = (c.expiration - first).days / 365.0
+            value = _bsm_vec(
+                c.kind, terminal, c.strike, years_left, float(iv or st.meta.get("model_vol", 0.3))
+            )
+        total += leg.sign * leg.units * (value - leg.price)
+    return total
 
 
 def score(cand: Candidate, *, prefer_defined: bool = True) -> float | None:

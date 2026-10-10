@@ -851,6 +851,32 @@ class Settings(BaseSettings):
     options_research_time: str = Field(
         default="16:40", description="HH:MM New York: the daily research run (after the close)."
     )
+    options_ml_enabled: bool = Field(
+        default=True,
+        description="Train the options edge model while the market is closed and record its view of every candidate. "
+        "It votes only once the model registry makes it AUTHORITATIVE (it never sends an order or changes a limit).",
+    )
+    options_ml_budget_seconds: float = Field(
+        default=1500.0,
+        ge=60,
+        le=3600,
+        description="Time one training run may take (data, fit and validation).",
+    )
+    options_ml_step_days: int = Field(
+        default=3, ge=1, le=20, description="Probe the model-priced history every this many trading days."
+    )
+    options_ml_max_rows: int = Field(
+        default=30000, ge=500, le=200000, description="At most this many model-priced training rows a run."
+    )
+    options_ml_min_rows: int = Field(
+        default=600, ge=100, le=100000, description="Fewer labelled rows than this: no model is fitted."
+    )
+    options_ml_recorded_days: int = Field(
+        default=90, ge=5, le=730, description="Recorded chains from this many days back become training rows."
+    )
+    options_ml_trees: int = Field(
+        default=150, ge=20, le=1000, description="Boosting iterations per gradient-boosted component."
+    )
     evolution_enabled: bool = Field(
         default=True,
         description="Measure the market daily (volatility, microstructure, options, correlations, liquidity, "

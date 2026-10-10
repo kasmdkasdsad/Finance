@@ -52,12 +52,13 @@ class CandidateContext:
     decay: str | None = None
     risk: Mapping[str, Any] | None = None  # the risk book's preview
     paper: bool = False  # would this be a paper order (not only shadow)?
+    ml: Mapping[str, Any] | None = None  # the options edge model's assessment (quantpulse.options.ml)
 
     def shadow_only(self, book: Mapping[str, Any]) -> CandidateContext:
         """The same candidate as a shadow trade alone: no order, so no risk preview, in the strategy's own book."""
         return CandidateContext(view=self.view, version=self.version, genome=self.genome, cand=self.cand,
                                 now=self.now, stock_view=self.stock_view, book=book, weight=self.weight,
-                                decay=self.decay)  # fmt: skip
+                                decay=self.decay, ml=self.ml)  # fmt: skip
 
 
 def _op(agent: str, score: float, reasons: list[str], *, veto: bool = False, abstain: bool = False,
@@ -345,6 +346,50 @@ def meta_learning(c: CandidateContext) -> Opinion:
                                                     "context (recency-weighted, never below the floor)"])  # fmt: skip
 
 
+ML_OUT_OF_RANGE = 0.25  # above this share of features outside the training range the model abstains
+
+
+def options_ml(c: CandidateContext) -> Opinion:
+    """The options edge model (quantpulse.options.ml): its expected return per dollar at risk, a conformal 80%
+    range and a calibrated probability of profit. Always recorded (the prediction and the feature vector, so its
+    live record can be graded); it votes only once the model registry has made it AUTHORITATIVE — never a veto:
+    a model informs, the hard checks decide."""
+    m = c.ml
+    if not m:
+        return _op(
+            "OptionsMLAgent",
+            0,
+            ["no options edge model yet: the rule's expected value decides"],
+            abstain=True,
+        )
+    p = m.get("prediction") or {}
+    exp, lo, hi, pw = p.get("expected"), p.get("lower"), p.get("upper"), p.get("p_win")
+    data: dict[str, Any] = {
+        "model_id": m.get("model_id"),
+        "stage": m.get("stage"),
+        "prediction": p,
+        "x": m.get("x"),
+    }
+    if exp is None or lo is None or hi is None or pw is None:
+        return _op("OptionsMLAgent", 0, ["the model returned no estimate"], abstain=True, **data)
+    drivers = ", ".join(f"{n} {v:+.2f}" for n, v in (p.get("drivers") or [])[:3])
+    reasons = [f"model: {exp:+.0%} per $ at risk expected (80% range {lo:+.0%} to {hi:+.0%}), P(profit) {pw:.0%}"
+               + (f"; driven by {drivers}" if drivers else "")]  # fmt: skip
+    oor = float(p.get("out_of_range") or 0.0)
+    if oor > ML_OUT_OF_RANGE:
+        return _op("OptionsMLAgent", 0, [*reasons, f"{oor:.0%} of its inputs are outside what it learned from: no view"],
+                   abstain=True, **data)  # fmt: skip
+    if not m.get("authoritative"):
+        return _op("OptionsMLAgent", 0, [*reasons, f"shadow model ({m.get('stage') or 'CANDIDATE'}): recorded and "
+                                         "graded, not voting until it beats the rule on live outcomes"], abstain=True, **data)  # fmt: skip
+    score = max(-1.0, min(1.0, exp / 0.25))
+    if lo > 0:  # even the conservative end of the range makes money
+        score = max(score, 0.6)
+    elif hi < 0:  # even the optimistic end loses
+        score = min(score, -0.6)
+    return _op("OptionsMLAgent", score, reasons, **data)
+
+
 def strategy_decay(c: CandidateContext) -> Opinion:
     d = c.decay
     if d in ("DEGRADING", "BROKEN"):
@@ -371,6 +416,7 @@ AGENTS: tuple[tuple[str, Callable[[CandidateContext], Opinion], float, str], ...
     ("StrategyCriticAgent", strategy_critic, 1.0, "is the strategy validated for live use?"),
     ("MetaLearningAgent", meta_learning, 0.8, "how has this strategy done in this context?"),
     ("StrategyDecayAgent", strategy_decay, 1.0, "is the strategy decaying?"),
+    ("OptionsMLAgent", options_ml, 1.5, "what does the validated edge model expect, and how sure is it?"),
 )  # fmt: skip
 
 # the lab-side agents, for the record of who does what

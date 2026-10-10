@@ -290,6 +290,44 @@ def _learning() -> None:
     _table(lr.get("lessons"), ["memory", "observation", "hypothesis", "confidence", "n", "status"])
 
 
+def _ml() -> None:
+    """The options edge model: its registry stage, its out-of-sample record against the rule, its live record
+    and what drives it (it votes only once AUTHORITATIVE)."""
+    m = guarded(lambda: api().get("/options/ml"), "edge model") or {}
+    model = m.get("model")
+    if not model:
+        st.caption(m.get("note") or "No edge model yet: it is trained after the close once enough labelled "
+                   "outcomes exist. Until then the rule's expected value per dollar at risk decides.")  # fmt: skip
+        return
+    stage = model.get("stage") or "CANDIDATE"
+    votes = "votes in the Brain's deliberation" if model.get("authoritative") else (
+        "recorded with every candidate, not voting until it beats the rule on live outcomes")  # fmt: skip
+    st.markdown(f"**{stage}** — {votes}")
+    oos, live = model.get("oos") or {}, model.get("live_record") or {}
+    conformal, wf, stress = (
+        model.get("conformal") or {},
+        model.get("walk_forward") or {},
+        model.get("stress") or {},
+    )
+    c = st.columns(4)
+    c[0].metric("Out-of-sample rank correlation", f"{oos.get('ic') or 0:+.3f}", f"rule {oos.get('rule_ic') or 0:+.3f}",
+                delta_color="off")  # fmt: skip
+    c[1].metric("Top fifth, per $ at risk", pct(oos.get("top_quintile"), 1, signed=True),
+                f"rule {pct(oos.get('rule_top_quintile'), 1, signed=True)}", delta_color="off")  # fmt: skip
+    c[2].metric("80% interval covered", pct(conformal.get("holdout_coverage"), 0))
+    c[3].metric("Live record", f"{live.get('n') or 0} positions",
+                None if live.get("score") is None else f"{live['score']:+.2f} vs rule {live.get('champion_score') or 0:+.2f}",
+                delta_color="off")  # fmt: skip
+    st.caption(
+        f"Walk-forward {'passed' if wf.get('passed') else 'not passed'} ({wf.get('windows_beating_rule', 0)} of "
+        f"{wf.get('windows', 0)} held-out windows beat the rule) · stress {'passed' if stress.get('passed') else 'not passed'}"
+        f" · trained {model.get('trained_at') or '—'} on {sum((model.get('rows') or {}).values())} rows"
+    )  # fmt: skip
+    imp = model.get("importance") or []
+    _table([{"feature": n, "importance": round(v, 4)} for n, v in imp[:10]], ["feature", "importance"],
+           empty="No feature importance yet.")  # fmt: skip
+
+
 def _counterfactuals() -> None:
     _table(guarded(lambda: api().get("/options/counterfactuals"), "counterfactuals"),
            ["position_id", "alternative", "pnl", "chosen_pnl", "better_than_chosen", "data", "at"])  # fmt: skip
@@ -341,6 +379,11 @@ def render() -> None:
     if tabs[4].open:
         with tabs[4]:
             _learning()
+            ui.section(
+                "Edge model",
+                "A learned estimate of each candidate's return per dollar at risk, validated out of sample against the rule it would replace.",
+            )
+            _ml()
             ui.section("Counterfactuals")
             _counterfactuals()
     if tabs[5].open:

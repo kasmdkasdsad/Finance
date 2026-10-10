@@ -91,3 +91,50 @@ def test_dollar_amounts_never_turn_into_a_formula():
     line = today_split(160.0, [{"intraday_pl": 120.0}, {"intraday_pl": -20.0}])
     assert line is not None and line.count("$") == 3
     assert ui.md(line).count("\\$") == 3
+
+
+class _Col:
+    def __init__(self, out: list[str]) -> None:
+        self.out = out
+
+    def metric(self, label, value, delta=None, **_):
+        self.out.append(f"{label}: {value} ({delta})")
+
+
+class _St:
+    """Records what a view writes, in order."""
+
+    def __init__(self) -> None:
+        self.out: list[str] = []
+
+    def markdown(self, s, **_):
+        self.out.append(str(s))
+
+    def caption(self, s, **_):
+        self.out.append(str(s))
+
+    def columns(self, n, **_):
+        return [_Col(self.out) for _ in range(n)]
+
+    def dataframe(self, df, **_):
+        self.out.append("table:" + ",".join(df.columns))
+
+
+def test_the_edge_model_panel_says_what_it_is_and_whether_it_votes(monkeypatch):
+    fake = _St()
+    monkeypatch.setattr(options_brain, "st", fake)
+    monkeypatch.setattr(options_brain, "guarded", lambda fn, what="": {"model": None, "note": None})
+    options_brain._ml()
+    assert "No edge model yet" in fake.out[0] and "rule" in fake.out[0]
+    fake.out.clear()
+    model = {"stage": "PAPER_SHADOW", "authoritative": False, "oos": {"ic": 0.18, "rule_ic": 0.12, "top_quintile": 0.03,
+             "rule_top_quintile": 0.01}, "conformal": {"holdout_coverage": 0.81}, "walk_forward": {"passed": True,
+             "windows": 5, "windows_beating_rule": 4}, "stress": {"passed": False}, "live_record": {"n": 12, "score": None},
+             "rows": {"model": 900, "recorded": 40}, "trained_at": "2026-10-10T21:00:00+00:00",
+             "importance": [["vrp", 0.05], ["iv_skew", 0.02]]}  # fmt: skip
+    monkeypatch.setattr(options_brain, "guarded", lambda fn, what="": {"model": model})
+    options_brain._ml()
+    text = "\n".join(fake.out)
+    assert "**PAPER_SHADOW**" in text and "not voting" in text
+    assert "+0.180 (rule +0.120)" in text and "4 of 5 held-out windows beat the rule" in text
+    assert "stress not passed" in text and "940 rows" in text and "table:feature,importance" in text

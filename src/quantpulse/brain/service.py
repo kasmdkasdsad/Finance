@@ -158,6 +158,7 @@ class BrainService:
         )
         self.lab = StrategyLab(settings, clock, db, market, data, self.store)
         self.options_lab: Any = None  # the options research lab (the container sets it when options are on)
+        self.options_ml: Any = None  # the options edge model (trained by the options_ml research job)
         self.improvements = ImprovementEngine(
             db, settings.brain_min_reliability_observations, settings.brain_min_confidence
         )
