@@ -1,0 +1,32 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+data/*.db
+data/*.db-*
+*.db-journal
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# cloud deployment: secrets, database dumps and logs stay on the server
+deploy/.env
+deploy/*.env
+!deploy/*.env.example
+deploy/.deploy-*
+deploy/state/
+deploy/import/
+backups/
+*.dump
+*.sql.gz
+
+# launcher logs and state (never committed)
+logs/

@@ -1,0 +1,225 @@
+/* QuantPulse dashboard: a calm, readable layout on a desktop and on a phone.
+   Colours come from the theme (.streamlit/config.toml); here only neutral, translucent tones that work in
+   light and dark alike. */
+
+/* ---------- page frame ---------- */
+[data-testid="stMainBlockContainer"] {
+  max-width: 1180px;
+  padding-top: 4.75rem; /* clear of the fixed top bar */
+  padding-bottom: 4rem;
+}
+[data-testid="stDecoration"] { display: none; }
+
+h1, h2, h3 { letter-spacing: -0.015em; }
+[data-testid="stCaptionContainer"], .stCaption { line-height: 1.45; }
+
+/* ---------- cards ---------- */
+[class*="st-key-kpis"] [data-testid="stColumn"] > [data-testid="stVerticalBlock"],
+[class*="st-key-kpis"] [data-testid="stColumn"] [data-testid="stElementContainer"] { height: 100%; }
+[class*="st-key-kpis"] [data-testid="stMetric"] { height: 100%; padding: 0.8rem 1rem; }
+
+/* the emergency stops: red, whatever the theme's accent */
+.st-key-remote_stop button, .st-key-brain_kill button {
+  background: #DC2626; border-color: #DC2626; color: #fff;
+}
+.st-key-remote_stop button:hover, .st-key-brain_kill button:hover { background: #B91C1C; border-color: #B91C1C; color: #fff; }
+[data-testid="stMetricLabel"] p {
+  font-size: 0.8rem;
+  font-weight: 500;
+  opacity: 0.72;
+}
+[data-testid="stMetricValue"] {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-testid="stExpander"] details {
+  border-radius: 0.65rem;
+}
+[data-testid="stExpander"] summary p { font-weight: 500; }
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p { margin-bottom: 0.15rem; }
+
+/* section titles: a little air above, little below */
+.qp-section h3 { margin-top: 0.6rem; }
+
+/* the page header: title, the PAPER pill and a muted one-line subtitle */
+.st-key-qp_header { margin-bottom: 0.25rem; }
+.st-key-qp_header h1 { padding-bottom: 0; }
+
+/* a status line: one sentence, coloured dot */
+.qp-status {
+  display: flex; align-items: flex-start; gap: 0.6rem;
+  padding: 0.8rem 1rem; border-radius: 0.65rem;
+  border: 1px solid rgba(128, 128, 128, 0.22);
+  font-weight: 500; line-height: 1.4;
+}
+.qp-status .qp-dot { flex: 0 0 auto; width: 0.7rem; height: 0.7rem; border-radius: 50%; margin-top: 0.35rem; }
+.qp-status small { display: block; font-weight: 400; opacity: 0.75; margin-top: 0.15rem; }
+.qp-green  { background: rgba(34, 197, 94, 0.09);  border-color: rgba(34, 197, 94, 0.35); }
+.qp-green  .qp-dot { background: #22C55E; }
+.qp-yellow { background: rgba(245, 158, 11, 0.10); border-color: rgba(245, 158, 11, 0.40); }
+.qp-yellow .qp-dot { background: #F59E0B; }
+.qp-red    { background: rgba(239, 68, 68, 0.09);  border-color: rgba(239, 68, 68, 0.40); }
+.qp-red    .qp-dot { background: #EF4444; }
+.qp-gray   { background: rgba(128, 128, 128, 0.07); }
+.qp-gray   .qp-dot { background: #94A3B8; }
+
+/* key/value facts in a quiet grid */
+.qp-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.35rem 1.25rem; }
+.qp-facts div { font-size: 0.86rem; line-height: 1.35; }
+.qp-facts span { display: block; font-size: 0.74rem; opacity: 0.62; text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* ---------- depth and accent (translucent tones: light and dark alike) ---------- */
+/* a soft blue glow behind the page head */
+[data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(1100px 420px at 50% -180px, rgba(37, 99, 235, 0.11), transparent 70%),
+    radial-gradient(700px 300px at 92% -120px, rgba(16, 185, 129, 0.07), transparent 70%),
+    var(--qp-bg, transparent);
+}
+/* the top bar: frosted, with a hairline under it */
+[data-testid="stHeader"] {
+  background: color-mix(in srgb, var(--qp-bg, #fff) 78%, transparent);
+  backdrop-filter: saturate(160%) blur(10px);
+  -webkit-backdrop-filter: saturate(160%) blur(10px);
+  border-bottom: 1px solid color-mix(in srgb, var(--qp-line, #E3E7ED) 70%, transparent);
+}
+/* KPI cards: a thin accent line on top, a soft shadow, a small lift on hover */
+[class*="st-key-kpis"] [data-testid="stMetric"] {
+  position: relative; overflow: hidden;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 18px rgba(15, 23, 42, 0.05);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+[class*="st-key-kpis"] [data-testid="stMetric"]::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+  background: linear-gradient(90deg, #2563EB, #0EA5E9 55%, #10B981);
+}
+[class*="st-key-kpis"] [data-testid="stMetric"]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.05), 0 10px 26px rgba(15, 23, 42, 0.08);
+}
+/* section titles: a short accent bar before them */
+[data-testid="stMain"] h3::before {
+  content: ""; display: inline-block; width: 4px; height: 0.95em; border-radius: 2px; margin-right: 0.55rem;
+  vertical-align: -0.1em; background: linear-gradient(180deg, #2563EB, #0EA5E9);
+}
+/* tabs: the selected one sits on a tinted pill */
+[data-testid="stTabs"] [role="tablist"] { gap: 0.25rem; }
+[data-testid="stTabs"] [data-testid="stTab"] { border-radius: 0.55rem 0.55rem 0 0; padding: 0.45rem 0.85rem; }
+[data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] { background: rgba(37, 99, 235, 0.08); }
+/* tables, bordered containers and folded sections: rounded, with a whisper of shadow */
+[data-testid="stDataFrame"] { border-radius: 0.65rem; overflow: hidden; }
+[data-testid="stExpander"] details,
+[class*="st-key-home_equity"] {
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+/* the status line: a stronger edge on the left */
+.qp-status { border-left-width: 4px; }
+
+/* a chart's own head: label, value and change */
+.qp-chart-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.35rem 0.65rem; padding: 0.15rem 0.25rem 0; }
+.qp-chart-head span { font-size: 0.8rem; font-weight: 500; opacity: 0.72; }
+.qp-chart-head b { font-size: 1.3rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.qp-chart-head em {
+  font-style: normal; font-size: 0.78rem; font-weight: 600; padding: 0.12rem 0.5rem; border-radius: 999px;
+}
+.qp-up   { color: #16A34A; background: rgba(34, 197, 94, 0.13); }
+.qp-down { color: #DC2626; background: rgba(239, 68, 68, 0.13); }
+
+/* the strategy ladder: stages left to right; filled ones stand out, trading ones in green */
+.qp-ladder { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0.55rem; margin: 0.2rem 0 0.9rem; }
+.qp-step {
+  position: relative; padding: 0.8rem 0.6rem 0.7rem; text-align: center; border-radius: 0.75rem;
+  border: 1px solid rgba(128, 128, 128, 0.22); background: rgba(128, 128, 128, 0.04);
+}
+.qp-step b { display: block; font-size: 1.6rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; opacity: 0.35; }
+.qp-step span { display: block; margin-top: 0.25rem; font-size: 0.82rem; font-weight: 600; }
+.qp-step small { display: block; margin-top: 0.1rem; font-size: 0.7rem; line-height: 1.25; opacity: 0.6; }
+.qp-step-on b { opacity: 1; }
+.qp-step-on { border-color: rgba(37, 99, 235, 0.45); background: rgba(37, 99, 235, 0.07); }
+.qp-step-live { border-style: dashed; }
+.qp-step-live.qp-step-on {
+  border-style: solid; border-color: rgba(16, 185, 129, 0.6); background: rgba(16, 185, 129, 0.1);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.08);
+}
+.qp-step:not(:last-child)::after {
+  content: "›"; position: absolute; right: -0.48rem; top: 50%; transform: translateY(-55%);
+  font-size: 1.15rem; line-height: 1; opacity: 0.35; z-index: 1;
+}
+
+/* ---------- sign in / sign out ---------- */
+.qp-login {
+  max-width: 380px; margin: 9vh auto 0; padding: 2.1rem 2rem 1.8rem;
+  border: 1px solid rgba(128, 128, 128, 0.25); border-radius: 1rem;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+.qp-login-mark {
+  width: 2.6rem; height: 2.6rem; border-radius: 0.7rem; display: flex; align-items: center; justify-content: center;
+  background: #2563EB; color: #fff; font-weight: 700; letter-spacing: 0.02em; margin-bottom: 1rem;
+}
+.qp-login h1 { font-size: 1.45rem; margin: 0; padding: 0; }
+.qp-login-sub { margin: 0.25rem 0 1.4rem; opacity: 0.7; font-size: 0.9rem; }
+.qp-login label { display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 0.35rem; }
+.qp-login input[type="password"] {
+  width: 100%; box-sizing: border-box; padding: 0.7rem 0.8rem; font-size: 1rem; border-radius: 0.55rem;
+  border: 1px solid rgba(128, 128, 128, 0.4); background: transparent; color: inherit; outline: none;
+}
+.qp-login input[type="password"]:focus { border-color: #2563EB; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2); }
+.qp-login .qp-login-remember {
+  display: flex; align-items: center; gap: 0.5rem; margin: 0.9rem 0 1.2rem; font-weight: 400; opacity: 0.85;
+}
+.qp-login button, .qp-signout button {
+  width: 100%; padding: 0.7rem; font-size: 0.95rem; font-weight: 600; border: 0; border-radius: 0.55rem;
+  background: #2563EB; color: #fff; cursor: pointer;
+}
+.qp-login button:hover { background: #1D4ED8; }
+.qp-login-error {
+  margin: -0.4rem 0 1rem; padding: 0.55rem 0.75rem; border-radius: 0.5rem; font-size: 0.88rem;
+  background: rgba(239, 68, 68, 0.1); color: #DC2626; border: 1px solid rgba(239, 68, 68, 0.35);
+}
+.qp-signout button {
+  background: transparent; color: inherit; border: 1px solid rgba(128, 128, 128, 0.35); font-weight: 500;
+}
+.qp-signout button:hover { border-color: rgba(128, 128, 128, 0.7); }
+
+/* the phone tab bar: hidden on wide screens (the top bar is there) */
+.st-key-qp_tabbar { display: none !important; }
+
+/* ---------- phones ---------- */
+@media (max-width: 640px) {
+  [data-testid="stMainBlockContainer"] { padding: 4.25rem 0.85rem 3rem; }
+  h1 { font-size: 1.45rem !important; }
+  /* KPI rows: two cards per line instead of one long column */
+  [class*="st-key-kpis"] [data-testid="stHorizontalBlock"] { flex-wrap: wrap; gap: 0.6rem; }
+  [class*="st-key-kpis"] [data-testid="stColumn"] {
+    flex: 1 1 calc(50% - 0.6rem) !important; min-width: calc(50% - 0.6rem) !important; width: auto !important;
+  }
+  [class*="st-key-kpis"] [data-testid="stMetric"] { padding: 0.6rem 0.75rem; }
+  [data-testid="stMetricValue"] { font-size: 1.25rem !important; }
+  .qp-login { margin-top: 4vh; padding: 1.6rem 1.25rem; box-shadow: none; }
+  [data-testid="stHeaderLogo"], [data-testid="stLogo"] { height: 1.5rem !important; max-width: 9.5rem; object-fit: contain; }
+  [data-testid="stTabs"] [data-testid="stTab"] { padding-left: 0.6rem; padding-right: 0.6rem; }
+  /* the ladder: four stages a line */
+  .qp-ladder { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.45rem; }
+  .qp-step { padding: 0.6rem 0.35rem 0.55rem; }
+  .qp-step b { font-size: 1.3rem; }
+  .qp-step small { display: none; }
+  .qp-step:nth-child(4n)::after { display: none; }
+
+  /* the tab bar: the five main pages, one tap away, fixed to the bottom of the screen */
+  [data-testid="stMainBlockContainer"] { padding-bottom: 6.5rem; }
+  .st-key-qp_tabbar {
+    display: flex !important; position: fixed; left: 0; right: 0; bottom: 0; z-index: 999990;
+    justify-content: space-around; align-items: stretch; gap: 0 !important;
+    padding: 0.3rem 0.25rem calc(0.35rem + env(safe-area-inset-bottom));
+    background: var(--qp-bg, #fff); border-top: 1px solid var(--qp-line, #E3E7ED);
+  }
+  .st-key-qp_tabbar > div { flex: 1 1 0; min-width: 0; width: auto !important; }
+  .st-key-qp_tabbar a {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.1rem;
+    padding: 0.3rem 0.1rem; border-radius: 0.6rem; text-decoration: none;
+  }
+  .st-key-qp_tabbar a span { margin: 0 !important; font-size: 0.68rem; line-height: 1.1; }
+  .st-key-qp_tabbar a [data-testid="stIconMaterial"] { font-size: 1.35rem; }
+}

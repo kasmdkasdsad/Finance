@@ -1,0 +1,14 @@
+# Installed by `./qp install-timers`. Restores the newest backup into a scratch database and checks it (the live
+# database is only read); an alert when it fails.
+[Unit]
+Description=QuantPulse weekly backup restore test
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DEPLOY@
+ExecStart=@DEPLOY@/qp restore-test
+TimeoutStartSec=2h
+Nice=10

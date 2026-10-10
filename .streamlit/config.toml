@@ -1,0 +1,68 @@
+[server]
+headless = true
+runOnSave = false
+
+# the dashboard's own files (frontend/static: the Inter typeface), served at app/static/
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "viewer"
+
+# One calm look in light and dark (the browser's setting picks): Inter, soft borders, rounded cards, one blue.
+[theme]
+font = "Inter, sans-serif"
+headingFont = "Inter, sans-serif"
+baseFontSize = 15
+baseRadius = "0.65rem"
+buttonRadius = "0.55rem"
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+headingFontSizes = ["1.85rem", "1.3rem", "1.1rem", "1rem", "0.95rem", "0.9rem"]
+metricValueFontSize = "1.65rem"
+metricValueFontWeight = 600
+showWidgetBorder = true
+showSidebarBorder = true
+chartCategoricalColors = ["#2563EB", "#0EA5E9", "#F59E0B", "#10B981", "#8B5CF6", "#EF4444", "#64748B"]
+
+[theme.light]
+primaryColor = "#2563EB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6F9"
+textColor = "#0F172A"
+linkColor = "#2563EB"
+borderColor = "#E3E7ED"
+dataframeBorderColor = "#EDF0F4"
+dataframeHeaderBackgroundColor = "#F8FAFC"
+greenColor = "#15803D"
+redColor = "#DC2626"
+orangeColor = "#D97706"
+blueColor = "#2563EB"
+
+[theme.light.sidebar]
+backgroundColor = "#F8FAFC"
+
+[theme.dark]
+primaryColor = "#3B82F6"
+backgroundColor = "#0B0F17"
+secondaryBackgroundColor = "#151B26"
+textColor = "#E5E7EB"
+linkColor = "#60A5FA"
+borderColor = "#262E3B"
+dataframeBorderColor = "#1E2533"
+dataframeHeaderBackgroundColor = "#121824"
+greenColor = "#22C55E"
+redColor = "#F87171"
+orangeColor = "#FBBF24"
+blueColor = "#60A5FA"
+
+[theme.dark.sidebar]
+backgroundColor = "#0F141D"
+
+# Inter (SIL Open Font License, frontend/static/Inter-LICENSE.txt), served by the dashboard itself
+[[theme.fontFaces]]
+family = "Inter"
+url = "app/static/Inter-latin.woff2"
+weight = "400 700"
+style = "normal"

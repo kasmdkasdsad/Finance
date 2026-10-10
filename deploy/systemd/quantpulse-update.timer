@@ -1,0 +1,10 @@
+[Unit]
+Description=Look for a CI-verified QuantPulse commit every 10 minutes
+
+[Timer]
+OnBootSec=15min
+OnCalendar=*:0/10
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
